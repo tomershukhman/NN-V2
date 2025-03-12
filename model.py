@@ -133,7 +133,7 @@ class DogDetector(nn.Module):
                 'anchors': default_anchors
             }
         else:
-            # Use stricter thresholds for inference
+            # Process each image in the batch
             results = []
             for boxes, scores in zip(bbox_pred, conf_pred):
                 # Filter by confidence threshold
@@ -151,7 +151,6 @@ class DogDetector(nn.Module):
                     
                     # Limit maximum detections
                     if len(keep_idx) > MAX_DETECTIONS:
-                        # Sort by confidence and keep top-k
                         scores_for_topk = scores[keep_idx]
                         _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
                         keep_idx = keep_idx[topk_indices]
@@ -164,7 +163,8 @@ class DogDetector(nn.Module):
                 
                 results.append({
                     'boxes': boxes,
-                    'scores': scores
+                    'scores': scores,
+                    'anchors': default_anchors  # Include anchors in each result
                 })
             
             return results

@@ -10,6 +10,59 @@ class VisualizationLogger:
         self.writer = SummaryWriter(tensorboard_dir)
         self.denormalize = Denormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 
+    def log_images(self, prefix, images, predictions, targets, epoch):
+        """Log a sample of images with predictions for visual inspection"""
+        # Show up to 16 images
+        for img_idx in range(min(16, len(images))):
+            image = images[img_idx].cpu()
+            pred_boxes = predictions[img_idx]['boxes'].cpu()
+            pred_scores = predictions[img_idx]['scores'].cpu()
+            gt_boxes = targets[img_idx]['boxes'].cpu()
+            
+            vis_img = self.draw_boxes(image, pred_boxes, pred_scores, gt_boxes)
+            self.writer.add_image(
+                f'{prefix}/Image_{img_idx}',
+                torch.tensor(np.array(vis_img)).permute(2, 0, 1),
+                epoch
+            )
+
+    def log_epoch_metrics(self, phase, metrics, epoch):
+        """Log comprehensive epoch-level metrics"""
+        prefix = 'Train' if phase == 'train' else 'Val'
+        
+        # Loss metrics
+        self.writer.add_scalar(f'{prefix}/Loss/Total', metrics['total_loss'], epoch)
+        self.writer.add_scalar(f'{prefix}/Loss/Confidence', metrics['conf_loss'], epoch)
+        self.writer.add_scalar(f'{prefix}/Loss/BBox', metrics['bbox_loss'], epoch)
+
+        # Detection quality metrics
+        self.writer.add_scalar(f'{prefix}/Detection/CorrectCountPercent', metrics['correct_count_percent'], epoch)
+        self.writer.add_scalar(f'{prefix}/Detection/OverDetections', metrics['over_detections'], epoch)
+        self.writer.add_scalar(f'{prefix}/Detection/UnderDetections', metrics['under_detections'], epoch)
+        self.writer.add_scalar(f'{prefix}/Detection/MeanIoU', metrics['mean_iou'], epoch)
+        self.writer.add_scalar(f'{prefix}/Detection/MedianIoU', metrics['median_iou'], epoch)
+        
+        # Confidence score distribution
+        self.writer.add_scalar(f'{prefix}/Confidence/MeanScore', metrics['mean_confidence'], epoch)
+        self.writer.add_scalar(f'{prefix}/Confidence/MedianScore', metrics['median_confidence'], epoch)
+        
+        # Per-image statistics
+        self.writer.add_scalar(f'{prefix}/Statistics/AvgDetectionsPerImage', metrics['avg_detections'], epoch)
+        self.writer.add_scalar(f'{prefix}/Statistics/AvgGroundTruthPerImage', metrics['avg_ground_truth'], epoch)
+        
+        # Performance metrics
+        self.writer.add_scalar(f'{prefix}/Performance/Precision', metrics['precision'], epoch)
+        self.writer.add_scalar(f'{prefix}/Performance/Recall', metrics['recall'], epoch)
+        self.writer.add_scalar(f'{prefix}/Performance/F1Score', metrics['f1_score'], epoch)
+
+        # Log detection count distribution
+        self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', 
+                                metrics['detections_per_image'], epoch)
+        self.writer.add_histogram(f'{prefix}/Distributions/IoUScores',
+                                metrics['iou_distribution'], epoch)
+        self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores',
+                                metrics['confidence_distribution'], epoch)
+
     def draw_boxes(self, image, boxes, scores=None, gt_boxes=None):
         # Denormalize the image first
         if isinstance(image, torch.Tensor):
@@ -48,79 +101,6 @@ class VisualizationLogger:
                     draw.text((x1, y1 - 10), text, fill=color)
         
         return image
-
-    def log_images(self, prefix, images, predictions, targets, epoch, step):
-        """Log images with bounding boxes to tensorboard"""
-        # Show up to 16 images
-        for img_idx in range(min(16, len(images))):
-            image = images[img_idx].cpu()
-            pred_boxes = predictions[img_idx]['boxes'].cpu()
-            pred_scores = predictions[img_idx]['scores'].cpu()
-            gt_boxes = targets[img_idx]['boxes'].cpu()
-            
-            vis_img = self.draw_boxes(image, pred_boxes, pred_scores, gt_boxes)
-            self.writer.add_image(
-                f'{prefix}/Image_{img_idx}',
-                torch.tensor(np.array(vis_img)).permute(2, 0, 1),
-                epoch * step
-            )
-
-            # Log per-image metrics
-            if len(pred_scores) > 0:
-                self.writer.add_scalar(f'{prefix}/Avg_Confidence_{img_idx}', pred_scores.mean(), epoch * step)
-                self.writer.add_scalar(f'{prefix}/Num_Detections_{img_idx}', len(pred_scores), epoch * step)
-            
-            # Calculate and log IoU between predictions and ground truth
-            if len(pred_boxes) > 0 and len(gt_boxes) > 0:
-                ious = self._calculate_ious(pred_boxes, gt_boxes)
-                if len(ious) > 0:
-                    self.writer.add_scalar(f'{prefix}/Max_IoU_{img_idx}', ious.max(), epoch * step)
-                    self.writer.add_scalar(f'{prefix}/Mean_IoU_{img_idx}', ious.mean(), epoch * step)
-
-    def _calculate_ious(self, boxes1, boxes2):
-        """Calculate IoU between two sets of boxes"""
-        # Convert to x1y1x2y2 format if normalized
-        boxes1 = boxes1.clone()
-        boxes2 = boxes2.clone()
-        
-        # Calculate intersection areas
-        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
-        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
-        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
-        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
-        
-        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-        
-        # Calculate union areas
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-        union = area1[:, None] + area2 - intersection
-        
-        return intersection / (union + 1e-6)
-
-    def log_train_metrics(self, loss_dict, epoch, step):
-        """Log training metrics to tensorboard"""
-        self.writer.add_scalar('Train/Total_Loss', loss_dict['total_loss'], epoch * step)
-        self.writer.add_scalar('Train/Confidence_Loss', loss_dict['conf_loss'], epoch * step)
-        self.writer.add_scalar('Train/BBox_Loss', loss_dict['bbox_loss'], epoch * step)
-        
-        # Add histogram of total loss if available
-        if isinstance(loss_dict['total_loss'], torch.Tensor):
-            self.writer.add_histogram('Train/Loss_Distribution', loss_dict['total_loss'], epoch * step)
-
-    def log_epoch_metrics(self, train_loss, val_loss, lr, epoch):
-        """Log epoch-level metrics"""
-        self.writer.add_scalar('Epoch/Train_Loss', train_loss, epoch)
-        self.writer.add_scalar('Epoch/Val_Loss', val_loss, epoch)
-        self.writer.add_scalar('Epoch/Learning_Rate', lr, epoch)
-
-    def log_model_stats(self, model, epoch):
-        """Log model statistics"""
-        for name, param in model.named_parameters():
-            if param.requires_grad:
-                self.writer.add_histogram(f'Parameters/{name}', param.data, epoch)
-                if param.grad is not None:
-                    self.writer.add_histogram(f'Gradients/{name}', param.grad.data, epoch)
 
     def close(self):
         self.writer.close()

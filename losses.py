@@ -10,6 +10,41 @@ class DetectionLoss(nn.Module):
         self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
 
     def forward(self, predictions, targets):
+        # Handle both training and validation outputs
+        if isinstance(predictions, list):
+            # Convert validation format to training format
+            batch_size = len(predictions)
+            device = predictions[0]['boxes'].device
+            
+            # Get number of anchors from the first prediction that includes anchors
+            default_anchors = None
+            for pred in predictions:
+                if 'anchors' in pred and pred['anchors'] is not None:
+                    default_anchors = pred['anchors']
+                    break
+            
+            if default_anchors is None:
+                raise ValueError("No default anchors found in predictions")
+                
+            num_anchors = len(default_anchors)
+            
+            # Create tensors in training format
+            bbox_pred = torch.zeros((batch_size, num_anchors, 4), device=device)
+            conf_pred = torch.zeros((batch_size, num_anchors), device=device)
+            
+            for i, pred in enumerate(predictions):
+                valid_preds = pred['boxes'].shape[0]
+                if valid_preds > 0:
+                    bbox_pred[i, :valid_preds] = pred['boxes']
+                    conf_pred[i, :valid_preds] = pred['scores']
+            
+            predictions = {
+                'bbox_pred': bbox_pred,
+                'conf_pred': conf_pred,
+                'anchors': default_anchors
+            }
+
+        # Extract predictions
         bbox_pred = predictions['bbox_pred']  # Shape: [batch_size, num_anchors, 4]
         conf_pred = predictions['conf_pred']  # Shape: [batch_size, num_anchors]
         default_anchors = predictions['anchors']  # Shape: [num_anchors, 4]

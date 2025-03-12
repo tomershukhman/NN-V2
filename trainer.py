@@ -1,6 +1,7 @@
 import torch
 from tqdm import tqdm
 import os
+import numpy as np
 from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
     OUTPUT_ROOT
@@ -10,153 +11,316 @@ from model import get_model
 from losses import DetectionLoss
 from visualization import VisualizationLogger
 
+
 def train():
     # Create save directories
     checkpoints_dir = os.path.join(OUTPUT_ROOT, 'checkpoints')
     tensorboard_dir = os.path.join(OUTPUT_ROOT, 'tensorboard')
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
-    
+
     # Initialize visualization logger
     vis_logger = VisualizationLogger(tensorboard_dir)
-    
+
     # Get model and criterion
     model = get_model(DEVICE)
     criterion = DetectionLoss().to(DEVICE)
-    
+
     # Setup optimizer with weight decay
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=LEARNING_RATE,
         weight_decay=0.01
     )
-    
+
     # Add learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, verbose=True
     )
-    
+
     # Get data loaders
     train_loader, val_loader = get_data_loaders()
     
-    best_val_loss = float('inf')
-    epochs_without_improvement = 0
+    # Create trainer instance
+    trainer = Trainer(
+        model=model,
+        criterion=criterion,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=DEVICE,
+        num_epochs=NUM_EPOCHS,
+        visualization_logger=vis_logger,
+        checkpoints_dir=checkpoints_dir
+    )
     
-    for epoch in range(NUM_EPOCHS):
-        print(f"\nEpoch {epoch + 1}/{NUM_EPOCHS}")
+    # Train the model
+    trainer.train()
+
+class Trainer:
+    def __init__(self, model, criterion, optimizer, scheduler, train_loader, val_loader, 
+                 device, num_epochs, visualization_logger, checkpoints_dir):
+        self.model = model
+        self.criterion = criterion
+        self.optimizer = optimizer
+        self.scheduler = scheduler
+        self.train_loader = train_loader
+        self.val_loader = val_loader
+        self.device = device
+        self.num_epochs = num_epochs
+        self.visualization_logger = visualization_logger
+        self.checkpoints_dir = checkpoints_dir
         
-        # Train
-        model.train()
+    def train(self):
+        best_val_loss = float('inf')
+        epochs_without_improvement = 0
+
+        for epoch in range(self.num_epochs):
+            # Train for one epoch
+            train_loss, val_loss = self.train_epoch(epoch)
+            
+            # Update learning rate based on validation loss
+            self.scheduler.step(val_loss)
+            
+            # Save best model and implement early stopping
+            if val_loss < best_val_loss:
+                epochs_without_improvement = 0
+                best_val_loss = val_loss
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                }, os.path.join(self.checkpoints_dir, 'best_model.pth'))
+                print(f"Saved new best model with val_loss: {val_loss:.4f}")
+            else:
+                epochs_without_improvement += 1
+                if epochs_without_improvement >= 10:
+                    print("Early stopping triggered")
+                    break
+        
+        self.visualization_logger.close()
+
+    def calculate_epoch_metrics(self, predictions, targets):
+        """Calculate comprehensive epoch-level metrics"""
+        total_images = len(predictions)
+        correct_count = 0
+        over_detections = 0
+        under_detections = 0
+        all_ious = []
+        all_confidences = []
+        total_detections = 0
+        total_ground_truth = 0
+        true_positives = 0
+        
+        detections_per_image = []
+        
+        for pred, target in zip(predictions, targets):
+            pred_boxes = pred['boxes']
+            pred_scores = pred['scores']
+            gt_boxes = target['boxes']
+            
+            # Count statistics
+            num_pred = len(pred_boxes)
+            num_gt = len(gt_boxes)
+            detections_per_image.append(num_pred)
+            total_detections += num_pred
+            total_ground_truth += num_gt
+            
+            # Detection count analysis
+            if num_pred == num_gt:
+                correct_count += 1
+            elif num_pred > num_gt:
+                over_detections += 1
+            else:
+                under_detections += 1
+            
+            # Collect confidence scores
+            if len(pred_scores) > 0:
+                all_confidences.extend(pred_scores.cpu().tolist())
+            
+            # Calculate IoUs for matched predictions
+            if num_pred > 0 and num_gt > 0:
+                ious = self._calculate_box_iou(pred_boxes, gt_boxes)
+                if len(ious) > 0:
+                    max_ious, _ = ious.max(dim=0)
+                    all_ious.extend(max_ious.cpu().tolist())
+                    # Count true positives (IoU > 0.5)
+                    true_positives += (max_ious > 0.5).sum().item()
+        
+        # Convert lists to tensors for histogram logging
+        iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
+        confidence_distribution = torch.tensor(all_confidences) if all_confidences else torch.zeros(0)
+        detections_per_image = torch.tensor(detections_per_image)
+        
+        # Calculate final metrics
+        correct_count_percent = (correct_count / total_images) * 100
+        avg_detections = total_detections / total_images
+        avg_ground_truth = total_ground_truth / total_images
+        
+        # Calculate mean and median IoU
+        mean_iou = np.mean(all_ious) if all_ious else 0
+        median_iou = np.median(all_ious) if all_ious else 0
+        
+        # Calculate confidence score statistics
+        mean_confidence = np.mean(all_confidences) if all_confidences else 0
+        median_confidence = np.median(all_confidences) if all_confidences else 0
+        
+        # Calculate precision, recall, and F1 score
+        precision = true_positives / total_detections if total_detections > 0 else 0
+        recall = true_positives / total_ground_truth if total_ground_truth > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+        
+        return {
+            'correct_count_percent': correct_count_percent,
+            'over_detections': over_detections,
+            'under_detections': under_detections,
+            'mean_iou': mean_iou,
+            'median_iou': median_iou,
+            'mean_confidence': mean_confidence,
+            'median_confidence': median_confidence,
+            'avg_detections': avg_detections,
+            'avg_ground_truth': avg_ground_truth,
+            'precision': precision,
+            'recall': recall,
+            'f1_score': f1_score,
+            'detections_per_image': detections_per_image,
+            'iou_distribution': iou_distribution,
+            'confidence_distribution': confidence_distribution
+        }
+
+    def _calculate_box_iou(self, boxes1, boxes2):
+        """Calculate IoU between two sets of boxes"""
+        # Convert to x1y1x2y2 format if normalized
+        boxes1 = boxes1.clone()
+        boxes2 = boxes2.clone()
+        
+        # Calculate intersection areas
+        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
+        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
+        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
+        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+        
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+        
+        # Calculate union areas
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        union = area1[:, None] + area2 - intersection
+        
+        return intersection / (union + 1e-6)
+
+    def train_epoch(self, epoch):
+        self.model.train()
         total_loss = 0
-        progress_bar = tqdm(train_loader, desc='Training')
+        all_predictions = []
+        all_targets = []
         
-        for batch_idx, (images, _, boxes) in enumerate(progress_bar):
-            images = torch.stack([image.to(DEVICE) for image in images])
+        train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
+        
+        for step, (images, _, boxes) in enumerate(train_loader_bar):
+            images = torch.stack([image.to(self.device) for image in images])
             targets = []
-            for i, boxes_per_image in enumerate(boxes):
+            for boxes_per_image in boxes:
                 target = {
-                    'boxes': boxes_per_image.to(DEVICE),
-                    'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=DEVICE)
+                    'boxes': boxes_per_image.to(self.device),
+                    'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
                 }
                 targets.append(target)
             
-            predictions = model(images, targets)
-            loss_dict = criterion(predictions, targets)
-            losses = loss_dict['total_loss']
+            # Forward pass and loss calculation
+            self.optimizer.zero_grad()
+            predictions = self.model(images, targets)
+            loss_dict = self.criterion(predictions, targets)
+            loss = loss_dict['total_loss']
             
-            optimizer.zero_grad()
-            losses.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
-            optimizer.step()
+            # Backward pass
+            loss.backward()
+            self.optimizer.step()
             
-            # Log metrics
-            vis_logger.log_train_metrics(loss_dict, epoch, len(train_loader) + batch_idx)
+            # Update progress
+            total_loss += loss.item()
+            train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
             
-            # Log images with predictions periodically
-            if batch_idx % 100 == 0:
-                with torch.no_grad():
-                    model.eval()
-                    inference_preds = model(images, None)
-                    model.train()
-                    vis_logger.log_images('Train', images, inference_preds, targets, epoch, len(train_loader) + batch_idx)
+            # Collect predictions and targets for epoch-level metrics
+            with torch.no_grad():
+                inference_preds = self.model(images, None)
+                all_predictions.extend(inference_preds)
+                all_targets.extend(targets)
             
-            total_loss += losses.item()
-            progress_bar.set_postfix({
-                'loss': losses.item(),
-                'conf_loss': loss_dict['conf_loss'],
-                'bbox_loss': loss_dict['bbox_loss']
-            })
+            # Log sample images periodically
+            if step % 50 == 0:
+                self.visualization_logger.log_images('Train', images, inference_preds, targets, epoch)
+
+        # Calculate average loss and metrics
+        avg_loss = total_loss / len(self.train_loader)
         
-        train_loss = total_loss / len(train_loader)
-        print(f"Train Loss: {train_loss:.4f}")
+        # Calculate epoch-level metrics
+        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
+        metrics.update({
+            'total_loss': avg_loss,
+            'conf_loss': loss_dict['conf_loss'],
+            'bbox_loss': loss_dict['bbox_loss']
+        })
         
-        # Validate
-        model.eval()
-        val_loss = 0
-        progress_bar = tqdm(val_loader, desc='Validating')
+        # Log epoch metrics
+        self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
+        
+        # Run validation
+        val_metrics = None
+        if self.val_loader:
+            val_metrics = self.validate(epoch)
+        
+        return avg_loss, val_metrics['total_loss'] if val_metrics else 0
+
+    
+    def validate(self, epoch):
+        self.model.eval()
+        total_loss = 0
+        all_predictions = []
+        all_targets = []
         
         with torch.no_grad():
-            for batch_idx, (images, _, boxes) in enumerate(progress_bar):
-                images = torch.stack([image.to(DEVICE) for image in images])
+            for images, _, boxes in tqdm(self.val_loader, desc='Validating'):
+                images = torch.stack([image.to(self.device) for image in images])
                 targets = []
-                for i, boxes_per_image in enumerate(boxes):
+                for boxes_per_image in boxes:
                     target = {
-                        'boxes': boxes_per_image.to(DEVICE),
-                        'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=DEVICE)
+                        'boxes': boxes_per_image.to(self.device),
+                        'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
                     }
                     targets.append(target)
                 
-                # Get both training mode predictions for loss calculation
-                model.train()
-                train_predictions = model(images, targets)
-                loss_dict = criterion(train_predictions, targets)
-                losses = loss_dict['total_loss']
+                # Get predictions
+                predictions = self.model(images, targets)  # For loss calculation
+                loss_dict = self.criterion(predictions, targets)
+                total_loss += loss_dict['total_loss'].item()
                 
-                # Switch back to eval mode for visualization predictions
-                model.eval()
-                inference_preds = model(images, None)
-                
-                # Log validation images periodically
-                if batch_idx % 50 == 0:
-                    vis_logger.log_images('Val', images, inference_preds, targets, epoch, len(val_loader) + batch_idx)
-                
-                val_loss += losses.item()
-                progress_bar.set_postfix({'val_loss': losses.item()})
+                # Get inference predictions for metrics
+                inference_preds = self.model(images, None)
+                all_predictions.extend(inference_preds)
+                all_targets.extend(targets)
         
-        val_loss = val_loss / len(val_loader)
-        print(f"Val Loss: {val_loss:.4f}")
+        # Calculate metrics
+        avg_loss = total_loss / len(self.val_loader)
+        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
+        metrics.update({
+            'total_loss': avg_loss,
+            'conf_loss': loss_dict['conf_loss'],
+            'bbox_loss': loss_dict['bbox_loss']
+        })
         
-        # Log epoch metrics
-        vis_logger.log_epoch_metrics(
-            train_loss, 
-            val_loss, 
-            optimizer.param_groups[0]['lr'], 
-            epoch
-        )
+        # Log validation metrics
+        self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
         
-        # Update learning rate based on validation loss
-        scheduler.step(val_loss)
+        # Log sample validation images
+        self.visualization_logger.log_images('Val', images[-16:], inference_preds[-16:], targets[-16:], epoch)
         
-        # Save best model and implement early stopping
-        if val_loss < best_val_loss:
-            epochs_without_improvement = 0
-            best_val_loss = val_loss
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-            }, os.path.join(checkpoints_dir, 'best_model.pth'))
-            print("Saved new best model")
-        else:
-            epochs_without_improvement += 1
-            if epochs_without_improvement >= 10:
-                print("Early stopping triggered")
-                break
-    
-    vis_logger.close()
+        return metrics
+
 
 if __name__ == "__main__":
     train()
