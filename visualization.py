@@ -49,15 +49,10 @@ class VisualizationLogger:
         
         return image
 
-    def log_train_metrics(self, loss_dict, epoch, step):
-        """Log training metrics to tensorboard"""
-        self.writer.add_scalar('Train/Total_Loss', loss_dict['total_loss'], epoch * step)
-        self.writer.add_scalar('Train/Confidence_Loss', loss_dict['conf_loss'], epoch * step)
-        self.writer.add_scalar('Train/BBox_Loss', loss_dict['bbox_loss'], epoch * step)
-
     def log_images(self, prefix, images, predictions, targets, epoch, step):
         """Log images with bounding boxes to tensorboard"""
-        for img_idx in range(min(3, len(images))):
+        # Show up to 16 images
+        for img_idx in range(min(16, len(images))):
             image = images[img_idx].cpu()
             pred_boxes = predictions[img_idx]['boxes'].cpu()
             pred_scores = predictions[img_idx]['scores'].cpu()
@@ -70,11 +65,62 @@ class VisualizationLogger:
                 epoch * step
             )
 
+            # Log per-image metrics
+            if len(pred_scores) > 0:
+                self.writer.add_scalar(f'{prefix}/Avg_Confidence_{img_idx}', pred_scores.mean(), epoch * step)
+                self.writer.add_scalar(f'{prefix}/Num_Detections_{img_idx}', len(pred_scores), epoch * step)
+            
+            # Calculate and log IoU between predictions and ground truth
+            if len(pred_boxes) > 0 and len(gt_boxes) > 0:
+                ious = self._calculate_ious(pred_boxes, gt_boxes)
+                if len(ious) > 0:
+                    self.writer.add_scalar(f'{prefix}/Max_IoU_{img_idx}', ious.max(), epoch * step)
+                    self.writer.add_scalar(f'{prefix}/Mean_IoU_{img_idx}', ious.mean(), epoch * step)
+
+    def _calculate_ious(self, boxes1, boxes2):
+        """Calculate IoU between two sets of boxes"""
+        # Convert to x1y1x2y2 format if normalized
+        boxes1 = boxes1.clone()
+        boxes2 = boxes2.clone()
+        
+        # Calculate intersection areas
+        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
+        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
+        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
+        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+        
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+        
+        # Calculate union areas
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        union = area1[:, None] + area2 - intersection
+        
+        return intersection / (union + 1e-6)
+
+    def log_train_metrics(self, loss_dict, epoch, step):
+        """Log training metrics to tensorboard"""
+        self.writer.add_scalar('Train/Total_Loss', loss_dict['total_loss'], epoch * step)
+        self.writer.add_scalar('Train/Confidence_Loss', loss_dict['conf_loss'], epoch * step)
+        self.writer.add_scalar('Train/BBox_Loss', loss_dict['bbox_loss'], epoch * step)
+        
+        # Add histogram of total loss if available
+        if isinstance(loss_dict['total_loss'], torch.Tensor):
+            self.writer.add_histogram('Train/Loss_Distribution', loss_dict['total_loss'], epoch * step)
+
     def log_epoch_metrics(self, train_loss, val_loss, lr, epoch):
         """Log epoch-level metrics"""
         self.writer.add_scalar('Epoch/Train_Loss', train_loss, epoch)
         self.writer.add_scalar('Epoch/Val_Loss', val_loss, epoch)
         self.writer.add_scalar('Epoch/Learning_Rate', lr, epoch)
+
+    def log_model_stats(self, model, epoch):
+        """Log model statistics"""
+        for name, param in model.named_parameters():
+            if param.requires_grad:
+                self.writer.add_histogram(f'Parameters/{name}', param.data, epoch)
+                if param.grad is not None:
+                    self.writer.add_histogram(f'Gradients/{name}', param.grad.data, epoch)
 
     def close(self):
         self.writer.close()

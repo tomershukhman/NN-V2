@@ -27,10 +27,17 @@ class DogDetector(nn.Module):
         for param in list(self.backbone.parameters())[:-6]:
             param.requires_grad = False
         
-        # FPN-like feature pyramid with adaptive pooling to ensure correct output size
+        # FPN-like feature pyramid with fixed pooling to ensure MPS compatibility
         self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
         self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((feature_map_size, feature_map_size))
+        
+        # Replace adaptive pooling with fixed pooling
+        self.pool = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=2, stride=2)
+        )
         
         # Detection head
         self.conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
@@ -77,10 +84,22 @@ class DogDetector(nn.Module):
         # Extract features using backbone
         features = self.backbone(x)
         
-        # FPN-like feature processing with adaptive pooling
+        # FPN-like feature processing with fixed pooling
         lateral = self.lateral_conv(features)
         features = self.smooth_conv(lateral)
-        features = self.adaptive_pool(features)  # Ensure correct feature map size
+        
+        # Apply fixed-size pooling operations until we reach desired size
+        while features.shape[-1] > self.feature_map_size:
+            features = self.pool(features)
+            
+        # If the feature map is too small, use interpolation to reach target size
+        if features.shape[-1] < self.feature_map_size:
+            features = F.interpolate(
+                features, 
+                size=(self.feature_map_size, self.feature_map_size),
+                mode='bilinear',
+                align_corners=False
+            )
         
         # Detection head
         x = F.relu(self.conv1(features))
