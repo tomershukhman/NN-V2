@@ -3,7 +3,7 @@ import torchvision.transforms.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from PIL import ImageDraw
-
+from config import TENSORBOARD_TRAIN_IMAGES, TENSORBOARD_VAL_IMAGES
 
 class VisualizationLogger:
     def __init__(self, tensorboard_dir):
@@ -12,8 +12,8 @@ class VisualizationLogger:
 
     def log_images(self, prefix, images, predictions, targets, epoch):
         """Log a sample of images with predictions for visual inspection"""
-        # Show up to 16 images
-        for img_idx in range(min(16, len(images))):
+        num_images = TENSORBOARD_TRAIN_IMAGES if prefix == 'train' else TENSORBOARD_VAL_IMAGES
+        for img_idx in range(min(num_images, len(images))):
             image = images[img_idx].cpu()
             pred_boxes = predictions[img_idx]['boxes'].cpu()
             pred_scores = predictions[img_idx]['scores'].cpu()
