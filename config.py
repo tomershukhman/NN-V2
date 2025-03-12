@@ -33,8 +33,11 @@ TRAIN_NMS_THRESHOLD = 0.45
 # Inference thresholds (more strict)
 CONFIDENCE_THRESHOLD = 0.5  # Increased to reduce false positives
 NMS_THRESHOLD = 0.3  # Reduced to prevent duplicate detections
-MAX_DETECTIONS = 20  # Reduced maximum detections per image
+MAX_DETECTIONS = 4  # Reduced maximum detections per image
 
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20  # Number of training images to show in tensorboard
 TENSORBOARD_VAL_IMAGES = 20    # Number of validation images to show in tensorboard
+
+# CSV Metrics logging parameters
+METRICS_DIR = os.path.join(OUTPUT_ROOT, 'metrics')  # Directory for storing CSV metrics

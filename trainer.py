@@ -10,6 +10,7 @@ from dataset import get_data_loaders
 from model import get_model
 from losses import DetectionLoss
 from visualization import VisualizationLogger
+from metrics_logger import MetricsCSVLogger
 
 
 def train():
@@ -19,8 +20,9 @@ def train():
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
 
-    # Initialize visualization logger
+    # Initialize visualization and metrics loggers
     vis_logger = VisualizationLogger(tensorboard_dir)
+    csv_logger = MetricsCSVLogger(OUTPUT_ROOT)
 
     # Get model and criterion
     model = get_model(DEVICE)
@@ -52,6 +54,7 @@ def train():
         device=DEVICE,
         num_epochs=NUM_EPOCHS,
         visualization_logger=vis_logger,
+        metrics_csv_logger=csv_logger,
         checkpoints_dir=checkpoints_dir
     )
     
@@ -60,7 +63,7 @@ def train():
 
 class Trainer:
     def __init__(self, model, criterion, optimizer, scheduler, train_loader, val_loader, 
-                 device, num_epochs, visualization_logger, checkpoints_dir):
+                 device, num_epochs, visualization_logger, metrics_csv_logger, checkpoints_dir):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
@@ -70,6 +73,7 @@ class Trainer:
         self.device = device
         self.num_epochs = num_epochs
         self.visualization_logger = visualization_logger
+        self.metrics_csv_logger = metrics_csv_logger
         self.checkpoints_dir = checkpoints_dir
         
     def train(self):
@@ -253,7 +257,7 @@ class Trainer:
             
             # Log sample images periodically
             if step % 50 == 0:
-                self.visualization_logger.log_images('Train', images, inference_preds, targets, epoch)
+                self.visualization_logger.log_images('train', images, inference_preds, targets, epoch)
 
         # Calculate average loss and metrics
         avg_loss = total_loss / len(self.train_loader)
@@ -266,8 +270,9 @@ class Trainer:
             'bbox_loss': loss_dict['bbox_loss']
         })
         
-        # Log epoch metrics
+        # Log epoch metrics to TensorBoard and CSV
         self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
+        self.metrics_csv_logger.log_metrics('train', metrics, epoch)
         
         # Run validation
         val_metrics = None
@@ -313,8 +318,9 @@ class Trainer:
             'bbox_loss': loss_dict['bbox_loss']
         })
         
-        # Log validation metrics
+        # Log validation metrics to TensorBoard and CSV
         self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
+        self.metrics_csv_logger.log_metrics('val', metrics, epoch)
         
         # Log sample validation images
         self.visualization_logger.log_images('Val', images[-16:], inference_preds[-16:], targets[-16:], epoch)
