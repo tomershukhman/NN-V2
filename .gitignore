@@ -1,0 +1,167 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+env/
+venv/
+ENV/
+*.egg-info/
+*.egg
+dist/
+build/
+pip-wheel-metadata/
+
+# Virtual environment
+.venv/
+.rye/
+
+# VSCode settings
+.vscode/
+
+# Jupyter Notebook checkpoints
+.ipynb_checkpoints/
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# pytest
+.pytest_cache/
+
+# Django stuff:
+*.log
+db.sqlite3
+db.sqlite3-journal
+
+# Flask/Django instance folder
+instance/
+
+# Scrapy stuff:
+.scrapy/
+
+# Sphinx documentation
+docs/_build/
+
+# Pyre type checker
+.pyre/
+
+# Bandit security analysis results
+.bandit/
+
+# Pylint
+pylint.log
+
+# Coverage reports
+.coverage
+*.cover
+.coverage.*
+htmlcov/
+cov.xml
+
+# Black formatter
+.cache/
+
+# Poetry
+.poetry/
+
+# Rye
+.rye/
+
+# Docker
+*.log
+docker-compose.override.yml
+
+# Ignore MacOS system files
+.DS_Store
+
+# Ignore JetBrains IDE settings
+.idea/
+
+# Ignore personal environment settings
+*.env
+.envrc
+*.secrets
+
+data
+voc_data
+VOCdevkit
+
+
+*event*
+/**/*event*
+
+# Cached preprocessed data
+voc_data/cached_data/
+*.pkl
+
+# Preprocessed data
+preprocessed_data/
+*.pt
+
+# Saved PyTorch files
+saved_models/
+*.pth
+
+# Preprocessed datasets
+preprocessed_data/
+!preprocessed_data/.gitkeep
+
+output_images/**
+
+examples/**
+predictions/**
+
+datasets/** */
+cache/*
+
+*.mp4
+
+output/training_metrics.csv
+training_metrics.csv
+
+.lightning_studio
+
+# Project specific
+data/
+output/
+**/tensorboard_logs/
+**/*.csv
+open-images*/
+.fiftyone/
+**/VOCdevkit/
+**/VOC2012/
+*.tar
+*.zip
+
+# Model checkpoints and logs
+output/checkpoints/
+model_saves.log
+tensorboard.log
+**/events.out.tfevents.*
+
+# FiftyOne dataset
+**/open-images*/
+.fiftyone/
+mongodb/
+**/fo_dataset/
+
+# Large data files
+*.jpg
+*.jpeg
+*.png
+*.JPEG
+*.JPG
+*.PNG
+
+# Keep example files
+!examples/*.jpg
+!examples/*.png
+
+downloaded_metrics/
