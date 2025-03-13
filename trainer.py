@@ -26,22 +26,32 @@ def train():
 
     # Get model and criterion
     model = get_model(DEVICE)
-    criterion = DetectionLoss().to(DEVICE)
+    criterion = DetectionLoss(use_focal_loss=True).to(DEVICE)
 
-    # Setup optimizer with weight decay
+    # Setup optimizer with weight decay and parameter groups for different learning rates
+    param_groups = [
+        {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': LEARNING_RATE * 0.1},
+        {'params': [p for n, p in model.named_parameters() if 'backbone' not in n]}
+    ]
+    
     optimizer = torch.optim.AdamW(
-        [p for p in model.parameters() if p.requires_grad],
+        param_groups,
         lr=LEARNING_RATE,
-        weight_decay=0.01
+        weight_decay=0.01,
+        betas=(0.9, 0.999)
     )
 
-    # Add learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
-
-    # Get data loaders
+    # Get total training steps for learning rate scheduler
     train_loader, val_loader = get_data_loaders()
+    total_steps = len(train_loader) * NUM_EPOCHS
+    warmup_steps = min(1000, total_steps // 5)
+    
+    # Use a cosine annealing scheduler with warmup
+    scheduler = get_cosine_schedule_with_warmup(
+        optimizer, 
+        num_warmup_steps=warmup_steps,
+        num_training_steps=total_steps
+    )
     
     # Create trainer instance
     trainer = Trainer(
@@ -61,6 +71,20 @@ def train():
     # Train the model
     trainer.train()
 
+def get_cosine_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, num_cycles=0.5, last_epoch=-1):
+    """
+    Create a cosine learning rate scheduler with warmup
+    """
+    def lr_lambda(current_step):
+        # Warmup
+        if current_step < num_warmup_steps:
+            return float(current_step) / float(max(1, num_warmup_steps))
+        # Cosine annealing
+        progress = float(current_step - num_warmup_steps) / float(max(1, num_training_steps - num_warmup_steps))
+        return max(0.0, 0.5 * (1.0 + np.cos(np.pi * float(num_cycles) * 2.0 * progress)))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda, last_epoch)
+
 class Trainer:
     def __init__(self, model, criterion, optimizer, scheduler, train_loader, val_loader, 
                  device, num_epochs, visualization_logger, metrics_csv_logger, checkpoints_dir):
@@ -75,19 +99,27 @@ class Trainer:
         self.visualization_logger = visualization_logger
         self.metrics_csv_logger = metrics_csv_logger
         self.checkpoints_dir = checkpoints_dir
+        self.gradient_clip_val = 1.0  # Limit gradient magnitude to prevent exploding gradients
         
     def train(self):
         best_val_loss = float('inf')
+        best_f1_score = 0
         epochs_without_improvement = 0
 
         for epoch in range(self.num_epochs):
             # Train for one epoch
-            train_loss, val_loss = self.train_epoch(epoch)
+            train_loss, train_metrics = self.train_epoch(epoch)
             
-            # Update learning rate based on validation loss
-            self.scheduler.step(val_loss)
+            # Run validation
+            val_metrics = self.validate(epoch)
+            val_loss = val_metrics['total_loss'] if val_metrics else float('inf')
+            val_f1 = val_metrics['f1_score'] if val_metrics else 0
             
-            # Save best model and implement early stopping
+            # Log learning rate
+            current_lr = self.optimizer.param_groups[0]['lr']
+            self.visualization_logger.writer.add_scalar('learning_rate', current_lr, epoch)
+            
+            # Save best model by validation loss
             if val_loss < best_val_loss:
                 epochs_without_improvement = 0
                 best_val_loss = val_loss
@@ -98,12 +130,27 @@ class Trainer:
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'train_loss': train_loss,
                     'val_loss': val_loss,
-                }, os.path.join(self.checkpoints_dir, 'best_model.pth'))
+                    'val_f1': val_f1,
+                }, os.path.join(self.checkpoints_dir, 'best_loss_model.pth'))
                 print(f"Saved new best model with val_loss: {val_loss:.4f}")
+                
+            # Also save best model by F1 score
+            if val_f1 > best_f1_score:
+                best_f1_score = val_f1
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': self.model.state_dict(),
+                    'optimizer_state_dict': self.optimizer.state_dict(),
+                    'scheduler_state_dict': self.scheduler.state_dict(),
+                    'train_loss': train_loss,
+                    'val_loss': val_loss,
+                    'val_f1': val_f1,
+                }, os.path.join(self.checkpoints_dir, 'best_f1_model.pth'))
+                print(f"Saved new best model with val_F1: {val_f1:.4f}")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 10:
-                    print("Early stopping triggered")
+                if epochs_without_improvement >= 15:  # More patient early stopping
+                    print("Early stopping triggered after 15 epochs without improvement")
                     break
         
         self.visualization_logger.close()
@@ -241,13 +288,19 @@ class Trainer:
             loss_dict = self.criterion(predictions, targets)
             loss = loss_dict['total_loss']
             
-            # Backward pass
+            # Backward pass with gradient clipping
             loss.backward()
+            # Clip gradients to prevent exploding gradients
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_val)
             self.optimizer.step()
+            self.scheduler.step()  # Step the scheduler every batch
             
             # Update progress
             total_loss += loss.item()
-            train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
+            train_loader_bar.set_postfix({
+                'train_loss': total_loss / (step + 1),
+                'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
+            })
             
             # Collect predictions and targets for epoch-level metrics
             with torch.no_grad():
@@ -274,17 +327,13 @@ class Trainer:
         self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
         self.metrics_csv_logger.log_metrics('train', metrics, epoch)
         
-        # Run validation
-        val_metrics = None
-        if self.val_loader:
-            val_metrics = self.validate(epoch)
-        
-        return avg_loss, val_metrics['total_loss'] if val_metrics else 0
+        return avg_loss, metrics
 
-    
     def validate(self, epoch):
         self.model.eval()
         total_loss = 0
+        total_conf_loss = 0
+        total_bbox_loss = 0
         all_predictions = []
         all_targets = []
         
@@ -303,6 +352,8 @@ class Trainer:
                 predictions = self.model(images, targets)  # For loss calculation
                 loss_dict = self.criterion(predictions, targets)
                 total_loss += loss_dict['total_loss'].item()
+                total_conf_loss += loss_dict['conf_loss']
+                total_bbox_loss += loss_dict['bbox_loss']
                 
                 # Get inference predictions for metrics
                 inference_preds = self.model(images, None)
@@ -311,11 +362,14 @@ class Trainer:
         
         # Calculate metrics
         avg_loss = total_loss / len(self.val_loader)
+        avg_conf_loss = total_conf_loss / len(self.val_loader)
+        avg_bbox_loss = total_bbox_loss / len(self.val_loader)
+        
         metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
         metrics.update({
             'total_loss': avg_loss,
-            'conf_loss': loss_dict['conf_loss'],
-            'bbox_loss': loss_dict['bbox_loss']
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
         })
         
         # Log validation metrics to TensorBoard and CSV

@@ -34,7 +34,7 @@ class VisualizationLogger:
         self.writer.add_scalar(f'{prefix}/Loss/Total', metrics['total_loss'], epoch)
         self.writer.add_scalar(f'{prefix}/Loss/Confidence', metrics['conf_loss'], epoch)
         self.writer.add_scalar(f'{prefix}/Loss/BBox', metrics['bbox_loss'], epoch)
-
+        
         # Detection quality metrics
         self.writer.add_scalar(f'{prefix}/Detection/CorrectCountPercent', metrics['correct_count_percent'], epoch)
         self.writer.add_scalar(f'{prefix}/Detection/OverDetections', metrics['over_detections'], epoch)
@@ -54,14 +54,21 @@ class VisualizationLogger:
         self.writer.add_scalar(f'{prefix}/Performance/Precision', metrics['precision'], epoch)
         self.writer.add_scalar(f'{prefix}/Performance/Recall', metrics['recall'], epoch)
         self.writer.add_scalar(f'{prefix}/Performance/F1Score', metrics['f1_score'], epoch)
-
-        # Log detection count distribution
-        self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', 
-                                metrics['detections_per_image'], epoch)
-        self.writer.add_histogram(f'{prefix}/Distributions/IoUScores',
-                                metrics['iou_distribution'], epoch)
-        self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores',
-                                metrics['confidence_distribution'], epoch)
+        
+        # Log detection count distribution - only log if we have data
+        detections = metrics['detections_per_image']
+        if detections.numel() > 0:
+            self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', detections, epoch)
+        
+        # Log IoU distribution - only if we have IoU values
+        iou_dist = metrics['iou_distribution']
+        if iou_dist.numel() > 0:
+            self.writer.add_histogram(f'{prefix}/Distributions/IoUScores', iou_dist, epoch)
+        
+        # Log confidence score distribution - only if we have confidence values
+        conf_dist = metrics['confidence_distribution']
+        if conf_dist.numel() > 0:
+            self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores', conf_dist, epoch)
 
     def draw_boxes(self, image, boxes, scores=None, gt_boxes=None):
         # Denormalize the image first
