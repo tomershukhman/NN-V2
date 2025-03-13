@@ -89,9 +89,8 @@ docker-compose.override.yml
 .envrc
 *.secrets
 
-data
-voc_data
-VOCdevkit
+data/open-images/
+
 
 
 *event*
@@ -118,7 +117,6 @@ output_images/**
 examples/**
 predictions/**
 
-datasets/** */
 cache/*
 
 *.mp4
@@ -163,6 +161,9 @@ mongodb/
 # Keep example files
 !examples/*.jpg
 !examples/*.png
-!dog_detctor/data
+!dog_detector/data
 
 downloaded_metrics/
+
+.vscode-server
+
