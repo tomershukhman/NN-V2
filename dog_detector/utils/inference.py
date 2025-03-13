@@ -3,21 +3,13 @@ import torch
 import numpy as np
 from PIL import Image, ImageDraw
 import torchvision.transforms as T
-from config import DEVICE
+from config import (
+    DEVICE, NORMALIZE_MEAN, NORMALIZE_STD, IMAGE_SIZE
+)
 from dog_detector.model.model import get_model
 import matplotlib.pyplot as plt
 
 def load_model_from_checkpoint(checkpoint_path, device=None):
-    """
-    Load a trained model from checkpoint
-    
-    Args:
-        checkpoint_path (str): Path to the checkpoint file
-        device (torch.device, optional): Device to load model to
-    
-    Returns:
-        model: Loaded model
-    """
     if device is None:
         device = DEVICE
         
@@ -37,19 +29,6 @@ def load_model_from_checkpoint(checkpoint_path, device=None):
     return model
 
 def predict_on_image(image_path, checkpoint_path, device=None, confidence_threshold=0.5, save_output=True):
-    """
-    Run detection on a single image
-    
-    Args:
-        image_path (str): Path to the input image
-        checkpoint_path (str): Path to the checkpoint file
-        device (torch.device, optional): Device to run inference on
-        confidence_threshold (float): Threshold for displaying detections
-        save_output (bool): Whether to save the output image
-        
-    Returns:
-        tuple: (predictions, output_image)
-    """
     if device is None:
         device = DEVICE
     
@@ -59,11 +38,11 @@ def predict_on_image(image_path, checkpoint_path, device=None, confidence_thresh
     # Load and transform the image
     image = Image.open(image_path).convert('RGB')
     
-    # Apply transforms
+    # Apply transforms using config values
     transform = T.Compose([
-        T.Resize((224, 224)),
+        T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         T.ToTensor(),
-        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        T.Normalize(NORMALIZE_MEAN, NORMALIZE_STD)
     ])
     
     # Transform the image and add batch dimension
@@ -187,11 +166,11 @@ def batch_predict(image_paths, checkpoint_path, output_dir=None, device=None, co
     # Load the model
     model = load_model_from_checkpoint(checkpoint_path, device)
     
-    # Create transform
+    # Create transform using config values
     transform = T.Compose([
-        T.Resize((224, 224)),
+        T.Resize((IMAGE_SIZE, IMAGE_SIZE)),
         T.ToTensor(),
-        T.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        T.Normalize(NORMALIZE_MEAN, NORMALIZE_STD)
     ])
     
     results = []

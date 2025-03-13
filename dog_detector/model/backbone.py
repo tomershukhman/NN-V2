@@ -1,6 +1,7 @@
 import torch.nn as nn
 import torchvision
 from torchvision.models import ResNet18_Weights
+from config import BACKBONE_FROZEN_LAYERS
 
 class ResNetBackbone(nn.Module):
     def __init__(self):
@@ -13,7 +14,7 @@ class ResNetBackbone(nn.Module):
         
         # Unfreeze only the last layers of the backbone
         for i, param in enumerate(self.backbone.parameters()):
-            if i < 30:  # Freeze more layers to avoid overfitting
+            if i < BACKBONE_FROZEN_LAYERS:  # Use config value for number of frozen layers
                 param.requires_grad = False
                 
     def forward(self, x):

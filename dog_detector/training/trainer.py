@@ -4,7 +4,11 @@ import os
 import numpy as np
 from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
-    OUTPUT_ROOT, DATA_ROOT, BATCH_SIZE
+    OUTPUT_ROOT, DATA_ROOT, BATCH_SIZE,
+    BACKBONE_LR_FACTOR, WEIGHT_DECAY,
+    GRADIENT_CLIP_VALUE, EARLY_STOPPING_PATIENCE,
+    WARMUP_STEPS_RATIO, NUM_CYCLES,
+    LOG_IMAGES_INTERVAL, IMAGE_SAMPLES_TO_LOG
 )
 from dog_detector.data import get_data_loaders
 from dog_detector.model.model import get_model
@@ -42,14 +46,14 @@ def train(data_root=None, download=True, batch_size=None):
 
     # Setup optimizer with weight decay and parameter groups for different learning rates
     param_groups = [
-        {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': LEARNING_RATE * 0.1},
+        {'params': [p for n, p in model.named_parameters() if 'backbone' in n], 'lr': LEARNING_RATE * BACKBONE_LR_FACTOR},
         {'params': [p for n, p in model.named_parameters() if 'backbone' not in n]}
     ]
     
     optimizer = torch.optim.AdamW(
         param_groups,
         lr=LEARNING_RATE,
-        weight_decay=0.01,
+        weight_decay=WEIGHT_DECAY,
         betas=(0.9, 0.999)
     )
 
@@ -60,13 +64,14 @@ def train(data_root=None, download=True, batch_size=None):
         download=download
     )
     total_steps = len(train_loader) * NUM_EPOCHS
-    warmup_steps = min(1000, total_steps // 5)
+    warmup_steps = int(total_steps * WARMUP_STEPS_RATIO)
     
     # Use a cosine annealing scheduler with warmup
     scheduler = get_cosine_schedule_with_warmup(
         optimizer, 
         num_warmup_steps=warmup_steps,
-        num_training_steps=total_steps
+        num_training_steps=total_steps,
+        num_cycles=NUM_CYCLES
     )
     
     # Create trainer instance
@@ -115,7 +120,7 @@ class Trainer:
         self.visualization_logger = visualization_logger
         self.metrics_csv_logger = metrics_csv_logger
         self.checkpoints_dir = checkpoints_dir
-        self.gradient_clip_val = 1.0  # Limit gradient magnitude to prevent exploding gradients
+        self.gradient_clip_val = GRADIENT_CLIP_VALUE
         
     def train(self):
         best_val_loss = float('inf')
@@ -165,8 +170,8 @@ class Trainer:
                 print(f"Saved new best model with val_F1: {val_f1:.4f}")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 15:  # More patient early stopping
-                    print("Early stopping triggered after 15 epochs without improvement")
+                if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
+                    print(f"Early stopping triggered after {EARLY_STOPPING_PATIENCE} epochs without improvement")
                     break
         
         self.visualization_logger.close()
@@ -325,7 +330,7 @@ class Trainer:
                 all_targets.extend(targets)
             
             # Log sample images periodically
-            if step % 50 == 0:
+            if step % LOG_IMAGES_INTERVAL == 0:
                 self.visualization_logger.log_images('train', images, inference_preds, targets, epoch)
 
         # Calculate average loss and metrics
@@ -393,6 +398,8 @@ class Trainer:
         self.metrics_csv_logger.log_metrics('val', metrics, epoch)
         
         # Log sample validation images
-        self.visualization_logger.log_images('Val', images[-16:], inference_preds[-16:], targets[-16:], epoch)
+        self.visualization_logger.log_images('Val', images[-IMAGE_SAMPLES_TO_LOG:], 
+                                          inference_preds[-IMAGE_SAMPLES_TO_LOG:], 
+                                          targets[-IMAGE_SAMPLES_TO_LOG:], epoch)
         
         return metrics

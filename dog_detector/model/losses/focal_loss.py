@@ -1,16 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from config import FOCAL_LOSS_ALPHA, FOCAL_LOSS_GAMMA
 
 class FocalLoss(nn.Module):
     """
     Focal Loss as described in https://arxiv.org/abs/1708.02002
     Helps address class imbalance by down-weighting easy examples.
     """
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
+    def __init__(self, alpha=None, gamma=None, reduction='none'):
         super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+        self.alpha = alpha if alpha is not None else FOCAL_LOSS_ALPHA
+        self.gamma = gamma if gamma is not None else FOCAL_LOSS_GAMMA
         self.reduction = reduction
         
     def forward(self, inputs, targets):

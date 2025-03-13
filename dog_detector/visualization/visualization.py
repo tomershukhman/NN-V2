@@ -3,12 +3,15 @@ import torchvision.transforms.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
 from PIL import ImageDraw
-from config import TENSORBOARD_TRAIN_IMAGES, TENSORBOARD_VAL_IMAGES
+from config import (
+    TENSORBOARD_TRAIN_IMAGES, TENSORBOARD_VAL_IMAGES,
+    NORMALIZE_MEAN, NORMALIZE_STD
+)
 
 class VisualizationLogger:
     def __init__(self, tensorboard_dir):
         self.writer = SummaryWriter(tensorboard_dir)
-        self.denormalize = Denormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
+        self.denormalize = Denormalize(NORMALIZE_MEAN, NORMALIZE_STD)
 
     def log_images(self, prefix, images, predictions, targets, epoch):
         """Log a sample of images with predictions for visual inspection"""

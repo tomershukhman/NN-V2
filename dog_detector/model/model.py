@@ -3,16 +3,16 @@ import torch.nn as nn
 from torchvision.ops import nms
 from config import (
     CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    ANCHOR_SCALES, ANCHOR_RATIOS
+    ANCHOR_SCALES, ANCHOR_RATIOS, FEATURE_MAP_SIZE
 )
 from .backbone import ResNetBackbone
 from .detection_head import DetectionHead
 from .anchor_generator import generate_anchors, decode_boxes
 
 class DogDetector(nn.Module):
-    def __init__(self, feature_map_size=7):
+    def __init__(self, feature_map_size=None):
         super(DogDetector, self).__init__()
-        self.feature_map_size = feature_map_size
+        self.feature_map_size = feature_map_size if feature_map_size is not None else FEATURE_MAP_SIZE
         
         # Create backbone and detection head
         self.backbone = ResNetBackbone()
@@ -20,7 +20,7 @@ class DogDetector(nn.Module):
         self.detection_head = DetectionHead(num_anchors_per_cell)
         
         # Generate and register anchor boxes
-        self.register_buffer('default_anchors', generate_anchors(feature_map_size))
+        self.register_buffer('default_anchors', generate_anchors(self.feature_map_size))
     
     def forward(self, x, targets=None):
         # Extract features using backbone

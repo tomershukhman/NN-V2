@@ -21,7 +21,7 @@ if [ "$CONDA_DEFAULT_ENV" == "cloudspace" ]; then
 fi
 
 # Remove the old output directory
-rm -rf output
+rm -rf outputs
 
 if [ "$CONDA_DEFAULT_ENV" != "cloudspace" ]; then
     if [ ! -d ".venv" ]; then

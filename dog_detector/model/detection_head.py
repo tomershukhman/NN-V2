@@ -1,6 +1,9 @@
 import torch
 import torch.nn as nn
-from config import DROPOUT_RATE
+from config import (
+    DROPOUT_RATE, DETECTION_HEAD_CHANNELS,
+    LATERAL_CHANNELS
+)
 
 class DetectionHead(nn.Module):
     def __init__(self, num_anchors_per_cell):
@@ -8,37 +11,37 @@ class DetectionHead(nn.Module):
         self.num_anchors_per_cell = num_anchors_per_cell
         
         # Feature processing with FPN-like structure
-        self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
-        self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.lateral_conv = nn.Conv2d(512, LATERAL_CHANNELS, kernel_size=1)
+        self.smooth_conv = nn.Conv2d(LATERAL_CHANNELS, LATERAL_CHANNELS, kernel_size=3, padding=1)
         
         # Fixed pooling layers
         self.pool = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(LATERAL_CHANNELS, LATERAL_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(LATERAL_CHANNELS),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         
         # Detection head with dropout for regularization
         self.conv_head = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(LATERAL_CHANNELS, DETECTION_HEAD_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(DETECTION_HEAD_CHANNELS),
             nn.ReLU(inplace=True),
             nn.Dropout2d(DROPOUT_RATE),
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(DETECTION_HEAD_CHANNELS, DETECTION_HEAD_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(DETECTION_HEAD_CHANNELS),
             nn.ReLU(inplace=True),
             nn.Dropout2d(DROPOUT_RATE)
         )
         
         # Prediction heads
-        self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        self.bbox_head = nn.Conv2d(DETECTION_HEAD_CHANNELS, num_anchors_per_cell * 4, kernel_size=3, padding=1)
         self.cls_head = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+            nn.Conv2d(DETECTION_HEAD_CHANNELS, DETECTION_HEAD_CHANNELS, kernel_size=3, padding=1),
+            nn.BatchNorm2d(DETECTION_HEAD_CHANNELS),
             nn.ReLU(inplace=True),
             nn.Dropout(DROPOUT_RATE),
-            nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
+            nn.Conv2d(DETECTION_HEAD_CHANNELS, num_anchors_per_cell, kernel_size=3, padding=1)
         )
         
         self._initialize_weights()
@@ -63,7 +66,7 @@ class DetectionHead(nn.Module):
         last_conv = list(self.cls_head.children())[-1]
         nn.init.normal_(last_conv.weight, std=0.01)
         if hasattr(last_conv, 'bias') and last_conv.bias is not None:
-            nn.init.constant_(last_conv.bias, -4.0)  # Start with low confidence
+            nn.init.constant_(last_conv.bias, -2.0)  # Less negative bias to allow more positive predictions
             
     def forward(self, features, target_size):
         # FPN-like feature processing

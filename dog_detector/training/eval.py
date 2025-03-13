@@ -2,7 +2,10 @@ import os
 import torch
 from tqdm import tqdm
 import numpy as np
-from config import DATA_ROOT, BATCH_SIZE, DEVICE
+from config import (
+    DATA_ROOT, BATCH_SIZE, DEVICE,
+    CONFIDENCE_THRESHOLD
+)
 from dog_detector.data import get_data_loaders
 from dog_detector.model.model import get_model
 from dog_detector.model.losses import DetectionLoss
