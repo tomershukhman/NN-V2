@@ -4,16 +4,28 @@ import os
 import numpy as np
 from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
-    OUTPUT_ROOT
+    OUTPUT_ROOT, DATA_ROOT, BATCH_SIZE
 )
-from dataset import get_data_loaders
-from model import get_model
-from losses import DetectionLoss
-from visualization import VisualizationLogger
-from metrics_logger import MetricsCSVLogger
+from dog_detector.data import get_data_loaders
+from dog_detector.model.model import get_model
+from dog_detector.model.losses import DetectionLoss
+from dog_detector.visualization.visualization import VisualizationLogger
+from dog_detector.utils.metrics_logger import MetricsCSVLogger
 
 
-def train():
+def train(data_root=None, download=True, batch_size=None):
+    """
+    Train the dog detection model
+    
+    Args:
+        data_root (str, optional): Path to data directory (overrides config)
+        download (bool): Whether to download the dataset if not present
+        batch_size (int, optional): Batch size for training
+    """
+    # Override config values with function arguments if provided
+    actual_data_root = data_root if data_root is not None else DATA_ROOT
+    actual_batch_size = batch_size if batch_size is not None else BATCH_SIZE
+    
     # Create save directories
     checkpoints_dir = os.path.join(OUTPUT_ROOT, 'checkpoints')
     tensorboard_dir = os.path.join(OUTPUT_ROOT, 'tensorboard')
@@ -42,7 +54,11 @@ def train():
     )
 
     # Get total training steps for learning rate scheduler
-    train_loader, val_loader = get_data_loaders()
+    train_loader, val_loader = get_data_loaders(
+        root=actual_data_root, 
+        batch_size=actual_batch_size, 
+        download=download
+    )
     total_steps = len(train_loader) * NUM_EPOCHS
     warmup_steps = min(1000, total_steps // 5)
     
@@ -380,7 +396,3 @@ class Trainer:
         self.visualization_logger.log_images('Val', images[-16:], inference_preds[-16:], targets[-16:], epoch)
         
         return metrics
-
-
-if __name__ == "__main__":
-    train()
