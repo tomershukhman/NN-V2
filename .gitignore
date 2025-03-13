@@ -163,5 +163,6 @@ mongodb/
 # Keep example files
 !examples/*.jpg
 !examples/*.png
+!dog_detctor/data
 
 downloaded_metrics/
