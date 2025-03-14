@@ -1,6 +1,10 @@
 import torch
 import math
-from config import ANCHOR_SCALES, ANCHOR_RATIOS, NUM_ANCHORS_PER_CELL, FEATURE_MAP_SIZE, IMAGE_SIZE, ANCHOR_SIZES, ANCHOR_ASPECT_RATIOS
+from config import (
+    ANCHOR_SCALES, ANCHOR_RATIOS, NUM_ANCHORS_PER_CELL, 
+    FEATURE_MAP_SIZE, IMAGE_SIZE, ANCHOR_SIZES,
+    BOX_DECODE_CENTER_SCALE, BOX_DECODE_SIZE_SCALE, BOX_DECODE_SIZE_CLAMP
+)
 
 class AnchorGenerator:
     def __init__(self):
@@ -92,25 +96,41 @@ def decode_boxes(box_pred, anchors):
     anchor_cx = (anchor_x1 + anchor_x2) / 2
     anchor_cy = (anchor_y1 + anchor_y2) / 2
     
-    # Scale factors for better gradient flow
-    scale_factors = torch.tensor([0.1, 0.1, 0.2, 0.2], device=device)
+    # Use scale factors from config
+    scale_factors = torch.tensor(
+        [BOX_DECODE_CENTER_SCALE, BOX_DECODE_CENTER_SCALE, 
+         BOX_DECODE_SIZE_SCALE, BOX_DECODE_SIZE_SCALE], 
+        device=device
+    )
     
-    # Extract predicted offsets
+    # Extract predicted offsets with larger range
     pred_cx = box_pred[..., 0] * scale_factors[0] * anchor_w + anchor_cx
     pred_cy = box_pred[..., 1] * scale_factors[1] * anchor_h + anchor_cy
-    pred_w = torch.exp(torch.clamp(box_pred[..., 2] * scale_factors[2], min=-4.0, max=4.0)) * anchor_w
-    pred_h = torch.exp(torch.clamp(box_pred[..., 3] * scale_factors[3], min=-4.0, max=4.0)) * anchor_h
+    pred_w = torch.exp(torch.clamp(box_pred[..., 2] * scale_factors[2], 
+                                  min=-BOX_DECODE_SIZE_CLAMP, 
+                                  max=BOX_DECODE_SIZE_CLAMP)) * anchor_w
+    pred_h = torch.exp(torch.clamp(box_pred[..., 3] * scale_factors[3], 
+                                  min=-BOX_DECODE_SIZE_CLAMP, 
+                                  max=BOX_DECODE_SIZE_CLAMP)) * anchor_h
     
-    # Convert to XYXY format
+    # Convert to XYXY format with gradual clipping
     pred_x1 = pred_cx - pred_w / 2
     pred_y1 = pred_cy - pred_h / 2
     pred_x2 = pred_cx + pred_w / 2
     pred_y2 = pred_cy + pred_h / 2
     
-    # Clip predictions to [0, 1]
-    pred_x1 = torch.clamp(pred_x1, min=0.0, max=1.0)
-    pred_y1 = torch.clamp(pred_y1, min=0.0, max=1.0)
-    pred_x2 = torch.clamp(pred_x2, min=0.0, max=1.0)
-    pred_y2 = torch.clamp(pred_y2, min=0.0, max=1.0)
+    # Use softer clipping during training
+    if box_pred.requires_grad:
+        # Sigmoid-based soft clipping
+        pred_x1 = 2 * torch.sigmoid(pred_x1) - 1
+        pred_y1 = 2 * torch.sigmoid(pred_y1) - 1
+        pred_x2 = 2 * torch.sigmoid(pred_x2) - 1
+        pred_y2 = 2 * torch.sigmoid(pred_y2) - 1
+    else:
+        # Hard clipping during inference
+        pred_x1 = torch.clamp(pred_x1, min=0.0, max=1.0)
+        pred_y1 = torch.clamp(pred_y1, min=0.0, max=1.0)
+        pred_x2 = torch.clamp(pred_x2, min=0.0, max=1.0)
+        pred_y2 = torch.clamp(pred_y2, min=0.0, max=1.0)
     
     return torch.stack([pred_x1, pred_y1, pred_x2, pred_y2], dim=-1)

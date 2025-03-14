@@ -55,16 +55,17 @@ class DetectionHead(nn.Module):
         self._initialize_weights()
     
     def _initialize_weights(self):
-        """Initialize network weights with improved schemes"""
+        """Initialize network weights with improved schemes for early training"""
         for m in self.modules():
             if isinstance(m, nn.Conv2d):
                 if m == self.conf_head[-1]:
-                    # Initialize final confidence layer with positive bias
+                    # Initialize final confidence layer with slight positive bias
                     nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                    nn.init.constant_(m.bias, CONF_BIAS_INIT)
+                    # Initialize bias to make initial predictions close to 0.5
+                    nn.init.constant_(m.bias, 0.0)
                 elif m == self.bbox_head[-1]:
-                    # Initialize final bbox layer with smaller weights
-                    nn.init.normal_(m.weight, mean=0.0, std=0.001)
+                    # Initialize final bbox layer with small weights but larger than before
+                    nn.init.normal_(m.weight, mean=0.0, std=0.01)
                     nn.init.zeros_(m.bias)
                 else:
                     # Better initialization for feature layers
@@ -72,6 +73,7 @@ class DetectionHead(nn.Module):
                     if m.bias is not None:
                         nn.init.constant_(m.bias, 0)
             elif isinstance(m, nn.BatchNorm2d):
+                # Standard initialization for batch norm
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
     

@@ -16,11 +16,11 @@ OUTPUT_ROOT = os.path.join(os.path.dirname(
     os.path.abspath(__file__)), "outputs")
 
 # Training parameters
-BATCH_SIZE = 16  # Increased for better gradient estimates
+BATCH_SIZE = 8  # Reduced to help with gradient stability
 NUM_WORKERS = 4
-LEARNING_RATE = 1e-4  # Increased for faster initial learning
+LEARNING_RATE = 5e-5  # Reduced for more stable learning
 NUM_EPOCHS = 100
-WEIGHT_DECAY = 1e-4  # Reduced weight decay
+WEIGHT_DECAY = 1e-5  # Further reduced weight decay
 
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
@@ -33,14 +33,14 @@ NUM_CYCLES = 0.5  # Half cosine cycle for better final performance
 IMAGE_SAMPLES_TO_LOG = 4
 
 # Model architecture parameters
-IMAGE_SIZE = 640  # Increased for better small dog detection
-FEATURE_MAP_SIZE = 40  # Adjusted for new image size
+IMAGE_SIZE = 512  # Reduced for initial training
+FEATURE_MAP_SIZE = 32  # Adjusted for new image size
 NUM_CLASSES = 2  # Background and Dog
 LATERAL_CHANNELS = 256
 DETECTION_HEAD_CHANNELS = 256
 NUM_ANCHORS_PER_CELL = 9
-DROPOUT_RATE = 0.0  # Remove dropout initially
-CONF_BIAS_INIT = -2.944  # ln(0.05/(1-0.05)) - less extreme initial bias
+DROPOUT_RATE = 0.0
+CONF_BIAS_INIT = -1.0  # Less extreme initial bias
 
 # Anchor configuration - optimized for dog detection
 ANCHOR_SCALES = [0.05, 0.1, 0.2, 0.4]  # More varied scales
@@ -50,13 +50,18 @@ ANCHOR_ASPECT_RATIOS = [0.5, 1.0, 2.0]  # Standard aspect ratios
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
 # Detection parameters
-IOU_THRESHOLD = 0.4  # Reduced for easier matching during training
+IOU_THRESHOLD = 0.3  # Further reduced for easier matching
 NEG_POS_RATIO = 3
 TRAIN_CONFIDENCE_THRESHOLD = 0.01  # Lower threshold for training
 TRAIN_NMS_THRESHOLD = 0.5
-CONFIDENCE_THRESHOLD = 0.1  # Lower initial confidence threshold
-NMS_THRESHOLD = 0.45
-MAX_DETECTIONS = 200  # Allow more detections initially
+CONFIDENCE_THRESHOLD = 0.05  # Much lower initial threshold
+NMS_THRESHOLD = 0.5  # Increased to keep more boxes initially
+MAX_DETECTIONS = 100  # Reduced to prevent too many false positives
+
+# Box decoding parameters
+BOX_DECODE_CENTER_SCALE = 0.25  # Scale factor for center coordinates (x,y)
+BOX_DECODE_SIZE_SCALE = 0.5    # Scale factor for size coordinates (w,h)
+BOX_DECODE_SIZE_CLAMP = 5.0    # Clamp value for size predictions
 
 # Box filtering parameters
 MIN_BOX_SIZE = 0.02
@@ -85,12 +90,12 @@ METRICS_DIR = os.path.join(OUTPUT_ROOT, 'metrics')
 
 # Loss parameters
 FOCAL_LOSS_ALPHA = 0.25
-FOCAL_LOSS_GAMMA = 1.5  # Reduced to make loss less harsh initially
-LOC_LOSS_WEIGHT = 2.0  # Increased importance of localization
+FOCAL_LOSS_GAMMA = 1.0  # Further reduced to make loss less harsh
+LOC_LOSS_WEIGHT = 1.0  # Balanced with confidence loss
 
 # Backbone parameters
 BACKBONE_FROZEN_LAYERS = 1  # Freeze fewer layers for better feature learning
 BACKBONE_LR_FACTOR = 0.2  # Allow backbone to learn faster
 
 # Regularization parameters
-WEIGHT_DECAY = 1e-4  # Reduced weight decay
+WEIGHT_DECAY = 1e-5  # Further reduced weight decay

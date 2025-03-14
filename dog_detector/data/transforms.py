@@ -15,8 +15,8 @@ def get_train_transform():
         A.OneOf([
             A.RandomResizedCrop(
                 size=(IMAGE_SIZE, IMAGE_SIZE),
-                scale=(0.5, 1.0),
-                ratio=(0.75, 1.33),
+                scale=(0.8, 1.0),  # Less aggressive cropping
+                ratio=(0.85, 1.15),  # Less extreme aspect ratios
                 p=1.0
             ),
             A.Resize(
@@ -26,41 +26,42 @@ def get_train_transform():
             ),
         ], p=1.0),
         
-        # Color augmentations
+        # Color augmentations - reduced intensity
         A.OneOf([
             A.RandomBrightnessContrast(
-                brightness_limit=0.2,
-                contrast_limit=0.2,
+                brightness_limit=0.1,  # Reduced from 0.2
+                contrast_limit=0.1,    # Reduced from 0.2
                 p=1.0
             ),
             A.ColorJitter(
-                brightness=0.2,
-                contrast=0.2,
-                saturation=0.2,
-                hue=0.1,
+                brightness=0.1,        # Reduced from 0.2
+                contrast=0.1,          # Reduced from 0.2
+                saturation=0.1,        # Reduced from 0.2
+                hue=0.05,             # Reduced from 0.1
                 p=1.0
             ),
-        ], p=0.5),
+        ], p=0.3),  # Reduced from 0.5
         
-        # Noise and blur
+        # Noise and blur - significantly reduced
         A.OneOf([
             A.GaussNoise(
-                std_range=(0.2, 0.44),     # noise standard deviation as a fraction of max value
-                mean_range=(0.0, 0.0),       # noise mean as a fraction of max value
-                per_channel=True,            # sample noise for each channel independently
-                noise_scale_factor=1.0,      # sample noise per pixel independently
+                std_range=(0.03, 0.1),  # Significantly reduced noise
+                mean_range=(0.0, 0.0),
+                per_channel=False,      # Changed to false to reduce noise
+                noise_scale_factor=0.5,  # Reduced from 1.0
                 p=1.0
-            ),            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
-        ], p=0.3),
+            ),
+            A.GaussianBlur(blur_limit=(3, 3), p=1.0),  # Fixed blur size
+        ], p=0.2),  # Reduced from 0.3
         
-        # Geometric transforms
+        # Geometric transforms - reduced intensity
         A.HorizontalFlip(p=0.5),
         A.Affine(
-            translate_percent=(-0.0625, 0.0625),
-            scale=(0.9, 1.1),
-            rotate=(-15, 15),
+            translate_percent=(-0.03, 0.03),  # Reduced translation
+            scale=(0.95, 1.05),              # Reduced scale variation
+            rotate=(-10, 10),                # Reduced rotation
             border_mode=0,
-            p=0.3
+            p=0.2                           # Reduced from 0.3
         ),
         
         # Final normalization
@@ -68,7 +69,7 @@ def get_train_transform():
         ToTensorV2()
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
-        min_visibility=0.3,
+        min_visibility=0.5,  # Increased from 0.3 to ensure better box visibility
         label_fields=['labels']
     ))
 
