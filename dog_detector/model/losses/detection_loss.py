@@ -39,14 +39,21 @@ class DetectionLoss(nn.Module):
             num_gt = len(gt_boxes)
             
             if num_gt == 0:
-                # Handle empty ground truth case
+                # Handle empty ground truth case - only confidence loss for all predictions as negatives
                 conf_target = torch.zeros_like(conf_pred[i])
                 conf_loss = self.focal_loss(conf_pred[i], conf_target).mean()
                 total_conf_loss = total_conf_loss + conf_loss
                 continue
                 
             # Calculate IoU between all anchors and ground truth boxes
-            iou_matrix = box_iou(default_anchors.unsqueeze(1), gt_boxes.unsqueeze(0))
+            # Ensure both tensors have proper dimensions for broadcasting
+            # default_anchors shape: [num_anchors, 4]
+            # gt_boxes shape: [num_gt, 4]
+            if gt_boxes.dim() == 1 and gt_boxes.size(0) == 4:
+                # If we got a single box as a 1D tensor, reshape it to [1, 4]
+                gt_boxes = gt_boxes.unsqueeze(0)
+                
+            iou_matrix = box_iou(default_anchors, gt_boxes)
             
             # For each anchor, get the best matching ground truth box
             best_gt_iou, best_gt_idx = iou_matrix.max(dim=1)
@@ -123,42 +130,17 @@ class DetectionLoss(nn.Module):
             'bbox_loss': total_loc_loss.item()
         }
 
-    def _compute_negative_loss(self, conf_pred, valid_pred_mask, is_val_mode):
-        """Compute loss for negative examples with improved stability"""
-        # Add small epsilon to prevent log(0)
-        eps = 1e-7
-
-        if is_val_mode and valid_pred_mask is not None and valid_pred_mask.sum() > 0:
-            if self.use_focal_loss:
-                conf_logits = torch.clamp(
-                    conf_pred[valid_pred_mask], min=eps, max=1-eps)
-                conf_loss = self.focal_loss(torch.log(conf_logits / (1 - conf_logits)),
-                                            torch.zeros_like(conf_pred[valid_pred_mask]))
-            else:
-                conf_loss = self.bce_loss(conf_pred[valid_pred_mask],
-                                          torch.zeros_like(conf_pred[valid_pred_mask]))
-        else:
-            if self.use_focal_loss:
-                conf_logits = torch.clamp(conf_pred, min=eps, max=1-eps)
-                conf_loss = self.focal_loss(torch.log(conf_logits / (1 - conf_logits)),
-                                            torch.zeros_like(conf_pred))
-            else:
-                conf_loss = self.bce_loss(
-                    conf_pred, torch.zeros_like(conf_pred))
-
-        # Prevent exploding gradients
-        return torch.clamp(conf_loss.mean(), max=100.0)
 
     def _convert_val_predictions(self, predictions):
         """Convert validation predictions to training format with improved error handling"""
         batch_size = len(predictions)
         device = predictions[0]['boxes'].device if len(
-            predictions) > 0 else torch.device('cpu')
+            predictions) > 0 and 'boxes' in predictions[0] else torch.device('cpu')
 
         # Get default anchors from the first prediction
         default_anchors = None
         for pred in predictions:
-            if 'anchors' in pred and pred['anchors'] is not None:
+            if pred is not None and 'anchors' in pred and pred['anchors'] is not None:
                 default_anchors = pred['anchors']
                 break
 
@@ -177,11 +159,13 @@ class DetectionLoss(nn.Module):
             if pred is None:
                 continue
 
-            valid_preds = pred['boxes'].shape[0] if 'boxes' in pred else 0
+            valid_preds = pred['boxes'].shape[0] if 'boxes' in pred and pred['boxes'].numel() > 0 else 0
             if valid_preds > 0:
-                bbox_pred[i, :valid_preds] = pred['boxes']
+                # Ensure we don't try to copy more elements than the tensor has
+                valid_preds = min(valid_preds, num_anchors)
+                bbox_pred[i, :valid_preds] = pred['boxes'][:valid_preds]
                 conf_pred[i, :valid_preds] = torch.clamp(
-                    pred['scores'], min=1e-7, max=1-1e-7)
+                    pred['scores'][:valid_preds], min=1e-7, max=1-1e-7)
                 valid_pred_mask[i, :valid_preds] = True
 
         return {

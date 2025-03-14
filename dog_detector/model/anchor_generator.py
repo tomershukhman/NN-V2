@@ -1,6 +1,6 @@
 import torch
 import math
-from config import ANCHOR_SCALES, ANCHOR_RATIOS
+from config import ANCHOR_SCALES, ANCHOR_RATIOS, NUM_ANCHORS_PER_CELL, FEATURE_MAP_SIZE, IMAGE_SIZE, ANCHOR_SIZES, ANCHOR_ASPECT_RATIOS
 
 class AnchorGenerator:
     def __init__(self):
@@ -19,8 +19,6 @@ class AnchorGenerator:
     
     def _generate_base_anchors(self):
         """Generate base anchor boxes with improved scale handling"""
-        from config import FEATURE_MAP_SIZE, IMAGE_SIZE, ANCHOR_SIZES, ANCHOR_ASPECT_RATIOS
-        
         # Calculate stride between anchors
         stride = IMAGE_SIZE / FEATURE_MAP_SIZE
         
@@ -31,35 +29,59 @@ class AnchorGenerator:
         shift_x = shift_x.reshape(-1)
         shift_y = shift_y.reshape(-1)
         
+        # Verify product of ANCHOR_SIZES and ANCHOR_ASPECT_RATIOS matches NUM_ANCHORS_PER_CELL
+        expected_anchors_per_cell = len(ANCHOR_SIZES) * len(ANCHOR_ASPECT_RATIOS)
+        if expected_anchors_per_cell != NUM_ANCHORS_PER_CELL:
+            print(f"Warning: Expected {NUM_ANCHORS_PER_CELL} anchors per cell but will generate {expected_anchors_per_cell}")
+            print(f"Generated from {len(ANCHOR_SIZES)} sizes × {len(ANCHOR_ASPECT_RATIOS)} aspect ratios")
+        
+        # Pre-compute all size-ratio combinations
+        combinations = []
+        for size in ANCHOR_SIZES:
+            scale = size / IMAGE_SIZE
+            for ratio in ANCHOR_ASPECT_RATIOS:
+                w = scale * math.sqrt(ratio)
+                h = scale / math.sqrt(ratio)
+                combinations.append((w, h))
+        
+        # Ensure we have exactly NUM_ANCHORS_PER_CELL combinations
+        if len(combinations) < NUM_ANCHORS_PER_CELL:
+            # Add more combinations by duplicating the last one
+            combinations.extend([combinations[-1]] * (NUM_ANCHORS_PER_CELL - len(combinations)))
+        elif len(combinations) > NUM_ANCHORS_PER_CELL:
+            # Trim extra combinations
+            combinations = combinations[:NUM_ANCHORS_PER_CELL]
+        
+        # Generate all anchors without filtering
         anchors = []
         for x, y in zip(shift_x, shift_y):
             cx = (x + stride/2) / IMAGE_SIZE
             cy = (y + stride/2) / IMAGE_SIZE
             
-            # Generate anchors at each position with different scales and aspect ratios
-            for size in ANCHOR_SIZES:
-                scale = size / IMAGE_SIZE
-                for ratio in ANCHOR_ASPECT_RATIOS:
-                    w = scale * math.sqrt(ratio)
-                    h = scale / math.sqrt(ratio)
-                    
-                    # Convert to XYXY format
-                    x1 = cx - w/2
-                    y1 = cy - h/2
-                    x2 = cx + w/2
-                    y2 = cy + h/2
-                    
-                    # Only add valid anchors
-                    if x2 > x1 and y2 > y1:
-                        # Clip to image boundaries
-                        x1 = max(0.0, min(1.0, x1))
-                        y1 = max(0.0, min(1.0, y1))
-                        x2 = max(0.0, min(1.0, x2))
-                        y2 = max(0.0, min(1.0, y2))
-                        
-                        anchors.append([x1, y1, x2, y2])
+            # Apply all combinations to this cell
+            for w, h in combinations:
+                # Convert to XYXY format
+                x1 = cx - w/2
+                y1 = cy - h/2
+                x2 = cx + w/2
+                y2 = cy + h/2
+                
+                # Clip to image boundaries instead of filtering
+                x1 = max(0.0, min(1.0, x1))
+                y1 = max(0.0, min(1.0, y1))
+                x2 = max(0.0, min(1.0, x2))
+                y2 = max(0.0, min(1.0, y2))
+                
+                anchors.append([x1, y1, x2, y2])
         
-        return torch.tensor(anchors, dtype=torch.float32)
+        anchors_tensor = torch.tensor(anchors, dtype=torch.float32)
+        
+        # Verify final shape
+        expected_shape = (FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL, 4)
+        if anchors_tensor.shape != expected_shape:
+            print(f"Error: Anchor shape mismatch! Expected {expected_shape}, got {anchors_tensor.shape}")
+
+        return anchors_tensor
 
 def decode_boxes(box_pred, anchors):
     """Convert predicted box offsets to absolute coordinates"""

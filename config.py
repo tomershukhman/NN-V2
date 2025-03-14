@@ -45,7 +45,7 @@ CONF_BIAS_INIT = -4.595  # ln(0.01/(1-0.01))
 # Anchor configuration - optimized for dog detection
 ANCHOR_SCALES = [0.1, 0.2, 0.3]  # Smaller scales
 ANCHOR_RATIOS = [0.7, 1.0, 1.4]  # Better suited for dogs
-ANCHOR_SIZES = [32, 64, 128, 256]  # Base anchor sizes in pixels
+ANCHOR_SIZES = [32, 64, 128]  # Base anchor sizes in pixels (reduced from 4 to 3)
 ANCHOR_ASPECT_RATIOS = [0.5, 1.0, 2.0]  # Standard aspect ratios
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
