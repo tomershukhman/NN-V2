@@ -1,13 +1,15 @@
 import torch
 import torch.nn as nn
-from torchvision.ops import nms
+import torchvision.ops as ops
 from config import (
     CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    ANCHOR_SCALES, ANCHOR_RATIOS, FEATURE_MAP_SIZE
+    ANCHOR_SCALES, ANCHOR_RATIOS, FEATURE_MAP_SIZE,
+    NUM_ANCHORS_PER_CELL, MIN_BOX_SIZE, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO
 )
 from .backbone import ResNetBackbone
 from .detection_head import DetectionHead
 from .anchor_generator import generate_anchors, decode_boxes
+from .utils.box_utils import nms_with_high_confidence_priority
 
 class DogDetector(nn.Module):
     def __init__(self, feature_map_size=None):
@@ -16,8 +18,7 @@ class DogDetector(nn.Module):
         
         # Create backbone and detection head
         self.backbone = ResNetBackbone()
-        num_anchors_per_cell = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
-        self.detection_head = DetectionHead(num_anchors_per_cell)
+        self.detection_head = DetectionHead(NUM_ANCHORS_PER_CELL)
         
         # Generate and register anchor boxes
         self.register_buffer('default_anchors', generate_anchors(self.feature_map_size))
@@ -45,7 +46,12 @@ class DogDetector(nn.Module):
             
     def _post_process(self, bbox_pred, conf_pred):
         results = []
-        for boxes, scores in zip(bbox_pred, conf_pred):
+        batch_size = bbox_pred.shape[0]
+        
+        for b in range(batch_size):
+            boxes = bbox_pred[b]
+            scores = conf_pred[b]
+            
             # Apply confidence threshold
             mask = scores > CONFIDENCE_THRESHOLD
             boxes = boxes[mask]
@@ -55,20 +61,38 @@ class DogDetector(nn.Module):
                 # Clip boxes to image boundaries
                 boxes = torch.clamp(boxes, min=0, max=1)
                 
-                # Apply NMS
-                keep_idx = nms(boxes, scores, NMS_THRESHOLD)
+                # Filter out very small boxes that are likely noise
+                widths = boxes[:, 2] - boxes[:, 0]
+                heights = boxes[:, 3] - boxes[:, 1]
+                area_mask = (widths > MIN_BOX_SIZE) & (heights > MIN_BOX_SIZE)
+                boxes = boxes[area_mask]
+                scores = scores[area_mask]
                 
-                # Limit maximum detections
-                if len(keep_idx) > MAX_DETECTIONS:
-                    scores_for_topk = scores[keep_idx]
-                    _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
-                    keep_idx = keep_idx[topk_indices]
+                # Filter out extreme aspect ratio boxes (very thin/wide)
+                aspect_ratios = widths / (heights + 1e-6)
+                aspect_ratio_mask = (aspect_ratios > MIN_ASPECT_RATIO) & (aspect_ratios < MAX_ASPECT_RATIO)
+                boxes = boxes[aspect_ratio_mask]
+                scores = scores[aspect_ratio_mask]
                 
-                boxes = boxes[keep_idx]
-                scores = scores[keep_idx]
-            else:
-                boxes = torch.empty((0, 4), device=boxes.device)
-                scores = torch.empty(0, device=scores.device)
+                if len(boxes) > 0:
+                    # Use NMS with high confidence priority
+                    # For potential future improvement: Consider using torchvision.ops.batched_nms instead
+                    boxes, scores, _ = nms_with_high_confidence_priority(
+                        boxes, scores, 
+                        iou_threshold=NMS_THRESHOLD,
+                        confidence_threshold=CONFIDENCE_THRESHOLD
+                    )
+                    
+                    # Limit maximum detections
+                    if len(boxes) > MAX_DETECTIONS:
+                        _, topk_indices = torch.topk(scores, k=MAX_DETECTIONS)
+                        boxes = boxes[topk_indices]
+                        scores = scores[topk_indices]
+            
+            # Create empty tensors if no boxes detected
+            if len(boxes) == 0:
+                boxes = torch.empty((0, 4), device=boxes.device if 'boxes' in locals() else conf_pred.device)
+                scores = torch.empty(0, device=scores.device if 'scores' in locals() else conf_pred.device)
             
             results.append({
                 'boxes': boxes,

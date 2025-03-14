@@ -1,13 +1,17 @@
 import os
 import torch
 import numpy as np
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 import torchvision.transforms as T
 from config import (
-    DEVICE, NORMALIZE_MEAN, NORMALIZE_STD, IMAGE_SIZE
+    DEVICE, NORMALIZE_MEAN, NORMALIZE_STD, IMAGE_SIZE, CONFIDENCE_THRESHOLD,
+    DETECTION_COLOR_THRESHOLD, DETECTION_HIGH_CONF, DETECTION_MED_CONF,
+    DETECTION_LINE_THICKNESS_FACTOR, DETECTION_FONT_SIZE, 
+    DETECTION_BG_OPACITY_BASE, DETECTION_BG_OPACITY_FACTOR
 )
 from dog_detector.model.model import get_model
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 
 def load_model_from_checkpoint(checkpoint_path, device=None):
     if device is None:
@@ -28,15 +32,33 @@ def load_model_from_checkpoint(checkpoint_path, device=None):
     
     return model
 
-def predict_on_image(image_path, checkpoint_path, device=None, confidence_threshold=0.5, save_output=True):
+def predict_on_image(image_path, checkpoint_path, device=None, confidence_threshold=None, save_output=True):
+    """
+    Run detection on a single image with improved confidence filtering
+    
+    Args:
+        image_path (str): Path to the input image
+        checkpoint_path (str): Path to model checkpoint
+        device (torch.device, optional): Device to run inference on
+        confidence_threshold (float, optional): Override default confidence threshold 
+        save_output (bool): Whether to save the detection image
+        
+    Returns:
+        tuple: (predictions, output_image)
+    """
     if device is None:
         device = DEVICE
+    
+    # Use provided threshold or default from config
+    if confidence_threshold is None:
+        confidence_threshold = CONFIDENCE_THRESHOLD
     
     # Load the model
     model = load_model_from_checkpoint(checkpoint_path, device)
     
     # Load and transform the image
     image = Image.open(image_path).convert('RGB')
+    original_size = image.size
     
     # Apply transforms using config values
     transform = T.Compose([
@@ -65,6 +87,22 @@ def predict_on_image(image_path, checkpoint_path, device=None, confidence_thresh
     # Draw predictions on the image
     output_image = draw_predictions(image, boxes, scores)
     
+    # Print detection statistics
+    print(f"Found {len(boxes)} dogs with confidence >= {confidence_threshold}")
+    
+    # Give user feedback on confidence score distribution
+    if len(scores) > 0:
+        print(f"Confidence score range: {scores.min():.3f} to {scores.max():.3f}, mean: {scores.mean():.3f}")
+        
+        # Count boxes in different confidence intervals using config parameters
+        high_conf = (scores >= DETECTION_HIGH_CONF).sum()
+        mid_conf = ((scores >= DETECTION_MED_CONF) & (scores < DETECTION_HIGH_CONF)).sum()
+        low_conf = (scores < DETECTION_MED_CONF).sum()
+        
+        print(f"High confidence (≥{DETECTION_HIGH_CONF}): {high_conf} detections")
+        print(f"Medium confidence ({DETECTION_MED_CONF}-{DETECTION_HIGH_CONF}): {mid_conf} detections")
+        print(f"Low confidence (<{DETECTION_MED_CONF}): {low_conf} detections")
+    
     # Save the output image if requested
     if save_output:
         output_filename = os.path.splitext(os.path.basename(image_path))[0] + "_detection.jpg"
@@ -74,20 +112,30 @@ def predict_on_image(image_path, checkpoint_path, device=None, confidence_thresh
         
         # Also display the image if in a notebook environment
         try:
-            plt.figure(figsize=(10, 10))
+            plt.figure(figsize=(12, 10))
             plt.imshow(np.array(output_image))
             plt.axis('off')
             plt.title(f"Detection Results: {len(boxes)} dogs found")
+            
+            # Add a subplot with confidence distribution if we have detections
+            if len(scores) > 0:
+                plt.figure(figsize=(8, 3))
+                plt.hist(scores, bins=10, range=(0, 1.0), color='blue', alpha=0.7)
+                plt.title('Confidence Score Distribution')
+                plt.xlabel('Confidence')
+                plt.ylabel('Count')
+                plt.tight_layout()
+                
             plt.show()
-        except:
-            pass
+        except Exception as e:
+            print(f"Could not display visualization: {e}")
     
     # Return both the raw predictions and the annotated image
     return pred, output_image
 
 def draw_predictions(image, boxes, scores):
     """
-    Draw bounding boxes and scores on the image
+    Draw bounding boxes and scores on the image with improved visual clarity
     
     Args:
         image (PIL.Image): Input image
@@ -104,9 +152,18 @@ def draw_predictions(image, boxes, scores):
     # Get image dimensions
     width, height = image.size
     
-    # Define colors
-    box_color = "green"
-    text_color = "white"
+    # Define better color scheme based on confidence using configuration parameters
+    def get_color(score):
+        if score < DETECTION_COLOR_THRESHOLD:  # Low confidence
+            r, g, b = 255, int(255 * (score / DETECTION_COLOR_THRESHOLD)), 0  # Red to yellow
+        else:  # Higher confidence
+            r, g, b = int(255 * (1 - score) * 1.67), 255, 0  # Yellow to green
+        return f"rgb({r},{g},{b})"
+    
+    # Sort by confidence score to draw highest confidence boxes last (on top)
+    indices = np.argsort(scores)
+    boxes = boxes[indices]
+    scores = scores[indices]
     
     # Draw each box
     for i, (box, score) in enumerate(zip(boxes, scores)):
@@ -123,26 +180,47 @@ def draw_predictions(image, boxes, scores):
         x2 = max(0, min(width - 1, x2))
         y2 = max(0, min(height - 1, y2))
         
-        # Draw rectangle
-        draw.rectangle([(x1, y1), (x2, y2)], outline=box_color, width=3)
+        # Get color based on confidence
+        box_color = get_color(score)
+        text_color = "white"
+        
+        # Draw rectangle with thickness based on confidence using config parameter
+        thickness = max(1, min(3, int(score * DETECTION_LINE_THICKNESS_FACTOR)))
+        draw.rectangle([(x1, y1), (x2, y2)], outline=box_color, width=thickness)
         
         # Draw score
-        score_text = f"Dog: {score:.2f}"
-        text_width, text_height = draw.textsize(score_text)
+        conf_percentage = int(score * 100)
+        score_text = f"Dog: {conf_percentage}%"
         
-        # Make sure text box doesn't go outside image
-        rect_y1 = y1 - text_height - 5 if y1 > text_height + 5 else y1
-        rect_y2 = rect_y1 + text_height + 5
+        try:
+            # Try to use a nicer font if available with configured size
+            font = ImageFont.truetype("Arial", DETECTION_FONT_SIZE)
+        except:
+            font = ImageFont.load_default()
+            
+        # Get text size
+        text_bbox = draw.textbbox((0, 0), score_text, font=font)
+        text_width = text_bbox[2] - text_bbox[0]
+        text_height = text_bbox[3] - text_bbox[1]
         
-        # Draw text background
-        draw.rectangle([(x1, rect_y1), (x1 + text_width + 5, rect_y2)], fill=box_color)
+        # Draw text background based on confidence using configuration parameters
+        bg_opacity = int(min(230, DETECTION_BG_OPACITY_BASE + score * DETECTION_BG_OPACITY_FACTOR))
+        bg_color_tuple = (0, 0, 0, bg_opacity)  # Semi-transparent black
         
-        # Draw text
-        draw.text((x1 + 2, rect_y1 + 2), score_text, fill=text_color)
+        # Make sure text box is positioned properly
+        rect_y1 = max(0, y1 - text_height - 8)
+        rect_y2 = max(text_height, y1)
+        
+        # Draw text background with rounded corners
+        draw.rectangle([(x1, rect_y1), (x1 + text_width + 8, rect_y2)], 
+                      fill=bg_color_tuple)
+        
+        # Draw confidence score text
+        draw.text((x1 + 4, rect_y1 + 2), score_text, fill=text_color, font=font)
     
     return draw_image
 
-def batch_predict(image_paths, checkpoint_path, output_dir=None, device=None, confidence_threshold=0.5):
+def batch_predict(image_paths, checkpoint_path, output_dir=None, device=None, confidence_threshold=None):
     """
     Run detection on a batch of images
     
@@ -151,13 +229,17 @@ def batch_predict(image_paths, checkpoint_path, output_dir=None, device=None, co
         checkpoint_path (str): Path to the checkpoint file
         output_dir (str, optional): Directory to save output images
         device (torch.device, optional): Device to run inference on
-        confidence_threshold (float): Threshold for displaying detections
+        confidence_threshold (float, optional): Override default confidence threshold
         
     Returns:
         list: List of tuples containing (image_path, predictions, output_image)
     """
     if device is None:
         device = DEVICE
+    
+    # Use provided threshold or default from config
+    if confidence_threshold is None:
+        confidence_threshold = CONFIDENCE_THRESHOLD
     
     # Create output directory if specified
     if output_dir:

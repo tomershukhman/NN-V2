@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from config import (
     DROPOUT_RATE, DETECTION_HEAD_CHANNELS,
-    LATERAL_CHANNELS
+    LATERAL_CHANNELS, CONF_BIAS_INIT
 )
 
 class DetectionHead(nn.Module):
@@ -62,11 +62,11 @@ class DetectionHead(nn.Module):
         if hasattr(self.bbox_head, 'bias') and self.bbox_head.bias is not None:
             nn.init.zeros_(self.bbox_head.bias)
         
-        # Initialize last layer of cls_head with slight negative bias
+        # Initialize last layer of cls_head with configurable bias for confidence predictions
         last_conv = list(self.cls_head.children())[-1]
         nn.init.normal_(last_conv.weight, std=0.01)
         if hasattr(last_conv, 'bias') and last_conv.bias is not None:
-            nn.init.constant_(last_conv.bias, -2.0)  # Less negative bias to allow more positive predictions
+            nn.init.constant_(last_conv.bias, CONF_BIAS_INIT)
             
     def forward(self, features, target_size):
         # FPN-like feature processing

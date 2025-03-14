@@ -1,12 +1,17 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from config import (
+    FOCAL_LOSS_ALPHA, FOCAL_LOSS_GAMMA, IOU_THRESHOLD, 
+    NEG_POS_RATIO, LOC_LOSS_WEIGHT
+)
+from .utils.box_utils import box_iou, diou_loss
 
 class FocalLoss(nn.Module):
-    def __init__(self, alpha=0.25, gamma=2.0, reduction='none'):
+    def __init__(self, alpha=None, gamma=None, reduction='none'):
         super().__init__()
-        self.alpha = alpha
-        self.gamma = gamma
+        self.alpha = FOCAL_LOSS_ALPHA if alpha is None else alpha
+        self.gamma = FOCAL_LOSS_GAMMA if gamma is None else gamma
         self.reduction = reduction
         
     def forward(self, inputs, targets):
@@ -27,11 +32,12 @@ class FocalLoss(nn.Module):
         return loss
 
 class DetectionLoss(nn.Module):
-    def __init__(self, iou_threshold=0.5, neg_pos_ratio=3, use_focal_loss=True):
+    def __init__(self, iou_threshold=None, neg_pos_ratio=None, use_focal_loss=True, loc_loss_weight=None):
         super().__init__()
-        self.iou_threshold = iou_threshold
-        self.neg_pos_ratio = neg_pos_ratio
+        self.iou_threshold = IOU_THRESHOLD if iou_threshold is None else iou_threshold
+        self.neg_pos_ratio = NEG_POS_RATIO if neg_pos_ratio is None else neg_pos_ratio
         self.use_focal_loss = use_focal_loss
+        self.loc_loss_weight = LOC_LOSS_WEIGHT if loc_loss_weight is None else loc_loss_weight
         self.bce_loss = nn.BCELoss(reduction='none')
         self.focal_loss = FocalLoss(reduction='none')
         self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
@@ -123,8 +129,8 @@ class DetectionLoss(nn.Module):
             gt_boxes = gt_boxes.unsqueeze(0)  # [1, num_gt, 4]
             default_anchors_exp = default_anchors.unsqueeze(1)  # [num_anchors, 1, 4]
             
-            # Calculate IoU matrix: [num_anchors, num_gt]
-            ious = self._box_iou(default_anchors_exp, gt_boxes)
+            # Calculate IoU matrix: [num_anchors, num_gt] using box_iou from box_utils
+            ious = box_iou(default_anchors_exp, gt_boxes)
             
             # Find best gt for each anchor and best anchor for each gt
             best_gt_iou, best_gt_idx = ious.max(dim=1)  # [num_anchors]
@@ -153,8 +159,8 @@ class DetectionLoss(nn.Module):
                 matched_gt_boxes = gt_boxes.squeeze(0)[best_gt_idx[positive_indices]]
                 pred_boxes = bbox_pred[i][positive_indices]
                 
-                # Calculate GIoU or DIoU loss instead of simple L1 for better localization
-                loc_loss = self._diou_loss(pred_boxes, matched_gt_boxes)
+                # Use diou_loss from box_utils for better localization
+                loc_loss = diou_loss(pred_boxes, matched_gt_boxes)
                 total_loc_loss += loc_loss.sum()
                 
                 # Create confidence targets
@@ -212,79 +218,11 @@ class DetectionLoss(nn.Module):
         total_loc_loss = total_loc_loss / num_pos
         total_conf_loss = total_conf_loss / num_pos
         
-        # Weighted sum - higher weight on localization to improve box accuracy
-        total_loss = 1.5 * total_loc_loss + total_conf_loss
+        # Weighted sum using configurable weight parameter
+        total_loss = self.loc_loss_weight * total_loc_loss + total_conf_loss
         
         return {
             'total_loss': total_loss,
             'conf_loss': total_conf_loss.item(),
             'bbox_loss': total_loc_loss.item()
         }
-
-    @staticmethod
-    def _box_iou(boxes1, boxes2):
-        """
-        Calculate IoU between all pairs of boxes between boxes1 and boxes2
-        boxes1: [N, M, 4] boxes
-        boxes2: [N, M, 4] boxes
-        Returns: [N, M] IoU matrix
-        """
-        # Calculate intersection areas
-        left = torch.max(boxes1[..., 0], boxes2[..., 0])
-        top = torch.max(boxes1[..., 1], boxes2[..., 1])
-        right = torch.min(boxes1[..., 2], boxes2[..., 2])
-        bottom = torch.min(boxes1[..., 3], boxes2[..., 3])
-        
-        width = (right - left).clamp(min=0)
-        height = (bottom - top).clamp(min=0)
-        intersection = width * height
-        
-        # Calculate union areas
-        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
-        area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
-        union = area1 + area2 - intersection
-        
-        return intersection / (union + 1e-6)
-    
-    @staticmethod
-    def _diou_loss(boxes1, boxes2):
-        """
-        Calculate DIoU loss between boxes1 and boxes2
-        DIoU = 1 - IoU + ρ²(b,b^gt)/c² where ρ is the Euclidean distance between centers
-        and c is the diagonal length of the smallest enclosing box
-        """
-        # Calculate IoU
-        left = torch.max(boxes1[..., 0], boxes2[..., 0])
-        top = torch.max(boxes1[..., 1], boxes2[..., 1])
-        right = torch.min(boxes1[..., 2], boxes2[..., 2])
-        bottom = torch.min(boxes1[..., 3], boxes2[..., 3])
-        
-        width = (right - left).clamp(min=0)
-        height = (bottom - top).clamp(min=0)
-        intersection = width * height
-        
-        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
-        area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
-        union = area1 + area2 - intersection
-        
-        iou = intersection / (union + 1e-6)
-        
-        # Calculate center distance
-        center1 = (boxes1[..., :2] + boxes1[..., 2:]) / 2
-        center2 = (boxes2[..., :2] + boxes2[..., 2:]) / 2
-        center_dist = torch.sum((center1 - center2) ** 2, dim=-1)
-        
-        # Calculate diagonal distance of smallest enclosing box
-        enclose_left = torch.min(boxes1[..., 0], boxes2[..., 0])
-        enclose_top = torch.min(boxes1[..., 1], boxes2[..., 1])
-        enclose_right = torch.max(boxes1[..., 2], boxes2[..., 2])
-        enclose_bottom = torch.max(boxes1[..., 3], boxes2[..., 3])
-        
-        enclose_width = (enclose_right - enclose_left)
-        enclose_height = (enclose_bottom - enclose_top)
-        enclose_diag = enclose_width**2 + enclose_height**2 + 1e-6
-        
-        # Calculate DIoU
-        diou = 1 - iou + center_dist / enclose_diag
-        
-        return diou
