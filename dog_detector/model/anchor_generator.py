@@ -18,7 +18,7 @@ class AnchorGenerator:
         return self.base_anchors
     
     def _generate_base_anchors(self):
-        """Generate base anchor boxes with improved scale handling"""
+        """Generate base anchor boxes with improved coverage for dog detection"""
         # Calculate stride between anchors
         stride = IMAGE_SIZE / FEATURE_MAP_SIZE
         
@@ -29,58 +29,53 @@ class AnchorGenerator:
         shift_x = shift_x.reshape(-1)
         shift_y = shift_y.reshape(-1)
         
-        # Verify product of ANCHOR_SIZES and ANCHOR_ASPECT_RATIOS matches NUM_ANCHORS_PER_CELL
-        expected_anchors_per_cell = len(ANCHOR_SIZES) * len(ANCHOR_ASPECT_RATIOS)
-        if expected_anchors_per_cell != NUM_ANCHORS_PER_CELL:
-            print(f"Warning: Expected {NUM_ANCHORS_PER_CELL} anchors per cell but will generate {expected_anchors_per_cell}")
-            print(f"Generated from {len(ANCHOR_SIZES)} sizes × {len(ANCHOR_ASPECT_RATIOS)} aspect ratios")
-        
-        # Pre-compute all size-ratio combinations
+        # Generate diverse anchor combinations for better coverage
         combinations = []
         for size in ANCHOR_SIZES:
-            scale = size / IMAGE_SIZE
-            for ratio in ANCHOR_ASPECT_RATIOS:
-                w = scale * math.sqrt(ratio)
-                h = scale / math.sqrt(ratio)
-                combinations.append((w, h))
+            base_scale = size / IMAGE_SIZE
+            for scale in ANCHOR_SCALES:
+                effective_scale = base_scale * scale
+                for ratio in ANCHOR_RATIOS:
+                    w = effective_scale * math.sqrt(ratio)
+                    h = effective_scale / math.sqrt(ratio)
+                    if 0.01 < w < 1.0 and 0.01 < h < 1.0:  # Filter out invalid sizes
+                        combinations.append((w, h))
         
         # Ensure we have exactly NUM_ANCHORS_PER_CELL combinations
         if len(combinations) < NUM_ANCHORS_PER_CELL:
-            # Add more combinations by duplicating the last one
-            combinations.extend([combinations[-1]] * (NUM_ANCHORS_PER_CELL - len(combinations)))
+            # Add more combinations by interpolating between existing ones
+            while len(combinations) < NUM_ANCHORS_PER_CELL:
+                idx = len(combinations) % len(combinations)
+                w1, h1 = combinations[idx]
+                w2, h2 = combinations[(idx + 1) % len(combinations)]
+                combinations.append(((w1 + w2)/2, (h1 + h2)/2))
         elif len(combinations) > NUM_ANCHORS_PER_CELL:
-            # Trim extra combinations
-            combinations = combinations[:NUM_ANCHORS_PER_CELL]
+            # Select most diverse combinations
+            selected = []
+            step = len(combinations) / NUM_ANCHORS_PER_CELL
+            for i in range(NUM_ANCHORS_PER_CELL):
+                idx = int(i * step)
+                selected.append(combinations[idx])
+            combinations = selected
         
-        # Generate all anchors without filtering
+        # Generate all anchors
         anchors = []
         for x, y in zip(shift_x, shift_y):
             cx = (x + stride/2) / IMAGE_SIZE
             cy = (y + stride/2) / IMAGE_SIZE
             
-            # Apply all combinations to this cell
             for w, h in combinations:
-                # Convert to XYXY format
-                x1 = cx - w/2
-                y1 = cy - h/2
-                x2 = cx + w/2
-                y2 = cy + h/2
+                # Convert to XYXY format with clipping
+                x1 = max(0.0, min(1.0, cx - w/2))
+                y1 = max(0.0, min(1.0, cy - h/2))
+                x2 = max(0.0, min(1.0, cx + w/2))
+                y2 = max(0.0, min(1.0, cy + h/2))
                 
-                # Clip to image boundaries instead of filtering
-                x1 = max(0.0, min(1.0, x1))
-                y1 = max(0.0, min(1.0, y1))
-                x2 = max(0.0, min(1.0, x2))
-                y2 = max(0.0, min(1.0, y2))
-                
-                anchors.append([x1, y1, x2, y2])
+                # Only add if box is valid
+                if x2 > x1 and y2 > y1:
+                    anchors.append([x1, y1, x2, y2])
         
         anchors_tensor = torch.tensor(anchors, dtype=torch.float32)
-        
-        # Verify final shape
-        expected_shape = (FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL, 4)
-        if anchors_tensor.shape != expected_shape:
-            print(f"Error: Anchor shape mismatch! Expected {expected_shape}, got {anchors_tensor.shape}")
-
         return anchors_tensor
 
 def decode_boxes(box_pred, anchors):

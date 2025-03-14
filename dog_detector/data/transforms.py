@@ -44,16 +44,21 @@ def get_train_transform():
         
         # Noise and blur
         A.OneOf([
-            A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
-            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+            A.GaussNoise(
+                std_range=(0.2, 0.44),     # noise standard deviation as a fraction of max value
+                mean_range=(0.0, 0.0),       # noise mean as a fraction of max value
+                per_channel=True,            # sample noise for each channel independently
+                noise_scale_factor=1.0,      # sample noise per pixel independently
+                p=1.0
+            ),            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
         ], p=0.3),
         
         # Geometric transforms
         A.HorizontalFlip(p=0.5),
-        A.ShiftScaleRotate(
-            shift_limit=0.0625,
-            scale_limit=0.1,
-            rotate_limit=15,
+        A.Affine(
+            translate_percent=(-0.0625, 0.0625),
+            scale=(0.9, 1.1),
+            rotate=(-15, 15),
             border_mode=0,
             p=0.3
         ),
