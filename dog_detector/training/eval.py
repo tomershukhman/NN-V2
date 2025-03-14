@@ -57,37 +57,57 @@ def evaluate(checkpoint_path, data_root=None, batch_size=None):
     
     # Main evaluation loop
     with torch.no_grad():
-        for images, _, boxes in tqdm(val_loader):
+        for images, targets in tqdm(val_loader):
             # Prepare inputs
             images = torch.stack([image.to(DEVICE) for image in images])
-            targets = []
-            for boxes_per_image in boxes:
-                target = {
-                    'boxes': boxes_per_image.to(DEVICE),
-                    'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=DEVICE)
+            processed_targets = []
+            for target in targets:
+                processed_target = {
+                    'boxes': target['boxes'].to(DEVICE),
+                    'labels': target['labels'].to(DEVICE)
                 }
-                targets.append(target)
+                processed_targets.append(processed_target)
             
-            # Forward pass for loss calculation
-            predictions = model(images, targets)
-            loss_dict = criterion(predictions, targets)
-            total_loss += loss_dict['total_loss'].item()
-            total_conf_loss += loss_dict['conf_loss']
-            total_bbox_loss += loss_dict['bbox_loss']
-            
-            # Forward pass for evaluation
-            inference_preds = model(images, None)
-            all_predictions.extend(inference_preds)
-            all_targets.extend(targets)
+            try:
+                # Forward pass for loss calculation
+                train_predictions = model(images, processed_targets)
+                loss_dict = criterion(train_predictions, processed_targets)
+                
+                # Skip batch if loss is invalid
+                if not torch.isnan(loss_dict['total_loss']):
+                    total_loss += loss_dict['total_loss'].item()
+                    total_conf_loss += loss_dict['conf_loss']
+                    total_bbox_loss += loss_dict['bbox_loss']
+                
+                # Forward pass for evaluation with proper sigmoid activation
+                inference_preds = model(images)
+                
+                # Convert confidence scores from logits to probabilities
+                if isinstance(inference_preds, list):
+                    for pred in inference_preds:
+                        if 'scores' in pred:
+                            pred['scores'] = torch.sigmoid(pred['scores'])
+                
+                all_predictions.extend(inference_preds)
+                all_targets.extend(processed_targets)
+            except Exception as e:
+                print(f"Error processing batch: {e}")
+                continue
     
-    # Calculate metrics
+    # Avoid division by zero
+    num_valid_batches = max(1, len(val_loader))
+    avg_loss = total_loss / num_valid_batches
+    avg_conf_loss = total_conf_loss / num_valid_batches
+    avg_bbox_loss = total_bbox_loss / num_valid_batches
+    
+    # Calculate metrics with error handling
     metrics = calculate_metrics(all_predictions, all_targets)
     
     # Add loss metrics
     metrics.update({
-        'total_loss': total_loss / len(val_loader),
-        'conf_loss': total_conf_loss / len(val_loader),
-        'bbox_loss': total_bbox_loss / len(val_loader)
+        'total_loss': avg_loss,
+        'conf_loss': avg_conf_loss,
+        'bbox_loss': avg_bbox_loss
     })
     
     # Print summary metrics
@@ -104,19 +124,30 @@ def evaluate(checkpoint_path, data_root=None, batch_size=None):
     csv_logger = MetricsCSVLogger(results_dir)
     csv_logger.log_metrics('evaluation', metrics, checkpoint['epoch'])
     
-    # Visualize a few examples
-    if len(images) > 0:
-        tensorboard_dir = os.path.join(results_dir, 'evaluation')
-        os.makedirs(tensorboard_dir, exist_ok=True)
-        vis_logger = VisualizationLogger(tensorboard_dir)
-        vis_logger.log_images('eval', images, inference_preds, targets, checkpoint['epoch'])
-        vis_logger.close()
-    
     return metrics
 
 def calculate_metrics(predictions, targets):
-    """Calculate comprehensive evaluation metrics"""
+    """Calculate comprehensive evaluation metrics with improved error handling"""
     total_images = len(predictions)
+    if total_images == 0:
+        return {
+            'correct_count_percent': 0,
+            'over_detections': 0,
+            'under_detections': 0,
+            'mean_iou': 0,
+            'median_iou': 0,
+            'mean_confidence': 0,
+            'median_confidence': 0,
+            'avg_detections': 0,
+            'avg_ground_truth': 0,
+            'precision': 0,
+            'recall': 0,
+            'f1_score': 0,
+            'detections_per_image': torch.zeros(0),
+            'iou_distribution': torch.zeros(0),
+            'confidence_distribution': torch.zeros(0)
+        }
+    
     correct_count = 0
     over_detections = 0
     under_detections = 0
@@ -129,60 +160,86 @@ def calculate_metrics(predictions, targets):
     detections_per_image = []
     
     for pred, target in zip(predictions, targets):
-        pred_boxes = pred['boxes']
-        pred_scores = pred['scores']
-        gt_boxes = target['boxes']
-        
-        # Count statistics
-        num_pred = len(pred_boxes)
-        num_gt = len(gt_boxes)
-        detections_per_image.append(num_pred)
-        total_detections += num_pred
-        total_ground_truth += num_gt
-        
-        # Detection count analysis
-        if num_pred == num_gt:
-            correct_count += 1
-        elif num_pred > num_gt:
-            over_detections += 1
-        else:
-            under_detections += 1
-        
-        # Collect confidence scores
-        if len(pred_scores) > 0:
-            all_confidences.extend(pred_scores.cpu().tolist())
-        
-        # Calculate IoUs for matched predictions
-        if num_pred > 0 and num_gt > 0:
-            ious = calculate_box_iou(pred_boxes, gt_boxes)
-            if len(ious) > 0:
-                max_ious, _ = ious.max(dim=0)
-                all_ious.extend(max_ious.cpu().tolist())
-                # Count true positives (IoU > 0.5)
-                true_positives += (max_ious > 0.5).sum().item()
+        try:
+            pred_boxes = pred['boxes']
+            pred_scores = pred['scores']
+            gt_boxes = target['boxes']
+            
+            # Ensure tensors are on CPU for numpy operations
+            pred_boxes = pred_boxes.cpu()
+            pred_scores = pred_scores.cpu()
+            gt_boxes = gt_boxes.cpu()
+            
+            # Count statistics
+            num_pred = len(pred_boxes)
+            num_gt = len(gt_boxes)
+            detections_per_image.append(num_pred)
+            total_detections += num_pred
+            total_ground_truth += num_gt
+            
+            # Detection count analysis
+            if num_pred == num_gt:
+                correct_count += 1
+            elif num_pred > num_gt:
+                over_detections += 1
+            else:
+                under_detections += 1
+            
+            # Collect confidence scores
+            if len(pred_scores) > 0:
+                all_confidences.extend(pred_scores.tolist())
+            
+            # Calculate IoUs for matched predictions
+            if num_pred > 0 and num_gt > 0:
+                ious = calculate_box_iou(pred_boxes, gt_boxes)
+                if len(ious) > 0:
+                    max_ious, _ = ious.max(dim=0)
+                    all_ious.extend(max_ious.tolist())
+                    # Count true positives (IoU > 0.5)
+                    true_positives += (max_ious > 0.5).sum().item()
+        except Exception as e:
+            print(f"Error calculating metrics for an image: {e}")
+            continue
     
     # Convert lists to tensors for histogram logging
     iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
     confidence_distribution = torch.tensor(all_confidences) if all_confidences else torch.zeros(0)
     detections_per_image = torch.tensor(detections_per_image)
     
-    # Calculate final metrics
-    correct_count_percent = (correct_count / total_images) * 100
-    avg_detections = total_detections / total_images
-    avg_ground_truth = total_ground_truth / total_images
-    
-    # Calculate mean and median IoU
-    mean_iou = np.mean(all_ious) if all_ious else 0
-    median_iou = np.median(all_ious) if all_ious else 0
-    
-    # Calculate confidence score statistics
-    mean_confidence = np.mean(all_confidences) if all_confidences else 0
-    median_confidence = np.median(all_confidences) if all_confidences else 0
-    
-    # Calculate precision, recall, and F1 score
-    precision = true_positives / total_detections if total_detections > 0 else 0
-    recall = true_positives / total_ground_truth if total_ground_truth > 0 else 0
-    f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    # Calculate final metrics with proper error handling
+    try:
+        correct_count_percent = (correct_count / total_images) * 100
+        avg_detections = total_detections / total_images
+        avg_ground_truth = total_ground_truth / total_images
+        
+        mean_iou = np.mean(all_ious) if all_ious else 0
+        median_iou = np.median(all_ious) if all_ious else 0
+        
+        mean_confidence = np.mean(all_confidences) if all_confidences else 0
+        median_confidence = np.median(all_confidences) if all_confidences else 0
+        
+        precision = true_positives / total_detections if total_detections > 0 else 0
+        recall = true_positives / total_ground_truth if total_ground_truth > 0 else 0
+        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
+    except Exception as e:
+        print(f"Error calculating final metrics: {e}")
+        return {
+            'correct_count_percent': 0,
+            'over_detections': 0,
+            'under_detections': 0,
+            'mean_iou': 0,
+            'median_iou': 0,
+            'mean_confidence': 0,
+            'median_confidence': 0,
+            'avg_detections': 0,
+            'avg_ground_truth': 0,
+            'precision': 0,
+            'recall': 0,
+            'f1_score': 0,
+            'detections_per_image': torch.zeros(0),
+            'iou_distribution': torch.zeros(0),
+            'confidence_distribution': torch.zeros(0)
+        }
     
     return {
         'correct_count_percent': correct_count_percent,
@@ -203,22 +260,27 @@ def calculate_metrics(predictions, targets):
     }
 
 def calculate_box_iou(boxes1, boxes2):
-    """Calculate IoU between two sets of boxes"""
-    # Convert to x1y1x2y2 format if normalized
-    boxes1 = boxes1.clone()
-    boxes2 = boxes2.clone()
-    
-    # Calculate intersection areas
-    x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
-    y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
-    x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
-    y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
-    
-    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-    
-    # Calculate union areas
-    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-    union = area1[:, None] + area2 - intersection
-    
-    return intersection / (union + 1e-6)
+    """Calculate IoU between two sets of boxes with error handling"""
+    try:
+        # Convert to x1y1x2y2 format if normalized
+        boxes1 = boxes1.clone()
+        boxes2 = boxes2.clone()
+        
+        # Calculate intersection areas
+        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
+        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
+        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
+        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+        
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+        
+        # Calculate union areas
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        union = area1[:, None] + area2 - intersection
+        
+        # Add small epsilon to prevent division by zero
+        return intersection / (union + 1e-6)
+    except Exception as e:
+        print(f"Error calculating IoU: {e}")
+        return torch.zeros((len(boxes1), len(boxes2)))

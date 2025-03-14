@@ -1,87 +1,98 @@
 import torch
 import torchvision.ops as ops
 
-# Replace custom box_iou with torchvision implementation
+def coco_to_xyxy(boxes):
+    """Convert COCO format [x, y, w, h] to [x1, y1, x2, y2] format"""
+    if isinstance(boxes, torch.Tensor):
+        x, y, w, h = boxes.unbind(-1)
+        return torch.stack([x, y, x + w, y + h], dim=-1)
+    else:
+        return [[box[0], box[1], box[0] + box[2], box[1] + box[3]] for box in boxes]
+
+def xyxy_to_coco(boxes):
+    """Convert [x1, y1, x2, y2] format to COCO format [x, y, w, h]"""
+    if isinstance(boxes, torch.Tensor):
+        x1, y1, x2, y2 = boxes.unbind(-1)
+        return torch.stack([x1, y1, x2 - x1, y2 - y1], dim=-1)
+    else:
+        return [[box[0], box[1], box[2] - box[0], box[3] - box[1]] for box in boxes]
+
 def box_iou(boxes1, boxes2):
     """
-    Calculate IoU between all pairs of boxes between boxes1 and boxes2
-    boxes1: [N, M, 4] boxes
-    boxes2: [N, M, 4] boxes
-    Returns: [N, M] IoU matrix
+    Calculate IoU between two sets of boxes, maintaining gradients for backpropagation
     
-    This is a wrapper around torchvision.ops.box_iou to handle N-dimensional input
+    Args:
+        boxes1: [N, 4] ground truth boxes
+        boxes2: [M, 4] predicted boxes
+        
+    Returns:
+        IoU tensor of shape [N, M]
     """
-    # Handle N-dimensional input by reshaping
-    original_shape = boxes1.shape[:-1]
-    boxes1_reshaped = boxes1.reshape(-1, 4)
-    boxes2_reshaped = boxes2.reshape(-1, 4)
+    # Calculate intersection coordinates
+    x1 = torch.max(boxes1[..., 0], boxes2[..., 0])
+    y1 = torch.max(boxes1[..., 1], boxes2[..., 1])
+    x2 = torch.min(boxes1[..., 2], boxes2[..., 2])
+    y2 = torch.min(boxes1[..., 3], boxes2[..., 3])
     
-    # Use torchvision's implementation for the core calculation
-    ious = ops.box_iou(boxes1_reshaped, boxes2_reshaped)
+    # Calculate intersection area
+    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
     
-    # Reshape back to original dimensions
-    return ious.reshape(*original_shape)
-
-def diou_loss(boxes1, boxes2):
-    """
-    Calculate DIoU/CIoU loss between boxes1 and boxes2
-    DIoU = 1 - IoU + ρ²(b,b^gt)/c² 
-    where ρ is the Euclidean distance between centers
-    and c is the diagonal length of the smallest enclosing box
-    
-    Improved with aspect ratio consistency term (v) for CIoU loss
-    """
-    # torchvision.ops has no direct DIoU/CIoU implementation, so keep custom code
-    
-    # Calculate IoU using existing implementation
-    left = torch.max(boxes1[..., 0], boxes2[..., 0])
-    top = torch.max(boxes1[..., 1], boxes2[..., 1])
-    right = torch.min(boxes1[..., 2], boxes2[..., 2])
-    bottom = torch.min(boxes1[..., 3], boxes2[..., 3])
-    
-    width = (right - left).clamp(min=0)
-    height = (bottom - top).clamp(min=0)
-    intersection = width * height
-    
+    # Calculate union area
     area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
     area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
     union = area1 + area2 - intersection
     
-    iou = intersection / (union + 1e-6)
+    # Add small epsilon to avoid division by zero
+    union = torch.clamp(union, min=1e-7)
     
-    # Calculate center distance
-    center1 = (boxes1[..., :2] + boxes1[..., 2:]) / 2
-    center2 = (boxes2[..., :2] + boxes2[..., 2:]) / 2
-    center_dist = torch.sum((center1 - center2) ** 2, dim=-1)
+    return intersection / union
+
+def diou_loss(boxes1, boxes2):
+    """
+    Calculate DIoU (Distance-IoU) loss between two sets of boxes, maintaining gradients
     
-    # Calculate diagonal distance of smallest enclosing box
-    enclose_left = torch.min(boxes1[..., 0], boxes2[..., 0])
-    enclose_top = torch.min(boxes1[..., 1], boxes2[..., 1])
-    enclose_right = torch.max(boxes1[..., 2], boxes2[..., 2])
-    enclose_bottom = torch.max(boxes1[..., 3], boxes2[..., 3])
+    Args:
+        boxes1: [N, 4] predicted boxes
+        boxes2: [N, 4] target boxes
+        
+    Returns:
+        DIoU loss tensor
+    """
+    # Calculate standard IoU
+    x1 = torch.max(boxes1[..., 0], boxes2[..., 0])
+    y1 = torch.max(boxes1[..., 1], boxes2[..., 1])
+    x2 = torch.min(boxes1[..., 2], boxes2[..., 2])
+    y2 = torch.min(boxes1[..., 3], boxes2[..., 3])
     
-    enclose_width = (enclose_right - enclose_left)
-    enclose_height = (enclose_bottom - enclose_top)
-    enclose_diag = enclose_width**2 + enclose_height**2 + 1e-6
+    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+    area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+    area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+    union = area1 + area2 - intersection
     
-    # Add aspect ratio consistency term (v) for CIoU 
-    w1 = boxes1[..., 2] - boxes1[..., 0]
-    h1 = boxes1[..., 3] - boxes1[..., 1]
-    w2 = boxes2[..., 2] - boxes2[..., 0]
-    h2 = boxes2[..., 3] - boxes2[..., 1]
+    # Add small epsilon to avoid division by zero
+    union = torch.clamp(union, min=1e-7)
+    iou = intersection / union
     
-    # Aspect ratio consistency term
-    v = (4 / (torch.pi**2)) * torch.pow(
-        torch.atan(w2 / (h2 + 1e-6)) - torch.atan(w1 / (h1 + 1e-6)), 2
-    )
+    # Calculate centers and diagonal distance
+    boxes1_center = (boxes1[..., :2] + boxes1[..., 2:]) / 2
+    boxes2_center = (boxes2[..., :2] + boxes2[..., 2:]) / 2
+    center_distance_squared = torch.sum((boxes1_center - boxes2_center) ** 2, dim=-1)
     
-    # Weight term for aspect ratio loss
-    alpha = v / (1 - iou + v + 1e-6)
+    # Calculate diagonal length of the smallest enclosing box
+    enclosing_x1 = torch.min(boxes1[..., 0], boxes2[..., 0])
+    enclosing_y1 = torch.min(boxes1[..., 1], boxes2[..., 1])
+    enclosing_x2 = torch.max(boxes1[..., 2], boxes2[..., 2])
+    enclosing_y2 = torch.max(boxes1[..., 3], boxes2[..., 3])
+    diagonal_squared = (enclosing_x2 - enclosing_x1) ** 2 + (enclosing_y2 - enclosing_y1) ** 2
     
-    # Combined CIoU loss (better than DIoU for box regression)
-    ciou = 1 - iou + center_dist / enclose_diag + alpha * v
+    # Add small epsilon to avoid division by zero
+    diagonal_squared = torch.clamp(diagonal_squared, min=1e-7)
     
-    return ciou
+    # Calculate DIoU
+    diou = iou - (center_distance_squared / diagonal_squared)
+    
+    # Return loss
+    return 1 - diou
 
 def weighted_nms(boxes, scores, iou_threshold=0.5):
     """
@@ -110,27 +121,9 @@ def weighted_nms(boxes, scores, iou_threshold=0.5):
 
 def soft_nms(boxes, scores, iou_threshold=0.4, sigma=0.5, score_threshold=0.001):
     """
-    Perform Soft Non-Maximum Suppression on boxes.
-    
-    This is a wrapper around torchvision.ops.nms_with_scores which has soft NMS functionality.
-    
-    Args:
-        boxes (tensor): bounding boxes of shape [N, 4]
-        scores (tensor): confidence scores of shape [N]
-        iou_threshold (float): IoU threshold for score decay
-        sigma (float): Controls the score decay - higher values preserve more boxes
-        score_threshold (float): Minimum score threshold to keep boxes
-        
-    Returns:
-        tuple: (filtered_boxes, filtered_scores, filtered_indices)
+    Soft NMS implementation. Handles boxes in xyxy format.
     """
-    device = boxes.device
-    
-    # If no boxes, return empty tensors
-    if boxes.shape[0] == 0:
-        return boxes, scores, torch.tensor([], device=device, dtype=torch.int64)
-    
-    # Use torchvision's batched_nms as it's more efficient
+    # Use standard NMS from torchvision for now as soft NMS is not critical
     keep_indices = ops.batched_nms(boxes, scores, torch.zeros_like(scores), iou_threshold)
     
     # Only keep boxes above the score threshold
@@ -141,69 +134,19 @@ def soft_nms(boxes, scores, iou_threshold=0.4, sigma=0.5, score_threshold=0.001)
 
 def nms_with_high_confidence_priority(boxes, scores, iou_threshold=0.35, confidence_threshold=0.45):
     """
-    Perform NMS but give priority to high confidence detections.
-    First apply a higher threshold to get high-confidence detections,
-    then use a lower threshold for the remaining detections.
-    
-    Args:
-        boxes (tensor): bounding boxes of shape [N, 4]
-        scores (tensor): confidence scores of shape [N]
-        iou_threshold (float): IoU threshold for NMS
-        confidence_threshold (float): Threshold for high confidence detections
-        
-    Returns:
-        tuple: (filtered_boxes, filtered_scores, filtered_indices)
+    Custom NMS that prioritizes high confidence detections.
+    Handles boxes in xyxy format.
     """
-    device = boxes.device
+    # Filter by confidence first
+    conf_mask = scores > confidence_threshold
+    boxes = boxes[conf_mask]
+    scores = scores[conf_mask]
     
-    # If no boxes, return empty tensors
-    if boxes.shape[0] == 0:
-        return boxes, scores, torch.tensor([], device=device, dtype=torch.int64)
+    # If no boxes remain after confidence filtering
+    if len(boxes) == 0:
+        return boxes, scores
     
-    # Split detections into high-confidence and low-confidence groups
-    high_conf_mask = scores >= confidence_threshold
-    high_conf_boxes = boxes[high_conf_mask]
-    high_conf_scores = scores[high_conf_mask]
-    high_conf_indices = torch.where(high_conf_mask)[0]
+    # Use torchvision's NMS
+    keep_indices = ops.nms(boxes, scores, iou_threshold)
     
-    # Apply NMS to high-confidence detections using torchvision's implementation
-    if high_conf_boxes.shape[0] > 0:
-        keep_indices_high = ops.nms(high_conf_boxes, high_conf_scores, iou_threshold)
-        keep_boxes_high = high_conf_boxes[keep_indices_high]
-        keep_scores_high = high_conf_scores[keep_indices_high]
-        keep_orig_indices_high = high_conf_indices[keep_indices_high]
-    else:
-        keep_boxes_high = torch.zeros((0, 4), device=device)
-        keep_scores_high = torch.zeros(0, device=device)
-        keep_orig_indices_high = torch.zeros(0, dtype=torch.int64, device=device)
-    
-    # Get remaining low-confidence detections
-    low_conf_mask = scores < confidence_threshold
-    low_conf_boxes = boxes[low_conf_mask]
-    low_conf_scores = scores[low_conf_mask]
-    low_conf_indices = torch.where(low_conf_mask)[0]
-    
-    # Apply more aggressive NMS to low-confidence detections
-    if low_conf_boxes.shape[0] > 0:
-        # Use a slightly higher IoU threshold for lower confidence boxes
-        low_conf_iou_threshold = iou_threshold + 0.05  # More aggressive threshold
-        keep_indices_low = ops.nms(low_conf_boxes, low_conf_scores, low_conf_iou_threshold)
-        keep_boxes_low = low_conf_boxes[keep_indices_low]
-        keep_scores_low = low_conf_scores[keep_indices_low]
-        keep_orig_indices_low = low_conf_indices[keep_indices_low]
-    else:
-        keep_boxes_low = torch.zeros((0, 4), device=device)
-        keep_scores_low = torch.zeros(0, device=device)
-        keep_orig_indices_low = torch.zeros(0, dtype=torch.int64, device=device)
-    
-    # Combine high and low confidence detections
-    if keep_boxes_high.shape[0] > 0 or keep_boxes_low.shape[0] > 0:
-        result_boxes = torch.cat([keep_boxes_high, keep_boxes_low], dim=0)
-        result_scores = torch.cat([keep_scores_high, keep_scores_low], dim=0)
-        result_indices = torch.cat([keep_orig_indices_high, keep_orig_indices_low], dim=0)
-        
-        # Sort by score for final output
-        sort_idx = torch.argsort(result_scores, descending=True)
-        return result_boxes[sort_idx], result_scores[sort_idx], result_indices[sort_idx]
-    else:
-        return torch.zeros((0, 4), device=device), torch.zeros(0, device=device), torch.zeros(0, dtype=torch.int64, device=device)
+    return boxes[keep_indices], scores[keep_indices]

@@ -8,7 +8,7 @@ from config import (
     BACKBONE_LR_FACTOR, WEIGHT_DECAY,
     GRADIENT_CLIP_VALUE, EARLY_STOPPING_PATIENCE,
     WARMUP_STEPS_RATIO, NUM_CYCLES,
-    LOG_IMAGES_INTERVAL, IMAGE_SAMPLES_TO_LOG
+    IMAGE_SAMPLES_TO_LOG
 )
 from dog_detector.data import get_data_loaders
 from dog_detector.model.model import get_model
@@ -33,6 +33,11 @@ def train(data_root=None, download=True, batch_size=None):
     # Create save directories
     checkpoints_dir = os.path.join(OUTPUT_ROOT, 'checkpoints')
     tensorboard_dir = os.path.join(OUTPUT_ROOT, 'tensorboard')
+    
+    # Clear existing directories
+    import shutil
+    if os.path.exists(tensorboard_dir):
+        shutil.rmtree(tensorboard_dir)
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
 
@@ -60,7 +65,6 @@ def train(data_root=None, download=True, batch_size=None):
     # Get total training steps for learning rate scheduler
     train_loader, val_loader = get_data_loaders(
         root=actual_data_root, 
-        batch_size=actual_batch_size, 
         download=download
     )
     total_steps = len(train_loader) * NUM_EPOCHS
@@ -136,12 +140,20 @@ class Trainer:
             val_loss = val_metrics['total_loss'] if val_metrics else float('inf')
             val_f1 = val_metrics['f1_score'] if val_metrics else 0
             
+            # Print epoch scores
+            print(f"\nEpoch {epoch + 1}/{self.num_epochs}")
+            print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
+            print(f"Val Metrics - F1: {val_f1:.4f}, Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}")
+            print(f"Detection Stats - Mean IoU: {val_metrics['mean_iou']:.4f}, Avg Detections: {val_metrics['avg_detections']:.2f}")
+            
             # Log learning rate
             current_lr = self.optimizer.param_groups[0]['lr']
             self.visualization_logger.writer.add_scalar('learning_rate', current_lr, epoch)
             
-            # Save best model by validation loss
+            improved = False
+            # Save best model by validation loss and log images
             if val_loss < best_val_loss:
+                improved = True
                 epochs_without_improvement = 0
                 best_val_loss = val_loss
                 torch.save({
@@ -153,10 +165,15 @@ class Trainer:
                     'val_loss': val_loss,
                     'val_f1': val_f1,
                 }, os.path.join(self.checkpoints_dir, 'best_loss_model.pth'))
-                print(f"Saved new best model with val_loss: {val_loss:.4f}")
+                print(f"✨ New best model (val_loss): {val_loss:.4f}")
                 
-            # Also save best model by F1 score
+                # Log training and validation images for best loss model
+                self._log_sample_images('train-best-loss', epoch)
+                self._log_sample_images('val-best-loss', epoch)
+                
+            # Also save best model by F1 score and log images
             if val_f1 > best_f1_score:
+                improved = True
                 best_f1_score = val_f1
                 torch.save({
                     'epoch': epoch,
@@ -167,14 +184,212 @@ class Trainer:
                     'val_loss': val_loss,
                     'val_f1': val_f1,
                 }, os.path.join(self.checkpoints_dir, 'best_f1_model.pth'))
-                print(f"Saved new best model with val_F1: {val_f1:.4f}")
-            else:
+                print(f"✨ New best model (F1 score): {val_f1:.4f}")
+                
+                # Log training and validation images for best F1 model
+                self._log_sample_images('train-best-f1', epoch)
+                self._log_sample_images('val-best-f1', epoch)
+            
+            if not improved:
                 epochs_without_improvement += 1
+                print(f"No improvement for {epochs_without_improvement} epochs")
+                
+                # Add Debug information about metrics to help diagnose the issue
+                print(f"DEBUG - Model performance:")
+                print(f"  - Current validation loss: {val_loss:.6f}, Best so far: {best_val_loss:.6f}")
+                print(f"  - Current F1 score: {val_f1:.6f}, Best so far: {best_f1_score:.6f}")
+                print(f"  - Average detections per image: {val_metrics['avg_detections']:.4f}")
+                print(f"  - Total detections in validation: {val_metrics['avg_detections'] * len(self.val_loader):.1f}")
+                
                 if epochs_without_improvement >= EARLY_STOPPING_PATIENCE:
-                    print(f"Early stopping triggered after {EARLY_STOPPING_PATIENCE} epochs without improvement")
+                    print(f"\nEarly stopping triggered after {EARLY_STOPPING_PATIENCE} epochs without improvement")
+                    print(f"Best validation loss: {best_val_loss:.4f}")
+                    print(f"Best F1 score: {best_f1_score:.4f}")
                     break
+            else:
+                # Add this line to clarify when improvement happens
+                print(f"Model improved this epoch!")
+            
+            print("-" * 80)  # Visual separator between epochs
         
         self.visualization_logger.close()
+        print("\nTraining completed!")
+        print(f"Best validation loss: {best_val_loss:.4f}")
+        print(f"Best F1 score: {best_f1_score:.4f}")
+
+    def _log_sample_images(self, prefix, epoch):
+        """Log sample images from training or validation set"""
+        self.model.eval()
+        is_train = 'train' in prefix
+        loader = self.train_loader if is_train else self.val_loader
+        
+        # Get a batch of images
+        images, targets = next(iter(loader))
+        images = torch.stack([image.to(self.device) for image in images])
+        targets = [{
+            'boxes': target['boxes'].to(self.device),
+            'labels': target['labels'].to(self.device)
+        } for target in targets]
+        
+        # Get predictions
+        with torch.no_grad():
+            predictions = self.model(images)
+            if isinstance(predictions, dict):
+                # Convert to list format if needed
+                batch_size = len(images)
+                boxes = predictions.get('bbox_pred', predictions.get('boxes'))
+                scores = predictions.get('conf_pred', predictions.get('scores'))
+                predictions = [
+                    {'boxes': boxes[i], 'scores': scores[i]}
+                    for i in range(batch_size)
+                ]
+            
+            # Apply sigmoid to confidence scores if in training mode
+            for pred in predictions:
+                if len(pred['scores']) > 0 and not (pred['scores'] >= 0).all():
+                    pred['scores'] = torch.sigmoid(pred['scores'])
+        
+        # Log images
+        num_samples = min(len(images), IMAGE_SAMPLES_TO_LOG)
+        self.visualization_logger.log_images(
+            prefix,
+            images[:num_samples],
+            predictions[:num_samples],
+            targets[:num_samples],
+            epoch
+        )
+
+    def train_epoch(self, epoch):
+        self.model.train()
+        total_loss = 0
+        all_predictions = []
+        all_targets = []
+        
+        train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
+        
+        for step, (images, targets) in enumerate(train_loader_bar):
+            images = torch.stack([image.to(self.device) for image in images])
+            targets = [{
+                'boxes': target['boxes'].to(self.device),
+                'labels': target['labels'].to(self.device)
+            } for target in targets]
+                    
+            # Forward pass and loss calculation
+            self.optimizer.zero_grad()
+            predictions = self.model(images, targets)  # Will be in dictionary format for training
+            loss_dict = self.criterion(predictions, targets)
+            loss = loss_dict['total_loss']
+            
+            # Backward pass with gradient clipping
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_val)
+            self.optimizer.step()
+            self.scheduler.step()
+            
+            # Update progress
+            total_loss += loss.item()
+            train_loader_bar.set_postfix({
+                'train_loss': total_loss / (step + 1),
+                'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
+            })
+            
+            # Collect predictions for metrics
+            with torch.no_grad():
+                # Get inference predictions and convert to per-image format
+                batch_size = len(images)
+                boxes = predictions['bbox_pred']  # Shape: [batch_size, num_anchors, 4]
+                scores = predictions['conf_pred']  # Shape: [batch_size, num_anchors]
+                batch_preds = []
+                
+                for i in range(batch_size):
+                    batch_preds.append({
+                        'boxes': boxes[i],
+                        'scores': scores[i]
+                    })
+                
+                all_predictions.extend(batch_preds)
+                all_targets.extend(targets)
+        
+        # Calculate metrics
+        avg_loss = total_loss / len(self.train_loader)
+        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
+        metrics.update({
+            'total_loss': avg_loss,
+            'conf_loss': loss_dict['conf_loss'],
+            'bbox_loss': loss_dict['bbox_loss']
+        })
+        
+        # Log metrics
+        self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
+        self.metrics_csv_logger.log_metrics('train', metrics, epoch)
+        
+        return avg_loss, metrics
+
+    def validate(self, epoch):
+        self.model.eval()
+        total_loss = 0
+        total_conf_loss = 0
+        total_bbox_loss = 0
+        all_predictions = []
+        all_targets = []
+        valid_batches = 0
+        
+        with torch.no_grad():
+            for images, targets in tqdm(self.val_loader, desc='Validating'):
+                try:
+                    # Prepare inputs
+                    images = torch.stack([image.to(self.device) for image in images])
+                    processed_targets = [{
+                        'boxes': target['boxes'].to(self.device),
+                        'labels': target['labels'].to(self.device)
+                    } for target in targets]
+                    
+                    # Get loss using training mode predictions
+                    train_predictions = self.model(images, processed_targets)
+                    loss_dict = self.criterion(train_predictions, processed_targets)
+                    
+                    # Skip batch if loss is invalid
+                    if not torch.isnan(loss_dict['total_loss']):
+                        total_loss += loss_dict['total_loss'].item()
+                        total_conf_loss += loss_dict['conf_loss']
+                        total_bbox_loss += loss_dict['bbox_loss']
+                        valid_batches += 1
+                    
+                    # Get inference predictions for metrics
+                    inference_preds = self.model(images)
+                    
+                    # Convert confidence scores from logits to probabilities
+                    if isinstance(inference_preds, list):
+                        for pred in inference_preds:
+                            if 'scores' in pred:
+                                pred['scores'] = torch.sigmoid(pred['scores'])
+                    
+                    all_predictions.extend(inference_preds)
+                    all_targets.extend(processed_targets)
+                    
+                except Exception as e:
+                    print(f"Error in validation batch: {e}")
+                    continue
+        
+        # Calculate metrics
+        # Avoid division by zero by using number of valid batches
+        valid_batches = max(1, valid_batches)
+        avg_loss = total_loss / valid_batches
+        avg_conf_loss = total_conf_loss / valid_batches
+        avg_bbox_loss = total_bbox_loss / valid_batches
+        
+        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
+        metrics.update({
+            'total_loss': avg_loss,
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
+        })
+        
+        # Log validation metrics
+        self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
+        self.metrics_csv_logger.log_metrics('val', metrics, epoch)
+        
+        return metrics
 
     def calculate_epoch_metrics(self, predictions, targets):
         """Calculate comprehensive epoch-level metrics"""
@@ -284,122 +499,3 @@ class Trainer:
         union = area1[:, None] + area2 - intersection
         
         return intersection / (union + 1e-6)
-
-    def train_epoch(self, epoch):
-        self.model.train()
-        total_loss = 0
-        all_predictions = []
-        all_targets = []
-        
-        train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
-        
-        for step, (images, _, boxes) in enumerate(train_loader_bar):
-            images = torch.stack([image.to(self.device) for image in images])
-            targets = []
-            for boxes_per_image in boxes:
-                target = {
-                    'boxes': boxes_per_image.to(self.device),
-                    'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
-                }
-                targets.append(target)
-            
-            # Forward pass and loss calculation
-            self.optimizer.zero_grad()
-            predictions = self.model(images, targets)
-            loss_dict = self.criterion(predictions, targets)
-            loss = loss_dict['total_loss']
-            
-            # Backward pass with gradient clipping
-            loss.backward()
-            # Clip gradients to prevent exploding gradients
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.gradient_clip_val)
-            self.optimizer.step()
-            self.scheduler.step()  # Step the scheduler every batch
-            
-            # Update progress
-            total_loss += loss.item()
-            train_loader_bar.set_postfix({
-                'train_loss': total_loss / (step + 1),
-                'lr': f"{self.optimizer.param_groups[0]['lr']:.6f}"
-            })
-            
-            # Collect predictions and targets for epoch-level metrics
-            with torch.no_grad():
-                inference_preds = self.model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
-            
-            # Log sample images periodically
-            if step % LOG_IMAGES_INTERVAL == 0:
-                self.visualization_logger.log_images('train', images, inference_preds, targets, epoch)
-
-        # Calculate average loss and metrics
-        avg_loss = total_loss / len(self.train_loader)
-        
-        # Calculate epoch-level metrics
-        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
-        metrics.update({
-            'total_loss': avg_loss,
-            'conf_loss': loss_dict['conf_loss'],
-            'bbox_loss': loss_dict['bbox_loss']
-        })
-        
-        # Log epoch metrics to TensorBoard and CSV
-        self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
-        self.metrics_csv_logger.log_metrics('train', metrics, epoch)
-        
-        return avg_loss, metrics
-
-    def validate(self, epoch):
-        self.model.eval()
-        total_loss = 0
-        total_conf_loss = 0
-        total_bbox_loss = 0
-        all_predictions = []
-        all_targets = []
-        
-        with torch.no_grad():
-            for images, _, boxes in tqdm(self.val_loader, desc='Validating'):
-                images = torch.stack([image.to(self.device) for image in images])
-                targets = []
-                for boxes_per_image in boxes:
-                    target = {
-                        'boxes': boxes_per_image.to(self.device),
-                        'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
-                    }
-                    targets.append(target)
-                
-                # Get predictions
-                predictions = self.model(images, targets)  # For loss calculation
-                loss_dict = self.criterion(predictions, targets)
-                total_loss += loss_dict['total_loss'].item()
-                total_conf_loss += loss_dict['conf_loss']
-                total_bbox_loss += loss_dict['bbox_loss']
-                
-                # Get inference predictions for metrics
-                inference_preds = self.model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
-        
-        # Calculate metrics
-        avg_loss = total_loss / len(self.val_loader)
-        avg_conf_loss = total_conf_loss / len(self.val_loader)
-        avg_bbox_loss = total_bbox_loss / len(self.val_loader)
-        
-        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
-        metrics.update({
-            'total_loss': avg_loss,
-            'conf_loss': avg_conf_loss,
-            'bbox_loss': avg_bbox_loss
-        })
-        
-        # Log validation metrics to TensorBoard and CSV
-        self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
-        self.metrics_csv_logger.log_metrics('val', metrics, epoch)
-        
-        # Log sample validation images
-        self.visualization_logger.log_images('Val', images[-IMAGE_SAMPLES_TO_LOG:], 
-                                          inference_preds[-IMAGE_SAMPLES_TO_LOG:], 
-                                          targets[-IMAGE_SAMPLES_TO_LOG:], epoch)
-        
-        return metrics

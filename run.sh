@@ -34,7 +34,7 @@ if [ "$CONDA_DEFAULT_ENV" != "cloudspace" ]; then
     fi
 
     # Look for any running tensorboard process and kill it if found.
-    PID=$(ps aux | grep "tensorboard --logdir=./outputs/tensorboard" | grep -v grep | awk '{print $2}')
+    PID=$(ps aux | grep "tensorboard" | grep -v grep | awk '{print $2}')
     if [ -n "$PID" ]; then
         echo "Killing TensorBoard process with PID: $PID"
         kill $PID

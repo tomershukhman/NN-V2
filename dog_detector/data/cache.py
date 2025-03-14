@@ -7,6 +7,7 @@ to avoid repeatedly loading from the original source.
 
 import os
 import torch
+import zipfile
 from config import DATA_SET_TO_USE, TRAIN_VAL_SPLIT
 
 
@@ -91,3 +92,11 @@ def save_to_cache(root_dir, samples, dogs_per_image):
     }, cache_file)
     
     return cache_file
+
+
+def extract_zip(zip_path, extract_path):
+    """Extract a zip file to the specified path"""
+    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+        zip_ref.extractall(extract_path)
+    os.remove(zip_path)  # Clean up zip file after extraction
+

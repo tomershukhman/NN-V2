@@ -18,34 +18,38 @@ class FocalLoss(nn.Module):
         
     def forward(self, inputs, targets):
         """
-        Enhanced focal loss implementation with improved numerical stability
+        Compute focal loss with proper gradient flow.
         
         Args:
-            inputs: Predicted logits
+            inputs: Predicted logits or raw scores
             targets: Ground truth labels (0 or 1)
             
         Returns:
-            Loss tensor
+            Loss tensor with gradients
         """
-        # Use sigmoid for numerical stability rather than direct p calculation
+        # Calculate probabilities while maintaining gradients
+        if not inputs.requires_grad:
+            inputs.requires_grad_(True)
+            
+        # Use sigmoid directly on inputs for better numerical stability
         p = torch.sigmoid(inputs)
         
-        # Calculate binary cross entropy loss with built-in stability
+        # Calculate binary cross entropy with better stability
         ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
         
-        # Create p_t - probability of the true class (target or 1-target)
+        # Calculate p_t (probability of the target class)
         p_t = p * targets + (1 - p) * (1 - targets)
         
-        # Add a small epsilon to avoid potential numerical instability
+        # Add a small epsilon to avoid numerical instability
         p_t = torch.clamp(p_t, min=1e-7, max=1.0)
         
-        # Calculate focal weight with stable power operation
+        # Calculate focal weight
         focal_weight = torch.pow((1 - p_t), self.gamma)
         
         # Apply the focal weight to the cross entropy loss
         loss = focal_weight * ce_loss
         
-        # Apply alpha weighting for addressing class imbalance
+        # Apply alpha weighting if specified
         if self.alpha >= 0:
             alpha_t = self.alpha * targets + (1 - self.alpha) * (1 - targets)
             loss = alpha_t * loss

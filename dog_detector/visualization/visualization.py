@@ -7,6 +7,7 @@ from config import (
     TENSORBOARD_TRAIN_IMAGES, TENSORBOARD_VAL_IMAGES,
     NORMALIZE_MEAN, NORMALIZE_STD
 )
+from ..model.utils.box_utils import coco_to_xyxy
 
 class VisualizationLogger:
     def __init__(self, tensorboard_dir):
@@ -15,19 +16,54 @@ class VisualizationLogger:
 
     def log_images(self, prefix, images, predictions, targets, epoch):
         """Log a sample of images with predictions for visual inspection"""
-        num_images = TENSORBOARD_TRAIN_IMAGES if prefix == 'train' else TENSORBOARD_VAL_IMAGES
+        num_images = TENSORBOARD_TRAIN_IMAGES if 'train' in prefix else TENSORBOARD_VAL_IMAGES
+        
+        # Convert predictions to list format if it's a dictionary
+        if isinstance(predictions, dict):
+            batch_size = len(images)
+            boxes = predictions.get('bbox_pred', predictions.get('boxes'))
+            scores = predictions.get('conf_pred', predictions.get('scores'))
+            # Apply sigmoid to logits before converting to list format
+            if isinstance(scores, torch.Tensor):
+                scores = torch.sigmoid(scores)
+            predictions = [
+                {'boxes': boxes[i], 'scores': scores[i]}
+                for i in range(batch_size)
+            ]
+        
+        # Process each image
         for img_idx in range(min(num_images, len(images))):
             image = images[img_idx].cpu()
-            pred_boxes = predictions[img_idx]['boxes'].cpu()
-            pred_scores = predictions[img_idx]['scores'].cpu()
-            gt_boxes = targets[img_idx]['boxes'].cpu()
+            target = targets[img_idx]
             
+            # Handle case where predictions[img_idx] might be empty or None
+            if img_idx < len(predictions) and predictions[img_idx] is not None:
+                pred_boxes = predictions[img_idx].get('boxes', torch.empty(0, 4))
+                pred_scores = predictions[img_idx].get('scores', torch.empty(0))
+                # Scores should already be probabilities at this point
+            else:
+                pred_boxes = torch.empty(0, 4)
+                pred_scores = torch.empty(0)
+            
+            # Move tensors to CPU for visualization
+            pred_boxes = pred_boxes.cpu()
+            pred_scores = pred_scores.cpu()
+            gt_boxes = target['boxes'].cpu()
+            
+            # Convert boxes from COCO to XYXY format if needed
+            if 'format' in target and target['format'] == 'coco':
+                gt_boxes = coco_to_xyxy(gt_boxes)
+            if (img_idx < len(predictions) and predictions[img_idx] is not None and 
+                'format' in predictions[img_idx] and predictions[img_idx]['format'] == 'coco'):
+                pred_boxes = coco_to_xyxy(pred_boxes)
+            
+            # Draw boxes on image
             vis_img = self.draw_boxes(image, pred_boxes, pred_scores, gt_boxes)
-            self.writer.add_image(
-                f'{prefix}/Image_{img_idx}',
-                torch.tensor(np.array(vis_img)).permute(2, 0, 1),
-                epoch
-            )
+            
+            # Convert to tensor and log with consistent prefix 
+            img_tensor = torch.tensor(np.array(vis_img)).permute(2, 0, 1)
+            image_tag = f'{prefix}/Image_{img_idx}'
+            self.writer.add_image(image_tag, img_tensor, epoch)
 
     def log_epoch_metrics(self, phase, metrics, epoch):
         """Log comprehensive epoch-level metrics"""
@@ -82,7 +118,7 @@ class VisualizationLogger:
         draw = ImageDraw.Draw(image)
         
         # Draw ground truth boxes in green
-        if gt_boxes is not None:
+        if gt_boxes is not None and len(gt_boxes) > 0:
             for box in gt_boxes:
                 box_coords = box.tolist()
                 x1, y1, x2, y2 = box_coords
@@ -95,7 +131,7 @@ class VisualizationLogger:
         
         # Draw predicted boxes with different colors and confidence scores
         colors = ['red', 'blue', 'purple', 'orange', 'brown', 'pink']
-        if boxes is not None and scores is not None:
+        if boxes is not None and len(boxes) > 0 and scores is not None and len(scores) > 0:
             for idx, (box, score) in enumerate(zip(boxes, scores)):
                 color = colors[idx % len(colors)]
                 box_coords = box.tolist()
@@ -106,9 +142,8 @@ class VisualizationLogger:
                 x1, x2 = x1 * image.width, x2 * image.width
                 y1, y2 = y1 * image.height, y2 * image.height
                 draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
-                if score is not None:
-                    text = f'{score:.2f}'
-                    draw.text((x1, y1 - 10), text, fill=color)
+                text = f'{score:.2f}'
+                draw.text((x1, y1 - 10), text, fill=color)
         
         return image
 

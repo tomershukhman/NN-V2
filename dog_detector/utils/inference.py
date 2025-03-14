@@ -10,6 +10,7 @@ from config import (
     DETECTION_BG_OPACITY_BASE, DETECTION_BG_OPACITY_FACTOR
 )
 from dog_detector.model.model import get_model
+from dog_detector.model.utils.box_utils import coco_to_xyxy, xyxy_to_coco
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
@@ -79,13 +80,19 @@ def predict_on_image(image_path, checkpoint_path, device=None, confidence_thresh
     boxes = pred['boxes'].cpu().numpy()
     scores = pred['scores'].cpu().numpy()
     
+    # Convert boxes to COCO format for consistency
+    boxes = xyxy_to_coco(boxes)
+    
     # Filter by confidence threshold
     mask = scores >= confidence_threshold
     boxes = boxes[mask]
     scores = scores[mask]
     
+    # Convert back to XYXY for visualization
+    vis_boxes = coco_to_xyxy(boxes)
+    
     # Draw predictions on the image
-    output_image = draw_predictions(image, boxes, scores)
+    output_image = draw_predictions(image, vis_boxes, scores)
     
     # Print detection statistics
     print(f"Found {len(boxes)} dogs with confidence >= {confidence_threshold}")
@@ -133,6 +140,14 @@ def predict_on_image(image_path, checkpoint_path, device=None, confidence_thresh
     # Return both the raw predictions and the annotated image
     return pred, output_image
 
+def get_color(score):
+    """Get color based on confidence score"""
+    if score >= DETECTION_HIGH_CONF:
+        return 'green'
+    elif score >= DETECTION_MED_CONF:
+        return 'orange'
+    return 'red'
+
 def draw_predictions(image, boxes, scores):
     """
     Draw bounding boxes and scores on the image with improved visual clarity
@@ -152,13 +167,11 @@ def draw_predictions(image, boxes, scores):
     # Get image dimensions
     width, height = image.size
     
-    # Define better color scheme based on confidence using configuration parameters
-    def get_color(score):
-        if score < DETECTION_COLOR_THRESHOLD:  # Low confidence
-            r, g, b = 255, int(255 * (score / DETECTION_COLOR_THRESHOLD)), 0  # Red to yellow
-        else:  # Higher confidence
-            r, g, b = int(255 * (1 - score) * 1.67), 255, 0  # Yellow to green
-        return f"rgb({r},{g},{b})"
+    # Try to use a nicer font if available
+    try:
+        font = ImageFont.truetype("Arial", DETECTION_FONT_SIZE)
+    except:
+        font = ImageFont.load_default()
     
     # Sort by confidence score to draw highest confidence boxes last (on top)
     indices = np.argsort(scores)
@@ -166,25 +179,21 @@ def draw_predictions(image, boxes, scores):
     scores = scores[indices]
     
     # Draw each box
-    for i, (box, score) in enumerate(zip(boxes, scores)):
-        # Convert normalized coordinates to pixels
-        x1, y1, x2, y2 = box
-        x1 = int(x1 * width)
-        y1 = int(y1 * height)
-        x2 = int(x2 * width)
-        y2 = int(y2 * height)
-        
-        # Ensure coordinates are within image boundaries
-        x1 = max(0, min(width - 1, x1))
-        y1 = max(0, min(height - 1, y1))
-        x2 = max(0, min(width - 1, x2))
-        y2 = max(0, min(height - 1, y2))
-        
+    for box, score in zip(boxes, scores):
         # Get color based on confidence
         box_color = get_color(score)
         text_color = "white"
         
-        # Draw rectangle with thickness based on confidence using config parameter
+        # Convert coordinates to pixels
+        x1, y1, x2, y2 = box
+        
+        # Ensure coordinates are within image boundaries
+        x1 = max(0, min(width - 1, int(x1)))
+        y1 = max(0, min(height - 1, int(y1)))
+        x2 = max(0, min(width - 1, int(x2)))
+        y2 = max(0, min(height - 1, int(y2)))
+        
+        # Draw rectangle with thickness based on confidence
         thickness = max(1, min(3, int(score * DETECTION_LINE_THICKNESS_FACTOR)))
         draw.rectangle([(x1, y1), (x2, y2)], outline=box_color, width=thickness)
         
@@ -192,26 +201,18 @@ def draw_predictions(image, boxes, scores):
         conf_percentage = int(score * 100)
         score_text = f"Dog: {conf_percentage}%"
         
-        try:
-            # Try to use a nicer font if available with configured size
-            font = ImageFont.truetype("Arial", DETECTION_FONT_SIZE)
-        except:
-            font = ImageFont.load_default()
-            
         # Get text size
         text_bbox = draw.textbbox((0, 0), score_text, font=font)
         text_width = text_bbox[2] - text_bbox[0]
         text_height = text_bbox[3] - text_bbox[1]
         
-        # Draw text background based on confidence using configuration parameters
+        # Draw text background
         bg_opacity = int(min(230, DETECTION_BG_OPACITY_BASE + score * DETECTION_BG_OPACITY_FACTOR))
-        bg_color_tuple = (0, 0, 0, bg_opacity)  # Semi-transparent black
+        bg_color_tuple = (0, 0, 0, bg_opacity)
         
-        # Make sure text box is positioned properly
         rect_y1 = max(0, y1 - text_height - 8)
         rect_y2 = max(text_height, y1)
         
-        # Draw text background with rounded corners
         draw.rectangle([(x1, rect_y1), (x1 + text_width + 8, rect_y2)], 
                       fill=bg_color_tuple)
         
@@ -273,13 +274,19 @@ def batch_predict(image_paths, checkpoint_path, output_dir=None, device=None, co
             boxes = pred['boxes'].cpu().numpy()
             scores = pred['scores'].cpu().numpy()
             
+            # Convert boxes to COCO format
+            boxes = xyxy_to_coco(boxes)
+            
             # Filter by confidence threshold
             mask = scores >= confidence_threshold
             boxes = boxes[mask]
             scores = scores[mask]
             
+            # Convert back to XYXY for visualization
+            vis_boxes = coco_to_xyxy(boxes)
+            
             # Draw predictions on the image
-            output_image = draw_predictions(image, boxes, scores)
+            output_image = draw_predictions(image, vis_boxes, scores)
             
             # Save the output image if output directory is specified
             if output_dir:

@@ -1,106 +1,97 @@
 import torch
 import torch.nn as nn
 import torchvision.ops as ops
-from config import (
-    CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    ANCHOR_SCALES, ANCHOR_RATIOS, FEATURE_MAP_SIZE,
-    NUM_ANCHORS_PER_CELL, MIN_BOX_SIZE, MIN_ASPECT_RATIO, MAX_ASPECT_RATIO
-)
+from torchvision.models import resnet50, ResNet50_Weights
 from .backbone import ResNetBackbone
 from .detection_head import DetectionHead
-from .anchor_generator import generate_anchors, decode_boxes
-from .utils.box_utils import nms_with_high_confidence_priority
+from .utils.box_utils import coco_to_xyxy, xyxy_to_coco
+from config import (
+    NUM_CLASSES, FEATURE_MAP_SIZE, IMAGE_SIZE,
+    CONFIDENCE_THRESHOLD, MAX_DETECTIONS, NMS_THRESHOLD
+)
 
 class DogDetector(nn.Module):
-    def __init__(self, feature_map_size=None):
-        super(DogDetector, self).__init__()
-        self.feature_map_size = feature_map_size if feature_map_size is not None else FEATURE_MAP_SIZE
+    def __init__(self, pretrained=True):
+        super().__init__()
         
-        # Create backbone and detection head
+        # Initialize backbone with pretrained weights
         self.backbone = ResNetBackbone()
-        self.detection_head = DetectionHead(NUM_ANCHORS_PER_CELL)
         
-        # Generate and register anchor boxes
-        self.register_buffer('default_anchors', generate_anchors(self.feature_map_size))
-    
-    def forward(self, x, targets=None):
-        # Extract features using backbone
-        features = self.backbone(x)
+        # Initialize detection head
+        self.detection_head = DetectionHead()
         
-        # Get predictions from detection head
-        bbox_pred, conf_pred = self.detection_head(features, self.feature_map_size)
+        # Initialize anchor generator
+        from .anchor_generator import AnchorGenerator
+        self.anchor_generator = AnchorGenerator()
+
+    def forward(self, images, targets=None):
+        # Extract features
+        features = self.backbone(images)
+        batch_size = images.size(0)
         
-        # Transform bbox predictions from offsets to actual coordinates
-        bbox_pred = decode_boxes(bbox_pred, self.default_anchors)
+        # Generate anchors if not cached
+        if not hasattr(self, 'cached_anchors') or self.cached_anchors is None:
+            self.cached_anchors = self.anchor_generator(images)
         
-        if targets is not None:
-            # Return raw predictions for loss calculation
+        # Get raw predictions from detection head
+        predictions = self.detection_head(features)
+        bbox_pred = predictions['bbox_pred']
+        conf_pred = predictions['conf_pred']
+        
+        if self.training or targets is not None:
+            # Training mode - return raw predictions for loss computation
             return {
                 'bbox_pred': bbox_pred,
                 'conf_pred': conf_pred,
-                'anchors': self.default_anchors
+                'anchors': self.cached_anchors
             }
         else:
-            # Post-process predictions for inference
-            return self._post_process(bbox_pred, conf_pred)
+            # Inference mode
+            from .anchor_generator import decode_boxes
             
-    def _post_process(self, bbox_pred, conf_pred):
-        results = []
-        batch_size = bbox_pred.shape[0]
-        
-        for b in range(batch_size):
-            boxes = bbox_pred[b]
-            scores = conf_pred[b]
+            # Apply sigmoid to get confidence scores
+            conf_scores = torch.sigmoid(conf_pred)
             
-            # Apply confidence threshold
-            mask = scores > CONFIDENCE_THRESHOLD
-            boxes = boxes[mask]
-            scores = scores[mask]
-            
-            if len(boxes) > 0:
-                # Clip boxes to image boundaries
-                boxes = torch.clamp(boxes, min=0, max=1)
+            # Process each image in the batch
+            detections = []
+            for i in range(batch_size):
+                # Get scores and boxes for this image
+                scores = conf_scores[i]
+                # Decode box predictions relative to anchors
+                boxes = decode_boxes(bbox_pred[i], self.cached_anchors)
                 
-                # Filter out very small boxes that are likely noise
-                widths = boxes[:, 2] - boxes[:, 0]
-                heights = boxes[:, 3] - boxes[:, 1]
-                area_mask = (widths > MIN_BOX_SIZE) & (heights > MIN_BOX_SIZE)
-                boxes = boxes[area_mask]
-                scores = scores[area_mask]
+                # Filter by confidence threshold
+                mask = scores > CONFIDENCE_THRESHOLD
+                filtered_boxes = boxes[mask]
+                filtered_scores = scores[mask]
                 
-                # Filter out extreme aspect ratio boxes (very thin/wide)
-                aspect_ratios = widths / (heights + 1e-6)
-                aspect_ratio_mask = (aspect_ratios > MIN_ASPECT_RATIO) & (aspect_ratios < MAX_ASPECT_RATIO)
-                boxes = boxes[aspect_ratio_mask]
-                scores = scores[aspect_ratio_mask]
+                # Prepare empty tensor with proper device
+                keep_indices = torch.tensor([], dtype=torch.int64, device=boxes.device)
                 
-                if len(boxes) > 0:
-                    # Use NMS with high confidence priority
-                    # For potential future improvement: Consider using torchvision.ops.batched_nms instead
-                    boxes, scores, _ = nms_with_high_confidence_priority(
-                        boxes, scores, 
-                        iou_threshold=NMS_THRESHOLD,
-                        confidence_threshold=CONFIDENCE_THRESHOLD
+                # Apply NMS if we have any detections
+                if len(filtered_boxes) > 0:
+                    keep_indices = ops.nms(
+                        filtered_boxes,
+                        filtered_scores,
+                        iou_threshold=NMS_THRESHOLD
                     )
                     
-                    # Limit maximum detections
-                    if len(boxes) > MAX_DETECTIONS:
-                        _, topk_indices = torch.topk(scores, k=MAX_DETECTIONS)
-                        boxes = boxes[topk_indices]
-                        scores = scores[topk_indices]
+                    # Limit number of detections
+                    if len(keep_indices) > MAX_DETECTIONS:
+                        keep_indices = keep_indices[:MAX_DETECTIONS]
+                    
+                    final_boxes = filtered_boxes[keep_indices]
+                    final_scores = filtered_scores[keep_indices]
+                else:
+                    final_boxes = torch.empty((0, 4), device=boxes.device)
+                    final_scores = torch.empty(0, device=scores.device)
+                
+                detections.append({
+                    'boxes': final_boxes,
+                    'scores': final_scores
+                })
             
-            # Create empty tensors if no boxes detected
-            if len(boxes) == 0:
-                boxes = torch.empty((0, 4), device=boxes.device if 'boxes' in locals() else conf_pred.device)
-                scores = torch.empty(0, device=scores.device if 'scores' in locals() else conf_pred.device)
-            
-            results.append({
-                'boxes': boxes,
-                'scores': scores,
-                'anchors': self.default_anchors
-            })
-        
-        return results
+            return detections
 
 def get_model(device):
     """Create and return a DogDetector model instance moved to the specified device."""

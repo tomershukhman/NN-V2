@@ -4,6 +4,10 @@ import torchvision
 from torchvision.models import ResNet18_Weights
 from config import BACKBONE_FROZEN_LAYERS
 
+def get_backbone():
+    """Factory function to create and return a configured ResNetBackbone"""
+    return ResNetBackbone()
+
 class ResNetBackbone(nn.Module):
     def __init__(self):
         super().__init__()

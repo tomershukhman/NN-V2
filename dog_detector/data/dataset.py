@@ -2,238 +2,237 @@
 Dog detection dataset module.
 
 This module defines the core dataset class for loading and processing dog detection data
-from the Open Images dataset.
+from the COCO dataset.
 """
 
 import os
 import torch
 import numpy as np
 from torch.utils.data import Dataset
-from PIL import Image as PILImage
-import fiftyone as fo
-import fiftyone.zoo as foz
-from albumentations.pytorch import ToTensorV2
+from PIL import Image
+from pycocotools.coco import COCO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import aiohttp
+import asyncio
+import time
+from .cache import extract_zip
 
 from config import DATA_ROOT
-from .cache import load_from_cache, save_to_cache
-
 
 class DogDetectionDataset(Dataset):
     """
-    Dataset for dog detection using Open Images.
+    Dataset for dog detection using COCO.
     
-    Loads images and bounding box annotations for dog detection from Open Images dataset.
-    Uses caching to speed up subsequent data loading.
+    Loads images and bounding box annotations for dog detection from COCO dataset.
     """
     
-    def __init__(self, root=DATA_ROOT, split='train', transform=None, download=False):
+    COCO_CATEGORY_ID = 18  # Dog category ID in COCO dataset
+    CHUNK_SIZE = 1024 * 1024  # 1MB chunks
+    MAX_WORKERS = 8  # Number of parallel downloads
+    MAX_RETRIES = 3
+    RETRY_DELAY = 1  # seconds
+    
+    def __init__(self, root=DATA_ROOT, split='train', transform=None, download=True, load_all_splits=True):
         """
-        Initialize the dog detection dataset.
+        Initialize the COCO dog detection dataset.
         
         Args:
-            root (str): Root directory for the dataset
-            split (str): 'train' or 'validation'
-            transform (callable, optional): Transform to be applied on samples
-            download (bool): If True, downloads the dataset if not available
+            root: Root directory for the dataset
+            split: 'train' or 'val'
+            transform: Optional transform to be applied to images and boxes
+            download: Whether to download the dataset if not found
+            load_all_splits: If True, loads images from all splits (train/val)
         """
+        self.root = root
+        self.split = 'val' if split == 'validation' else split
         self.transform = transform
-        self.root = os.path.abspath(root)
-        self.split = "validation" if split == "val" else split
-        self.samples = []
-        self.dogs_per_image = []
+        self.load_all_splits = load_all_splits
         
-        # Ensure data directory exists
-        os.makedirs(self.root, exist_ok=True)
+        # Create COCO directories if they don't exist
+        self.coco_dir = os.path.join(root, 'coco')
+        os.makedirs(self.coco_dir, exist_ok=True)
         
-        # Try to load from cache first
-        self.samples, self.dogs_per_image = load_from_cache(self.root, self.split)
-        if self.samples is not None:
-            return
+        # Set up file paths
+        year = '2017'
+        self.image_dir = os.path.join(self.coco_dir, f'{split}{year}')
         
-        # If cache doesn't exist, load from dataset
-        self._load_from_dataset(download)
-        
-        if len(self.samples) == 0:
-            raise RuntimeError("No valid dog images found in the dataset")
-    
-    def _load_from_dataset(self, download):
-        """
-        Load dataset from original source (Open Images).
-        
-        Args:
-            download: Whether to download dataset if not found
-        """
-        original_dir = fo.config.dataset_zoo_dir
-        fo.config.dataset_zoo_dir = self.root
-        
-        try:
-            # Load or download the dataset
-            dataset_name = "open-images-v7-full"
-            try:
-                dataset = fo.load_dataset(dataset_name)
-                print(f"Successfully loaded existing dataset: {dataset_name}")
-            except fo.core.dataset.DatasetNotFoundError:
-                if download:
-                    print("Downloading Open Images dataset with dog class...")
-                    dataset = foz.load_zoo_dataset(
-                        "open-images-v7",
-                        splits=["train", "validation"],  # Load both splits
-                        label_types=["detections"],
-                        classes=["Dog"],
-                        dataset_name=dataset_name
-                    )
-                    print(f"Successfully downloaded dataset to {fo.config.dataset_zoo_dir}")
-                else:
-                    raise RuntimeError(f"Dataset {dataset_name} not found and download=False")
-            
-            # Process all samples from the dataset
-            if dataset is not None:
-                print(f"Processing {dataset.name} with {len(dataset)} samples")
-                all_samples = []
-                all_dogs_per_image = []
-                
-                for sample in dataset.iter_samples():
-                    if hasattr(sample, 'ground_truth') and sample.ground_truth is not None:
-                        dog_detections = [det for det in sample.ground_truth.detections if det.label == "Dog"]
-                        if dog_detections:
-                            img_path = sample.filepath
-                            if os.path.exists(img_path):
-                                boxes = [[det.bounding_box[0], det.bounding_box[1], 
-                                        det.bounding_box[0] + det.bounding_box[2],
-                                        det.bounding_box[1] + det.bounding_box[3]] for det in dog_detections]
-                                all_samples.append((img_path, boxes))
-                                all_dogs_per_image.append(len(dog_detections))
-                
-                total_samples = len(all_samples)
-                if total_samples == 0:
-                    raise RuntimeError("No valid dog images found in the dataset")
-                
-                # Save combined dataset to cache
-                save_to_cache(self.root, all_samples, all_dogs_per_image)
-
-                # Load the processed data for this split
-                self.samples, self.dogs_per_image = load_from_cache(self.root, self.split)
-
-        except Exception as e:
-            print(f"Error initializing dataset: {e}")
-            raise
-        finally:
-            fo.config.dataset_zoo_dir = original_dir
-    
-    def __len__(self):
-        """Return the number of samples in the dataset."""
-        return len(self.samples)
-    
-    def __getitem__(self, index):
-        """
-        Get a dataset item by index.
-        
-        Args:
-            index: Index of the sample to retrieve
-            
-        Returns:
-            tuple: (image, target) where target is a dict with 'boxes', 'labels', and 'scores'
-        """
-        img_path, boxes = self.samples[index]
-        
-        try:
-            # Open image and convert to RGB (as NumPy array)
-            img = np.array(PILImage.open(img_path).convert('RGB'))
-            h, w = img.shape[:2]
-            
-            # Convert boxes to normalized format [0,1]
-            normalized_boxes = self._normalize_boxes(boxes, w, h)
-            
-            # Apply transforms or convert to tensor
-            if self.transform:
-                # Convert normalized boxes to absolute for Albumentations
-                boxes_abs = self._normalized_to_absolute(normalized_boxes, w, h)
-                labels = [1] * len(boxes_abs)  # All dogs get label "1"
-                
-                # Apply the transform
-                transformed = self.transform(image=img, bboxes=boxes_abs, labels=labels)
-                img = transformed['image']
-                boxes_abs = transformed['bboxes']
-                labels = transformed['labels']
-                
-                # After transformation, convert absolute boxes back to normalized
-                _, new_h, new_w = img.shape
-                normalized_boxes = self._absolute_to_normalized(boxes_abs, new_w, new_h)
-                boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
-                target = {
-                    'boxes': boxes_tensor,
-                    'labels': torch.tensor(labels, dtype=torch.long),
-                    'scores': torch.ones(len(labels))
-                }
+        if download:
+            if load_all_splits:
+                self._download_coco('train', year)
+                self._download_coco('val', year)
             else:
-                # If no transform, manually convert image to tensor
-                img = ToTensorV2()(image=img)['image']
-                boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
-                target = {
-                    'boxes': boxes_tensor,
-                    'labels': torch.ones(len(normalized_boxes), dtype=torch.long),
-                    'scores': torch.ones(len(normalized_boxes))
-                }
-            
-            return img, target
-            
-        except Exception as e:
-            print(f"Error loading image {img_path}: {e}")
-            raise
-    
-    def _normalize_boxes(self, boxes, width, height):
-        """
-        Convert boxes to normalized format [0,1].
+                self._download_coco(split, year)
         
-        Args:
-            boxes: List of [x1, y1, x2, y2] coordinates
-            width: Image width
-            height: Image height
+        # Initialize COCO api for each split
+        self.split_data = {}
+        if load_all_splits:
+            splits = ['train', 'val']
+        else:
+            splits = [self.split]
             
-        Returns:
-            list: Normalized boxes as [[x1, y1, x2, y2], ...]
-        """
-        normalized_boxes = []
-        for box in boxes:
-            x_min, y_min, x_max, y_max = box
-            # Normalize if needed (assuming original boxes might be in pixel coords)
-            if x_max > 1 or y_max > 1:
-                x_min, x_max = x_min / width, x_max / width
-                y_min, y_max = y_min / height, y_max / height
+        for s in splits:
+            ann_file = os.path.join(self.coco_dir, f'annotations/instances_{s}{year}.json')
+            coco = COCO(ann_file)
+            # Get all image ids containing dogs for this split
+            cat_ids = coco.getCatIds(catNms=['dog'])
+            img_ids = coco.getImgIds(catIds=cat_ids)
+            self.split_data[s] = {
+                'coco': coco,
+                'img_ids': img_ids,
+                'image_dir': os.path.join(self.coco_dir, f'{s}{year}')
+            }
             
-            # Clamp values to valid range
-            x_min = max(0.0, min(0.99, float(x_min)))
-            y_min = max(0.0, min(0.99, float(y_min)))
-            x_max = max(min(1.0, float(x_max)), x_min + 0.01)
-            y_max = max(min(1.0, float(y_max)), y_min + 0.01)
-            
-            normalized_boxes.append([x_min, y_min, x_max, y_max])
-        return normalized_boxes
-    
-    def _normalized_to_absolute(self, boxes, width, height):
-        """
-        Convert normalized boxes to absolute coordinates.
+        # Combine all image IDs if loading all splits
+        if load_all_splits:
+            self.all_img_data = []
+            for s, data in self.split_data.items():
+                for img_id in data['img_ids']:
+                    self.all_img_data.append({
+                        'split': s,
+                        'img_id': img_id,
+                        'coco': data['coco'],
+                        'image_dir': data['image_dir']
+                    })
+            print(f"Found total of {len(self.all_img_data)} images containing dogs across all splits")
+        else:
+            print(f"Found {len(self.split_data[split]['img_ids'])} images containing dogs in {split} set")
+
+    async def _download_file_async(self, session, url, destination):
+        """Download a file asynchronously with retry logic"""
+        for attempt in range(self.MAX_RETRIES):
+            try:
+                async with session.get(url) as response:
+                    response.raise_for_status()
+                    with open(destination, 'wb') as f:
+                        async for chunk in response.content.iter_chunked(self.CHUNK_SIZE):
+                            f.write(chunk)
+                return True
+            except Exception as e:
+                if attempt == self.MAX_RETRIES - 1:
+                    print(f"\nFailed to download after {self.MAX_RETRIES} attempts: {url}")
+                    return False
+                await asyncio.sleep(self.RETRY_DELAY * (attempt + 1))
+        return False
+
+    async def _download_batch_async(self, urls_and_paths):
+        """Download a batch of files concurrently"""
+        async with aiohttp.ClientSession() as session:
+            tasks = []
+            for url, path in urls_and_paths:
+                task = asyncio.create_task(self._download_file_async(session, url, path))
+                tasks.append(task)
+            return await asyncio.gather(*tasks)
+
+    def _download_coco(self, split, year):
+        """Download only dog-related images from COCO dataset"""
+        from tqdm import tqdm
+
+        BASE_URL = 'http://images.cocodataset.org/'
         
-        Args:
-            boxes: List of normalized [x1, y1, x2, y2] coordinates
-            width: Image width
-            height: Image height
-            
-        Returns:
-            list: Absolute pixel boxes as [[x1, y1, x2, y2], ...]
-        """
-        return [[box[0] * width, box[1] * height, box[2] * width, box[3] * height] for box in boxes]
-    
-    def _absolute_to_normalized(self, boxes, width, height):
-        """
-        Convert absolute boxes to normalized coordinates.
+        # First, download only annotations
+        ann_url = f'{BASE_URL}annotations/annotations_trainval{year}.zip'
+        ann_filename = 'annotations.zip'
+        ann_zip_path = os.path.join(self.coco_dir, ann_filename)
         
-        Args:
-            boxes: List of absolute [x1, y1, x2, y2] coordinates
-            width: Image width
-            height: Image height
+        # Download and extract annotations if they don't exist
+        if not os.path.exists(os.path.join(self.coco_dir, 'annotations')):
+            print("\nDownloading COCO annotations...")
+            asyncio.run(self._download_batch_async([(ann_url, ann_zip_path)]))
+            print("Extracting annotations...")
+            extract_zip(ann_zip_path, self.coco_dir)
+        
+        # Initialize COCO API with annotations
+        ann_file = os.path.join(self.coco_dir, f'annotations/instances_{split}{year}.json')
+        temp_coco = COCO(ann_file)
+        
+        # Get image IDs containing dogs
+        print("\nIdentifying images containing dogs...")
+        cat_ids = temp_coco.getCatIds(catNms=['dog'])
+        dog_img_ids = temp_coco.getImgIds(catIds=cat_ids)
+        total_dog_images = len(dog_img_ids)
+        print(f"Found {total_dog_images} images containing dogs in {split} set")
+        
+        # Create directory for images if it doesn't exist
+        os.makedirs(os.path.join(self.coco_dir, f'{split}{year}'), exist_ok=True)
+        
+        # Count how many images we need to download
+        existing_images = 0
+        to_download = []
+        print("\nChecking existing files...")
+        for img_id in dog_img_ids:
+            img_info = temp_coco.loadImgs(img_id)[0]
+            img_path = os.path.join(self.coco_dir, f'{split}{year}', img_info['file_name'])
+            if os.path.exists(img_path):
+                existing_images += 1
+            else:
+                img_url = f'{BASE_URL}{split}{year}/{img_info["file_name"]}'
+                to_download.append((img_url, img_path))
+        
+        print(f"\nFound {existing_images} already downloaded images")
+        print(f"Need to download {len(to_download)} new images")
+        
+        # Download missing dog-related images in parallel batches
+        if to_download:
+            batch_size = 50  # Number of images to download in each batch
+            total_batches = (len(to_download) + batch_size - 1) // batch_size
             
-        Returns:
-            list: Normalized boxes as [[x1, y1, x2, y2], ...]
-        """
-        return [[box[0] / width, box[1] / height, box[2] / width, box[3] / height] for box in boxes]
+            with tqdm(total=len(to_download), desc="Downloading dog images") as pbar:
+                for i in range(0, len(to_download), batch_size):
+                    batch = to_download[i:i + batch_size]
+                    results = asyncio.run(self._download_batch_async(batch))
+                    successful = sum(1 for r in results if r)
+                    pbar.update(successful)
+        
+        print("\nDownload completed!")
+        print(f"Total dog images available: {total_dog_images}")
+        print(f"- Previously downloaded: {existing_images}")
+        print(f"- Newly downloaded: {len(to_download)}")
+
+    def __getitem__(self, index):
+        """Get a single image and its annotations"""
+        if self.load_all_splits:
+            # Get data for the combined index
+            img_data = self.all_img_data[index]
+            img_id = img_data['img_id']
+            coco = img_data['coco']
+            image_dir = img_data['image_dir']
+        else:
+            # Get data for the single split
+            img_id = self.split_data[self.split]['img_ids'][index]
+            coco = self.split_data[self.split]['coco']
+            image_dir = self.split_data[self.split]['image_dir']
+        
+        # Load image
+        img_info = coco.loadImgs(img_id)[0]
+        image = Image.open(os.path.join(image_dir, img_info['file_name'])).convert('RGB')
+        
+        # Load annotations
+        ann_ids = coco.getAnnIds(imgIds=img_id, catIds=[self.COCO_CATEGORY_ID])
+        anns = coco.loadAnns(ann_ids)
+        
+        # Convert COCO boxes to [x1, y1, x2, y2] format
+        boxes = [ann['bbox'] for ann in anns]
+        boxes = torch.as_tensor(boxes, dtype=torch.float32)            
+        labels = torch.ones((len(boxes),), dtype=torch.long)  # All boxes are dogs
+        
+        target = {
+            'boxes': boxes,
+            'labels': labels,
+            'image_id': torch.tensor([img_id])
+        }
+        
+        # Apply transforms if any
+        if self.transform is not None:
+            image = np.array(image)
+            transformed = self.transform(image=image, bboxes=boxes.numpy(), labels=labels.numpy())
+            image = transformed['image']
+            target['boxes'] = torch.tensor(transformed['bboxes'], dtype=torch.float32)
+            target['labels'] = torch.tensor(transformed['labels'], dtype=torch.long)
+        
+        return image, target
+
+    def __len__(self):
+        """Return the number of images in the dataset"""
+        if self.load_all_splits:
+            return len(self.all_img_data)
+        return len(self.split_data[self.split]['img_ids'])

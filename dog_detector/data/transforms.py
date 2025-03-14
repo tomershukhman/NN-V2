@@ -11,14 +11,7 @@ from config import NORMALIZE_MEAN, NORMALIZE_STD, IMAGE_SIZE
 
 
 def get_train_transform():
-    """
-    Returns an Albumentations transform pipeline for training data augmentation.
-    
-    Includes random crops, flips, color adjustments and other augmentations
-    to improve model robustness.
-    """
     return A.Compose([
-        # More aggressive random crop to help with large dog detection
         A.RandomResizedCrop(
             size=(IMAGE_SIZE, IMAGE_SIZE), 
             scale=(0.6, 1.0),
@@ -28,7 +21,6 @@ def get_train_transform():
         ),
         A.HorizontalFlip(p=0.5),
         A.Rotate(limit=15, p=0.3),
-        # Color augmentations for better normalization and robustness
         A.OneOf([
             A.RandomBrightnessContrast(
                 brightness_limit=0.3,
@@ -48,23 +40,22 @@ def get_train_transform():
                 p=1.0
             ),
         ], p=0.5),
-        # Add perspective transforms to simulate different viewpoints
         A.OneOf([
             A.GaussianBlur(blur_limit=(3, 7), p=1.0),
             A.MotionBlur(blur_limit=(3, 7), p=1.0),
         ], p=0.2),
-        # Scale-specific augmentations
         A.OneOf([
             A.RandomScale(scale_limit=(-0.3, 0.1), p=1.0),
             A.RandomScale(scale_limit=(0.1, 0.3), p=1.0),
         ], p=0.3),
-        # Normalize and convert to tensor
+        # Ensure all images are resized to IMAGE_SIZE
+        A.Resize(height=IMAGE_SIZE, width=IMAGE_SIZE),
         A.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
-        format='pascal_voc',
+        format='coco',
         label_fields=['labels'],
-        min_visibility=0.3  # Ensure boxes remain mostly visible
+        min_visibility=0.3
     ))
 
 
@@ -79,52 +70,67 @@ def get_val_transform():
         A.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
-        format='pascal_voc', 
+        format='coco',  # Changed from pascal_voc to coco format
         label_fields=['labels']
     ))
-
 
 class TransformedSubset:
     """
     A dataset wrapper that applies transforms to a subset of another dataset.
-    
-    This is useful for applying different transformations to subsets of a dataset,
-    such as when splitting a dataset into training and validation sets.
     """
     def __init__(self, subset, transform):
-        """
-        Initialize a TransformedSubset.
-        
-        Args:
-            subset: The dataset subset to transform
-            transform: The Albumentations transform to apply
-        """
         self.subset = subset
         self.transform = transform
-    
-    def __getitem__(self, idx):
-        """
-        Get a transformed item from the underlying dataset.
         
-        Args:
-            idx: Index of the item to retrieve
-            
-        Returns:
-            tuple: (transformed_image, transformed_target)
+    def _validate_and_clip_boxes(self, boxes):
         """
+        Validate and clip bounding boxes in COCO format ([x, y, w, h]).
+        Ensures that x, y are in [0,1] and that the box does not extend past 1.
+        """
+        valid_boxes = []
+        for box in boxes:
+            x, y, w, h = box
+            x = max(0.0, min(1.0, x))
+            y = max(0.0, min(1.0, y))
+            # Ensure the box does not go past the image boundary
+            w = max(0.0, min(w, 1.0 - x))
+            h = max(0.0, min(h, 1.0 - y))
+            if w > 0 and h > 0:
+                valid_boxes.append([x, y, w, h])
+        return valid_boxes
+
+    def __getitem__(self, idx):
         import numpy as np
         import torch
         from PIL import Image as PILImage
         
         img, target = self.subset[idx]
         
-        # If img is a PIL image, convert to numpy array before transforming
+        # Convert PIL image to numpy array if needed
         if isinstance(img, PILImage.Image):
             img = np.array(img)
             
-        # Convert target boxes from tensor to list of lists
+        # Convert target boxes from tensor to list and validate them
         bboxes = target['boxes'].tolist()
-        labels = target['labels'].tolist()
+        bboxes = self._validate_and_clip_boxes(bboxes)
+        
+        # Adjust labels to match the number of valid boxes
+        if bboxes:
+            labels = target['labels'].tolist()[:len(bboxes)]
+        else:
+            labels = []
+        
+        # Instead of returning None when no valid boxes are found,
+        # return the transformed image with an empty target.
+        if len(bboxes) == 0:
+            transformed = self.transform(image=img, bboxes=[], labels=[])
+            img = transformed['image']
+            new_target = {
+                'boxes': torch.empty((0, 4), dtype=torch.float32),
+                'labels': torch.empty((0,), dtype=torch.long),
+                'image_id': target.get('image_id', torch.tensor([]))
+            }
+            return img, new_target
         
         transformed = self.transform(image=img, bboxes=bboxes, labels=labels)
         img = transformed['image']
@@ -132,7 +138,6 @@ class TransformedSubset:
         target['labels'] = torch.tensor(transformed['labels'], dtype=torch.long)
         
         return img, target
-    
+
     def __len__(self):
-        """Return the length of the dataset."""
         return len(self.subset)
