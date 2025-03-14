@@ -18,106 +18,99 @@ def xyxy_to_coco(boxes):
         return [[box[0], box[1], box[2] - box[0], box[3] - box[1]] for box in boxes]
 
 def box_iou(boxes1, boxes2):
-    """
-    Calculate IoU between two sets of boxes, maintaining gradients for backpropagation
+    """Calculate IoU between two sets of boxes with proper broadcasting"""
+    # Handle empty boxes
+    if len(boxes1) == 0 or len(boxes2) == 0:
+        return torch.zeros(len(boxes1), len(boxes2), device=boxes1.device)
+
+    # Convert from center format if needed
+    if boxes1.size(-1) == 4:
+        area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
+        area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+    else:
+        raise ValueError("Boxes must be in [x1, y1, x2, y2] format")
+
+    # Compute intersection
+    lt = torch.max(boxes1[:, None, :2], boxes2[:, :2])  # Shape: [N,M,2]
+    rb = torch.min(boxes1[:, None, 2:], boxes2[:, 2:])  # Shape: [N,M,2]
+    wh = (rb - lt).clamp(min=0)  # Shape: [N,M,2]
+    intersection = wh[..., 0] * wh[..., 1]  # Shape: [N,M]
+
+    # Compute union
+    union = area1[:, None] + area2 - intersection
     
-    Args:
-        boxes1: [N, 4] ground truth boxes
-        boxes2: [M, 4] predicted boxes
-        
-    Returns:
-        IoU tensor of shape [N, M]
-    """
-    # Calculate intersection coordinates
-    x1 = torch.max(boxes1[..., 0], boxes2[..., 0])
-    y1 = torch.max(boxes1[..., 1], boxes2[..., 1])
-    x2 = torch.min(boxes1[..., 2], boxes2[..., 2])
-    y2 = torch.min(boxes1[..., 3], boxes2[..., 3])
+    # Add small epsilon to prevent division by zero
+    iou = intersection / (union + 1e-7)
     
-    # Calculate intersection area
-    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-    
-    # Calculate union area
-    area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
-    area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
-    union = area1 + area2 - intersection
-    
-    # Add small epsilon to avoid division by zero
-    union = torch.clamp(union, min=1e-7)
-    
-    return intersection / union
+    return iou
 
 def diou_loss(boxes1, boxes2):
-    """
-    Calculate DIoU (Distance-IoU) loss between two sets of boxes, maintaining gradients
-    
-    Args:
-        boxes1: [N, 4] predicted boxes
-        boxes2: [N, 4] target boxes
-        
-    Returns:
-        DIoU loss tensor
-    """
-    # Calculate standard IoU
-    x1 = torch.max(boxes1[..., 0], boxes2[..., 0])
-    y1 = torch.max(boxes1[..., 1], boxes2[..., 1])
-    x2 = torch.min(boxes1[..., 2], boxes2[..., 2])
-    y2 = torch.min(boxes1[..., 3], boxes2[..., 3])
-    
-    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-    area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
-    area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
-    union = area1 + area2 - intersection
-    
-    # Add small epsilon to avoid division by zero
-    union = torch.clamp(union, min=1e-7)
-    iou = intersection / union
-    
-    # Calculate centers and diagonal distance
+    """Calculate DIoU Loss with center point distance"""
+    # Handle empty boxes
+    if len(boxes1) == 0 or len(boxes2) == 0:
+        return torch.zeros(len(boxes1), device=boxes1.device)
+
+    # Calculate IoU
+    iou = box_iou(boxes1, boxes2)
+
+    # Get centers of boxes
     boxes1_center = (boxes1[..., :2] + boxes1[..., 2:]) / 2
     boxes2_center = (boxes2[..., :2] + boxes2[..., 2:]) / 2
-    center_distance_squared = torch.sum((boxes1_center - boxes2_center) ** 2, dim=-1)
-    
-    # Calculate diagonal length of the smallest enclosing box
-    enclosing_x1 = torch.min(boxes1[..., 0], boxes2[..., 0])
-    enclosing_y1 = torch.min(boxes1[..., 1], boxes2[..., 1])
-    enclosing_x2 = torch.max(boxes1[..., 2], boxes2[..., 2])
-    enclosing_y2 = torch.max(boxes1[..., 3], boxes2[..., 3])
-    diagonal_squared = (enclosing_x2 - enclosing_x1) ** 2 + (enclosing_y2 - enclosing_y1) ** 2
-    
-    # Add small epsilon to avoid division by zero
-    diagonal_squared = torch.clamp(diagonal_squared, min=1e-7)
-    
-    # Calculate DIoU
-    diou = iou - (center_distance_squared / diagonal_squared)
-    
-    # Return loss
-    return 1 - diou
 
-def weighted_nms(boxes, scores, iou_threshold=0.5):
+    # Calculate center distance
+    center_distance = torch.sum((boxes1_center - boxes2_center) ** 2, dim=-1)
+
+    # Calculate diagonal length of smallest enclosing box
+    lt = torch.min(boxes1[..., :2], boxes2[..., :2])
+    rb = torch.max(boxes1[..., 2:], boxes2[..., 2:])
+    diagonal_length = torch.sum((rb - lt) ** 2, dim=-1)
+
+    # Compute DIoU Loss
+    loss = 1 - iou + (center_distance / (diagonal_length + 1e-7))
+
+    return loss
+
+def weighted_nms(boxes, scores, iou_threshold=0.5, score_threshold=0.05):
     """
-    Perform Weighted Non-Maximum Suppression on boxes.
+    Perform weighted NMS with score thresholding and proper box format handling
+    """
+    if len(boxes) == 0:
+        return boxes, scores, torch.tensor([], device=boxes.device, dtype=torch.int64)
     
-    While torchvision has ops.nms, it doesn't have weighted NMS, so we keep this implementation
-    if specialized behavior is needed. For standard NMS, use ops.nms directly instead.
+    # Filter by score threshold first
+    score_mask = scores > score_threshold
+    boxes = boxes[score_mask]
+    scores = scores[score_mask]
     
-    Args:
-        boxes (tensor): bounding boxes of shape [N, 4]
-        scores (tensor): confidence scores of shape [N]
-        iou_threshold (float): IoU threshold for considering boxes as duplicates
+    if len(boxes) == 0:
+        return boxes, scores, torch.tensor([], device=boxes.device, dtype=torch.int64)
+    
+    # Calculate areas once
+    areas = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    
+    # Sort boxes by score
+    _, order = scores.sort(descending=True)
+    keep = []
+    
+    while order.numel() > 0:
+        if order.numel() == 1:
+            keep.append(order.item())
+            break
+            
+        i = order[0]
+        keep.append(i.item())
         
-    Returns:
-        tuple: (filtered_boxes, filtered_scores, filtered_indices)
-    """
-    device = boxes.device
+        # Calculate IoU between current box and remaining boxes
+        remaining_boxes = boxes[order[1:]]
+        box_i = boxes[i].unsqueeze(0)
+        ious = box_iou(box_i, remaining_boxes).squeeze(0)
+        
+        # Keep boxes with IoU less than threshold
+        mask = ious <= iou_threshold
+        order = order[1:][mask]
     
-    # If no boxes, return empty tensors
-    if boxes.shape[0] == 0:
-        return boxes, scores, torch.tensor([], device=device, dtype=torch.int64)
-    
-    # For standard NMS behavior, just use torchvision's implementation
-    keep_indices = ops.nms(boxes, scores, iou_threshold)
-    return boxes[keep_indices], scores[keep_indices], keep_indices
+    keep = torch.tensor(keep, dtype=torch.long, device=boxes.device)
+    return boxes[keep], scores[keep], keep
 
 def soft_nms(boxes, scores, iou_threshold=0.4, sigma=0.5, score_threshold=0.001):
     """

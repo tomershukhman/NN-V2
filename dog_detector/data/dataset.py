@@ -189,15 +189,13 @@ class DogDetectionDataset(Dataset):
         print(f"- Newly downloaded: {len(to_download)}")
 
     def __getitem__(self, index):
-        """Get a single image and its annotations"""
+        """Get a single image and its annotations with proper normalization"""
         if self.load_all_splits:
-            # Get data for the combined index
             img_data = self.all_img_data[index]
             img_id = img_data['img_id']
             coco = img_data['coco']
             image_dir = img_data['image_dir']
         else:
-            # Get data for the single split
             img_id = self.split_data[self.split]['img_ids'][index]
             coco = self.split_data[self.split]['coco']
             image_dir = self.split_data[self.split]['image_dir']
@@ -205,26 +203,56 @@ class DogDetectionDataset(Dataset):
         # Load image
         img_info = coco.loadImgs(img_id)[0]
         image = Image.open(os.path.join(image_dir, img_info['file_name'])).convert('RGB')
+        width, height = image.size
         
         # Load annotations
         ann_ids = coco.getAnnIds(imgIds=img_id, catIds=[self.COCO_CATEGORY_ID])
         anns = coco.loadAnns(ann_ids)
         
-        # Convert COCO boxes to [x1, y1, x2, y2] format
-        boxes = [ann['bbox'] for ann in anns]
-        boxes = torch.as_tensor(boxes, dtype=torch.float32)            
-        labels = torch.ones((len(boxes),), dtype=torch.long)  # All boxes are dogs
+        # Convert COCO boxes to normalized coordinates
+        boxes = []
+        valid_boxes = []
+        for ann in anns:
+            x, y, w, h = ann['bbox']
+            # Normalize coordinates
+            x1 = x / width
+            y1 = y / height
+            x2 = (x + w) / width
+            y2 = (y + h) / height
+            
+            # Validate box coordinates
+            if (x2 > x1 and y2 > y1 and 
+                x1 >= 0 and y1 >= 0 and 
+                x2 <= 1 and y2 <= 1):
+                boxes.append([x1, y1, x2, y2])
+                valid_boxes.append(True)
+            else:
+                valid_boxes.append(False)
+        
+        if not boxes:
+            # Return a valid empty target if no valid boxes
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros(0, dtype=torch.long)
+        else:
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+            # Only create labels for valid boxes
+            labels = torch.ones(len(boxes), dtype=torch.long)
         
         target = {
             'boxes': boxes,
             'labels': labels,
-            'image_id': torch.tensor([img_id])
+            'image_id': torch.tensor([img_id]),
+            'valid_boxes': torch.tensor(valid_boxes) if valid_boxes else torch.zeros(0, dtype=torch.bool)
         }
         
         # Apply transforms if any
         if self.transform is not None:
             image = np.array(image)
-            transformed = self.transform(image=image, bboxes=boxes.numpy(), labels=labels.numpy())
+            transformed = self.transform(
+                image=image, 
+                bboxes=boxes.numpy(),
+                labels=labels.numpy()
+            )
             image = transformed['image']
             target['boxes'] = torch.tensor(transformed['bboxes'], dtype=torch.float32)
             target['labels'] = torch.tensor(transformed['labels'], dtype=torch.long)

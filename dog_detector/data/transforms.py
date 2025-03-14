@@ -12,50 +12,59 @@ from config import NORMALIZE_MEAN, NORMALIZE_STD, IMAGE_SIZE
 
 def get_train_transform():
     return A.Compose([
-        A.RandomResizedCrop(
-            size=(IMAGE_SIZE, IMAGE_SIZE), 
-            scale=(0.6, 1.0),
-            ratio=(0.75, 1.33),
-            interpolation=1,
-            p=1.0
-        ),
-        A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, p=0.3),
+        A.OneOf([
+            A.RandomResizedCrop(
+                size=(IMAGE_SIZE, IMAGE_SIZE),
+                scale=(0.5, 1.0),
+                ratio=(0.75, 1.33),
+                p=1.0
+            ),
+            A.Resize(
+                height=IMAGE_SIZE,
+                width=IMAGE_SIZE,
+                p=1.0
+            ),
+        ], p=1.0),
+        
+        # Color augmentations
         A.OneOf([
             A.RandomBrightnessContrast(
-                brightness_limit=0.3,
-                contrast_limit=0.3,
+                brightness_limit=0.2,
+                contrast_limit=0.2,
                 p=1.0
             ),
-            A.RGBShift(
-                r_shift_limit=15,
-                g_shift_limit=15,
-                b_shift_limit=15,
-                p=1.0
-            ),
-            A.HueSaturationValue(
-                hue_shift_limit=10, 
-                sat_shift_limit=20, 
-                val_shift_limit=10, 
+            A.ColorJitter(
+                brightness=0.2,
+                contrast=0.2,
+                saturation=0.2,
+                hue=0.1,
                 p=1.0
             ),
         ], p=0.5),
+        
+        # Noise and blur
         A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
-            A.MotionBlur(blur_limit=(3, 7), p=1.0),
-        ], p=0.2),
-        A.OneOf([
-            A.RandomScale(scale_limit=(-0.3, 0.1), p=1.0),
-            A.RandomScale(scale_limit=(0.1, 0.3), p=1.0),
+            A.GaussNoise(var_limit=(10.0, 50.0), p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
         ], p=0.3),
-        # Ensure all images are resized to IMAGE_SIZE
-        A.Resize(height=IMAGE_SIZE, width=IMAGE_SIZE),
+        
+        # Geometric transforms
+        A.HorizontalFlip(p=0.5),
+        A.ShiftScaleRotate(
+            shift_limit=0.0625,
+            scale_limit=0.1,
+            rotate_limit=15,
+            border_mode=0,
+            p=0.3
+        ),
+        
+        # Final normalization
         A.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
-        format='coco',
-        label_fields=['labels'],
-        min_visibility=0.3
+        format='pascal_voc',
+        min_visibility=0.3,
+        label_fields=['labels']
     ))
 
 
@@ -66,11 +75,16 @@ def get_val_transform():
     Simple resizing and normalization without data augmentation for consistent evaluation.
     """
     return A.Compose([
-        A.Resize(height=IMAGE_SIZE, width=IMAGE_SIZE),
+        A.Resize(
+            height=IMAGE_SIZE,
+            width=IMAGE_SIZE,
+            p=1.0
+        ),
         A.Normalize(mean=NORMALIZE_MEAN, std=NORMALIZE_STD),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
-        format='coco',  # Changed from pascal_voc to coco format
+        format='pascal_voc',
+        min_visibility=0.1,
         label_fields=['labels']
     ))
 
@@ -84,19 +98,22 @@ class TransformedSubset:
         
     def _validate_and_clip_boxes(self, boxes):
         """
-        Validate and clip bounding boxes in COCO format ([x, y, w, h]).
-        Ensures that x, y are in [0,1] and that the box does not extend past 1.
+        Validate and clip bounding boxes in Pascal VOC format ([x1, y1, x2, y2])
         """
         valid_boxes = []
         for box in boxes:
-            x, y, w, h = box
-            x = max(0.0, min(1.0, x))
-            y = max(0.0, min(1.0, y))
-            # Ensure the box does not go past the image boundary
-            w = max(0.0, min(w, 1.0 - x))
-            h = max(0.0, min(h, 1.0 - y))
-            if w > 0 and h > 0:
-                valid_boxes.append([x, y, w, h])
+            x1, y1, x2, y2 = box
+            # Ensure coordinates are in range [0, 1]
+            x1 = max(0.0, min(1.0, x1))
+            y1 = max(0.0, min(1.0, y1))
+            x2 = max(0.0, min(1.0, x2))
+            y2 = max(0.0, min(1.0, y2))
+            
+            # Validate box dimensions
+            w = x2 - x1
+            h = y2 - y1
+            if w > 0.01 and h > 0.01:  # Minimum size threshold
+                valid_boxes.append([x1, y1, x2, y2])
         return valid_boxes
 
     def __getitem__(self, idx):
