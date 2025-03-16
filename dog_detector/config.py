@@ -4,7 +4,7 @@ import torch
 
 class Config:
     # Dataset paths and settings
-    if torch.mps.is_available():
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
           DATA_ROOT = "./data" 
     else:
         DATA_ROOT = "../coco/NN-V2/data"

@@ -25,11 +25,11 @@ class CocoDogsDataset(Dataset):
         self.transform = transform
         self.dog_category_id = 18  # COCO category id for dog
         
-        # Create cache directory if it doesn't exist
-        cache_dir = os.path.join(data_root, "cache")
+        # Create local cache directory in current working directory
+        cache_dir = os.path.join(".", "cache")
         os.makedirs(cache_dir, exist_ok=True)
         
-        # Cache files
+        # Cache files in local directory
         self.cache_file = os.path.join(cache_dir, f"{set_name}_processed_data.pkl")
         
         # Try to load from cache first
@@ -181,8 +181,8 @@ class CocoDogsDataset(Dataset):
     @staticmethod
     def get_dataset_stats(data_root):
         """Collect statistics about the dataset"""
-        # Try to load from cache first
-        cache_dir = os.path.join(data_root, "cache")
+        # Try to load from local cache directory
+        cache_dir = os.path.join(".", "cache")
         stats_cache = os.path.join(cache_dir, "dataset_stats.json")
         
         if os.path.exists(stats_cache):
@@ -212,7 +212,7 @@ class CocoDogsDataset(Dataset):
         stats['train_total'] = train_target_count * 2
         stats['val_total'] = val_target_count * 2
         
-        # Cache the stats
+        # Cache the stats in local directory
         os.makedirs(cache_dir, exist_ok=True)
         with open(stats_cache, 'w') as f:
             json.dump(stats, f)
