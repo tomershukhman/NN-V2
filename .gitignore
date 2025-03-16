@@ -161,9 +161,10 @@ mongodb/
 # Keep example files
 !examples/*.jpg
 !examples/*.png
-!dog_detector/data
+!dog_detector/dataset
 
 downloaded_metrics/
 
 .vscode-server
+
 
