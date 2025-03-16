@@ -4,13 +4,13 @@ import torch
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
 OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
-DATA_SET_TO_USE = 0.1  # Use 1% of available data for faster iteration
+DATA_SET_TO_USE = 0.4  # Use 1% of available data for faster iteration
 TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
 
 # Training parameters
 BATCH_SIZE = 16  # Reduced batch size due to more complex model
 NUM_WORKERS = min(8, os.cpu_count() or 1)
-LEARNING_RATE = 5e-5  # Reduced learning rate for stability
+LEARNING_RATE = 2e-5  # Reduced learning rate for stability
 NUM_EPOCHS = 100  # Increased epochs since we have a more complex model
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 

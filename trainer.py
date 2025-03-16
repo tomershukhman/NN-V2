@@ -98,9 +98,9 @@ class Trainer:
                 print(f"Saved new best model with val_loss: {val_loss:.4f}")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 10:
-                    print("Early stopping triggered")
-                    break
+                # if epochs_without_improvement >= 10:
+                #     print("Early stopping triggered")
+                #     break
         
         self.visualization_logger.close()
 

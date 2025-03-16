@@ -11,7 +11,7 @@ from config import (
 import math
 
 class DogDetector(nn.Module):
-    def __init__(self, num_anchors_per_cell=9, feature_map_size=7):
+    def __init__(self, num_anchors_per_cell=9, feature_map_size=7, dropout_rate=0.5):
         super(DogDetector, self).__init__()
         
         # Load pretrained ResNet18 backbone
@@ -31,6 +31,9 @@ class DogDetector(nn.Module):
         self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
         self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         
+        # BatchNorm for smoothing the convolution output
+        self.bn_smooth = nn.BatchNorm2d(256)
+        
         # Replace adaptive pooling with fixed pooling
         self.pool = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
@@ -39,9 +42,14 @@ class DogDetector(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         
-        # Detection head
+        # Detection head with BatchNorm and Dropout
         self.conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(256)
+        self.dropout1 = nn.Dropout(dropout_rate)
+        
         self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(256)
+        self.dropout2 = nn.Dropout(dropout_rate)
         
         # Generate anchor boxes with different scales and aspect ratios
         self.anchor_scales = [0.5, 1.0, 2.0]
@@ -87,6 +95,7 @@ class DogDetector(nn.Module):
         # FPN-like feature processing with fixed pooling
         lateral = self.lateral_conv(features)
         features = self.smooth_conv(lateral)
+        features = self.bn_smooth(features)
         
         # Apply fixed-size pooling operations until we reach desired size
         while features.shape[-1] > self.feature_map_size:
@@ -102,8 +111,10 @@ class DogDetector(nn.Module):
             )
         
         # Detection head
-        x = F.relu(self.conv1(features))
-        x = F.relu(self.conv2(x))
+        x = F.relu(self.bn1(self.conv1(features)))
+        x = self.dropout1(x)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = self.dropout2(x)
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(x)
