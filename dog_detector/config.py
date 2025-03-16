@@ -1,9 +1,13 @@
 #dog_detector/config.py
 import os
+import torch
 
 class Config:
     # Dataset paths and settings
-    DATA_ROOT = "./data"
+    if torch.mps.is_available():
+          DATA_ROOT = "./data" 
+    else:
+        DATA_ROOT = "../coco/NN-V2/data"
     TRAIN_SET = "train2017"
     VAL_SET = "val2017"
     TRAIN_IMAGES_DIR = os.path.join(DATA_ROOT, "train2017")
