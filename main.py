@@ -95,11 +95,11 @@ def display_dataset_stats(data_root):
     
     return stats
 
-def main(args):
-    download_coco_dataset(args.data_root)
+def main():
+    download_coco_dataset(config.DATA_ROOT)
     
     # Display dataset statistics
-    display_dataset_stats(args.data_root)
+    display_dataset_stats(config.DATA_ROOT)
     
     writer = SummaryWriter()
     
@@ -115,8 +115,8 @@ def main(args):
     # Create checkpoint directory if it doesn't exist
     os.makedirs(config.CHECKPOINT_DIR, exist_ok=True)
     
-    train_dataset = CocoDogsDataset(data_root=args.data_root, set_name=config.TRAIN_SET)
-    val_dataset = CocoDogsDataset(data_root=args.data_root, set_name=config.VAL_SET)
+    train_dataset = CocoDogsDataset(data_root=config.DATA_ROOT, set_name=config.TRAIN_SET)
+    val_dataset = CocoDogsDataset(data_root=config.DATA_ROOT, set_name=config.VAL_SET)
     train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
                               num_workers=config.NUM_WORKERS, collate_fn=collate_fn)
     val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
@@ -155,7 +155,4 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Dog Detector Training using COCO2017")
-    parser.add_argument("--data_root", type=str, default="./data",
-                        help="Directory where COCO dataset is stored/downloaded")
-    args = parser.parse_args()
-    main(args)
+    main()

@@ -22,6 +22,7 @@ class CocoDogsDataset(Dataset):
         self.set_name = set_name
         self.transform = transform
 
+        print(f"dataroot {self.data_root}")
         ann_file = os.path.join(data_root, "annotations", f"instances_{set_name}.json")
         self.coco = COCO(ann_file)
 

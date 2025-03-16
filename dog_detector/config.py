@@ -3,7 +3,7 @@ import os
 
 class Config:
     # Dataset paths and settings
-    DATA_ROOT = "./data"
+    DATA_ROOT = "../coco/NN-V2/data"
     TRAIN_SET = "train2017"
     VAL_SET = "val2017"
     TRAIN_IMAGES_DIR = os.path.join(DATA_ROOT, "train2017")
