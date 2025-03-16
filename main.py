@@ -118,8 +118,8 @@ def main():
     train_dataset = CocoDogsDataset(data_root=config.DATA_ROOT, set_name=config.TRAIN_SET)
     val_dataset = CocoDogsDataset(data_root=config.DATA_ROOT, set_name=config.VAL_SET)
     train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
-                              num_workers=config.NUM_WORKERS, collate_fn=collate_fn)
-    val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,
+                              num_workers=config.NUM_WORKERS, collate_fn=collate_fn,pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=config.BATCH_SIZE, shuffle=False,pin_memory=True,
                             num_workers=config.NUM_WORKERS, collate_fn=collate_fn)
     
     model = DogDetector(num_classes=config.NUM_CLASSES, pretrained=config.PRETRAINED)
