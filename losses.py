@@ -20,7 +20,7 @@ class DetectionLoss(nn.Module):
             default_anchors = None
             for pred in predictions:
                 if 'anchors' in pred and pred['anchors'] is not None:
-                    default_anchors = pred['anchors']
+                    default_anchors = pred['anchors'].to(device)  # Ensure anchors are on the correct device
                     break
             
             if default_anchors is None:
@@ -44,10 +44,10 @@ class DetectionLoss(nn.Module):
                 'anchors': default_anchors
             }
 
-        # Extract predictions
+        # Extract predictions and ensure they're on the right device
         bbox_pred = predictions['bbox_pred']  # Shape: [batch_size, num_anchors, 4]
         conf_pred = predictions['conf_pred']  # Shape: [batch_size, num_anchors]
-        default_anchors = predictions['anchors']  # Shape: [num_anchors, 4]
+        default_anchors = predictions['anchors'].to(bbox_pred.device)  # Ensure default_anchors are on same device
         
         batch_size = len(targets)
         num_anchors = default_anchors.size(0)
@@ -59,7 +59,7 @@ class DetectionLoss(nn.Module):
         num_pos = 0
         
         for i in range(batch_size):
-            gt_boxes = targets[i]['boxes']  # [num_gt, 4]
+            gt_boxes = targets[i]['boxes'].to(device)  # Move gt_boxes to correct device
             num_gt = len(gt_boxes)
             
             if num_gt == 0:

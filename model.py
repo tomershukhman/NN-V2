@@ -1,202 +1,198 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision
-from torchvision.models import ResNet18_Weights
-from torchvision.ops import nms
-from config import (
-    CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD
-)
+from torchvision import models
 import math
 
-class DogDetector(nn.Module):
-    def __init__(self, num_anchors_per_cell=9, feature_map_size=7, dropout_rate=0.5):
-        super(DogDetector, self).__init__()
-        
-        # Load pretrained ResNet18 backbone
-        backbone = torchvision.models.resnet18(weights=ResNet18_Weights)
-        
-        # Remove the last two layers (avg pool and fc)
-        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
-        
-        # Store feature map size
-        self.feature_map_size = feature_map_size
-        
-        # Freeze the first few layers of ResNet18
-        for param in list(self.backbone.parameters())[:-6]:
-            param.requires_grad = False
-        
-        # FPN-like feature pyramid with fixed pooling to ensure MPS compatibility
-        self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
-        self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        
-        # BatchNorm for smoothing the convolution output
-        self.bn_smooth = nn.BatchNorm2d(256)
-        
-        # Replace adaptive pooling with fixed pooling
-        self.pool = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
-        )
-        
-        # Detection head with BatchNorm and Dropout
-        self.conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.bn1 = nn.BatchNorm2d(256)
-        self.dropout1 = nn.Dropout(dropout_rate)
-        
-        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.bn2 = nn.BatchNorm2d(256)
-        self.dropout2 = nn.Dropout(dropout_rate)
-        
-        # Generate anchor boxes with different scales and aspect ratios
-        self.anchor_scales = [0.5, 1.0, 2.0]
-        self.anchor_ratios = [0.5, 1.0, 2.0]
-        self.num_anchors_per_cell = num_anchors_per_cell
-        
-        # Prediction heads
-        self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
-        self.cls_head = nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
-        
-        # Initialize weights
-        for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head, self.cls_head]:
-            if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, std=0.01)
-                nn.init.constant_(m.bias, 0)
-        
-        # Generate and register anchor boxes
-        self.register_buffer('default_anchors', self._generate_anchors())
 
-    def _generate_anchors(self):
-        """Generate anchor boxes for each cell in the feature map"""
+class DogDetector(nn.Module):
+    def __init__(self, pretrained=True, num_anchors=9, num_classes=1, feature_map_size=7):
+        super(DogDetector, self).__init__()
+
+        # Backbone using ResNet18 (or any other model you prefer)
+        resnet = models.resnet18(
+            weights='IMAGENET1K_V1' if pretrained else None)
+        self.backbone = nn.Sequential(
+            resnet.conv1,
+            resnet.bn1,
+            resnet.relu,
+            resnet.maxpool,
+            resnet.layer1,
+            resnet.layer2,
+            resnet.layer3,
+            resnet.layer4
+        )
+
+        # The ResNet18 backbone outputs 512 channels
+        backbone_output_channels = 512
+
+        # Store the expected feature map size for anchor generation
+        self.expected_feature_map_size = feature_map_size
+
+        # Bounding box head with adaptive normalization
+        self.bbox_head = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, stride=1, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(32, 256),  # Replace LayerNorm with GroupNorm
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(16, 128),  # Replace LayerNorm with GroupNorm
+            nn.Conv2d(128, 128, kernel_size=3, stride=1, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(16, 128),  # Replace LayerNorm with GroupNorm
+            # 4 values per anchor for each position
+            nn.Conv2d(128, 4 * num_anchors, kernel_size=1, stride=1)
+        )
+
+        # Classification head using convolutional layers with adaptive normalization
+        self.classification_head = nn.Sequential(
+            nn.Conv2d(512, 256, kernel_size=3, stride=1, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(32, 256),  # Replace LayerNorm with GroupNorm
+            nn.Conv2d(256, 128, kernel_size=3, stride=1, padding=1),
+            nn.GELU(),
+            nn.GroupNorm(16, 128),  # Replace LayerNorm with GroupNorm
+            nn.Conv2d(128, num_classes * num_anchors, kernel_size=1,
+                      stride=1)  # One value per anchor for each position
+        )
+
+        # Initialize weights
+        for m in [self.bbox_head, self.classification_head]:
+            for layer in m.modules():
+                if isinstance(layer, (nn.Conv2d, nn.Linear)):
+                    nn.init.normal_(layer.weight, std=0.01)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+
+        # Anchor box generation
+        self.default_anchors = self._generate_anchors(feature_map_size)
+        self.default_anchors = self.default_anchors.to(
+            next(self.parameters()).device)
+        self.num_anchors = num_anchors
+        self.feature_map_size = feature_map_size
+
+    def _generate_anchors(self, feature_map_size):
+        """Generate anchor boxes across the feature map"""
         anchors = []
-        for i in range(self.feature_map_size):
-            for j in range(self.feature_map_size):
-                cx = (j + 0.5) / self.feature_map_size
-                cy = (i + 0.5) / self.feature_map_size
-                for scale in self.anchor_scales:
-                    for ratio in self.anchor_ratios:
+        for i in range(feature_map_size):
+            for j in range(feature_map_size):
+                cx = (j + 0.5) / feature_map_size
+                cy = (i + 0.5) / feature_map_size
+                for scale in [0.5, 1.0, 2.0]:  # Different scales for anchor boxes
+                    for ratio in [0.5, 1.0, 2.0]:  # Different aspect ratios
                         w = scale * math.sqrt(ratio)
                         h = scale / math.sqrt(ratio)
-                        # Convert to [x1, y1, x2, y2] format
-                        x1 = cx - w/2
-                        y1 = cy - h/2
-                        x2 = cx + w/2
-                        y2 = cy + h/2
+                        x1 = cx - w / 2
+                        y1 = cy - h / 2
+                        x2 = cx + w / 2
+                        y2 = cy + h / 2
                         anchors.append([x1, y1, x2, y2])
         return torch.tensor(anchors, dtype=torch.float32)
 
     def forward(self, x, targets=None):
-        # Extract features using backbone
-        features = self.backbone(x)
-        
-        # FPN-like feature processing with fixed pooling
-        lateral = self.lateral_conv(features)
-        features = self.smooth_conv(lateral)
-        features = self.bn_smooth(features)
-        
-        # Apply fixed-size pooling operations until we reach desired size
-        while features.shape[-1] > self.feature_map_size:
-            features = self.pool(features)
-            
-        # If the feature map is too small, use interpolation to reach target size
-        if features.shape[-1] < self.feature_map_size:
-            features = F.interpolate(
-                features, 
-                size=(self.feature_map_size, self.feature_map_size),
-                mode='bilinear',
-                align_corners=False
-            )
-        
-        # Detection head
-        x = F.relu(self.bn1(self.conv1(features)))
-        x = self.dropout1(x)
-        x = F.relu(self.bn2(self.conv2(x)))
-        x = self.dropout2(x)
-        
-        # Predict bounding boxes and confidence scores
-        bbox_pred = self.bbox_head(x)
-        conf_pred = torch.sigmoid(self.cls_head(x))
-        
-        # Get shapes
-        batch_size = x.shape[0]
-        feature_size = x.shape[2]  # Should be self.feature_map_size
-        total_anchors = feature_size * feature_size * self.num_anchors_per_cell
-        
-        # Reshape bbox predictions to [batch, total_anchors, 4]
-        bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
-        bbox_pred = bbox_pred.view(batch_size, total_anchors, 4)
-        
-        # Transform bbox predictions from offsets to actual coordinates
-        default_anchors = self.default_anchors.to(bbox_pred.device)
-        bbox_pred = self._decode_boxes(bbox_pred, default_anchors)
-        
-        # Reshape confidence predictions
-        conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
-        conf_pred = conf_pred.view(batch_size, total_anchors)
-        
+        # Feature extraction from backbone
+        features = self.backbone(x)  # [batch_size, 512, H, W]
+        batch_size = x.size(0)
+
+        # Get actual feature map size from backbone output
+        _, _, feature_h, feature_w = features.shape
+
+        # If feature map size doesn't match expected size, regenerate anchors
+        if feature_h != self.feature_map_size or feature_w != self.feature_map_size:
+            self.feature_map_size = feature_h  # Assuming square feature maps
+            self.default_anchors = self._generate_anchors(
+                self.feature_map_size)
+            self.default_anchors = self.default_anchors.to(features.device)
+
+        # Classification head (fully convolutional)
+        conf_pred = self.classification_head(
+            features)  # [batch_size, num_anchors, 7, 7]
+        conf_pred = conf_pred.permute(0, 2, 3, 1).reshape(
+            batch_size, -1)  # [batch_size, num_total_anchors]
+        conf_pred = torch.sigmoid(conf_pred)
+
+        # Bounding box head
+        # [batch_size, 4*num_anchors, 7, 7]
+        bbox_pred = self.bbox_head(features)
+        bbox_pred = bbox_pred.permute(0, 2, 3, 1).reshape(
+            batch_size, -1, 4)  # [batch_size, num_total_anchors, 4]
+
+        # During training, return the raw predictions
         if self.training and targets is not None:
             return {
                 'bbox_pred': bbox_pred,
                 'conf_pred': conf_pred,
-                'anchors': default_anchors
+                'anchors': self.default_anchors
             }
-        else:
-            # Process each image in the batch
-            results = []
-            for boxes, scores in zip(bbox_pred, conf_pred):
-                # Filter by confidence threshold
-                mask = scores > (TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD)
-                boxes = boxes[mask]
-                scores = scores[mask]
-                
-                if len(boxes) > 0:
-                    # Clip boxes to image boundaries
-                    boxes = torch.clamp(boxes, min=0, max=1)
-                    
-                    # Apply NMS with appropriate threshold
-                    keep_idx = nms(boxes, scores, 
-                                 TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD)
-                    
-                    # Limit maximum detections
-                    if len(keep_idx) > MAX_DETECTIONS:
-                        scores_for_topk = scores[keep_idx]
-                        _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
-                        keep_idx = keep_idx[topk_indices]
-                    
-                    boxes = boxes[keep_idx]
-                    scores = scores[keep_idx]
-                else:
-                    boxes = torch.empty((0, 4), device=boxes.device)
-                    scores = torch.empty(0, device=scores.device)
-                
-                results.append({
-                    'boxes': boxes,
-                    'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
-                })
-            
-            return results
 
-    def _decode_boxes(self, box_pred, anchors):
-        """Convert predicted box offsets back to absolute coordinates"""
-        # Center form
-        anchor_centers = (anchors[:, :2] + anchors[:, 2:]) / 2
-        anchor_sizes = anchors[:, 2:] - anchors[:, :2]
-        
-        # Decode predictions
-        pred_centers = box_pred[:, :, :2] * anchor_sizes + anchor_centers
-        pred_sizes = torch.exp(box_pred[:, :, 2:]) * anchor_sizes
-        
-        # Convert back to [x1, y1, x2, y2] format
-        boxes = torch.cat([
-            pred_centers - pred_sizes/2,
-            pred_centers + pred_sizes/2
-        ], dim=-1)
-        
-        return boxes
+        # During inference, handle multiple detections
+        results = []
+        for boxes, scores in zip(bbox_pred, conf_pred):
+            mask = scores > 0.5  # Confidence threshold
+            boxes = boxes[mask]
+            scores = scores[mask]
+
+            if len(boxes) > 0:
+                # Apply NMS
+                boxes = torch.clamp(boxes, 0, 1)
+                keep_idx = self._nms(boxes, scores, 0.3)
+
+                if len(keep_idx) > 50:
+                    scores_for_topk = scores[keep_idx]
+                    _, topk_indices = torch.topk(scores_for_topk, k=50)
+                    # Ensure topk_indices is on the same device as keep_idx
+                    topk_indices = topk_indices.to(keep_idx.device)
+                    keep_idx = keep_idx[topk_indices]
+
+                boxes = boxes[keep_idx]
+                scores = scores[keep_idx]
+            else:
+                boxes = torch.empty((0, 4), device=boxes.device)
+                scores = torch.empty(0, device=scores.device)
+
+            results.append({
+                'boxes': boxes,
+                'scores': scores,
+                'anchors': self.default_anchors
+            })
+
+        return results
+
+    def _nms(self, boxes, scores, iou_threshold):
+        """Apply Non-Maximum Suppression (NMS)"""
+        sorted_scores, sorted_idx = torch.sort(scores, descending=True)
+        boxes = boxes[sorted_idx]
+
+        keep_idx = []
+        while len(boxes) > 0:
+            keep_idx.append(sorted_idx[0])
+            if len(boxes) == 1:
+                break
+            iou = self._compute_iou(boxes[0], boxes[1:])
+            non_overlap = iou < iou_threshold
+            # Make sure we're only selecting from the remaining boxes (indices 1 and onwards)
+            # This ensures sorted_idx and boxes have the same length after filtering
+            boxes = boxes[1:][non_overlap]
+            sorted_idx = sorted_idx[1:][non_overlap]
+
+        return torch.tensor(keep_idx)
+
+    def _compute_iou(self, box1, boxes):
+        """Calculate Intersection over Union (IoU)"""
+        x1 = torch.max(box1[0], boxes[:, 0])
+        y1 = torch.max(box1[1], boxes[:, 1])
+        x2 = torch.min(box1[2], boxes[:, 2])
+        y2 = torch.min(box1[3], boxes[:, 3])
+
+        inter_area = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        boxes_area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+
+        union_area = box1_area + boxes_area - inter_area
+
+        iou = inter_area / union_area
+        return iou
+
 
 def get_model(device):
     model = DogDetector()
