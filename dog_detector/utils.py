@@ -2,6 +2,9 @@
 import os
 import zipfile
 import torch
+from pycocotools.coco import COCO
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from tqdm import tqdm
 
 def compute_iou(boxes1, boxes2):
     """
@@ -93,14 +96,26 @@ def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thres
     return cls_targets, reg_targets, pos_mask
 
 
-def download_file_torch(url, dest_path):
+def download_file_torch(url, dest_path, max_retries=3):
     if os.path.exists(dest_path):
-        print(f"{dest_path} exists. Skipping download.")
-        return
+        if os.path.getsize(dest_path) > 0:  # Check if file is not empty
+            return
+        else:
+            os.remove(dest_path)  # Remove empty file to retry download
+    
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-    print(f"Downloading {url} to {dest_path}...")
-    torch.hub.download_url_to_file(url, dest_path)
-    print("Download complete.")
+    
+    for attempt in range(max_retries):
+        try:
+            torch.hub.download_url_to_file(url, dest_path)
+            # Verify the file was downloaded successfully
+            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+                return
+        except Exception as e:
+            if attempt == max_retries - 1:
+                print(f"Failed to download {url} after {max_retries} attempts: {e}")
+                raise
+            print(f"Attempt {attempt + 1} failed, retrying...")
 
 def extract_zip(zip_path, extract_to):
     print(f"Extracting {zip_path}...")
@@ -109,30 +124,11 @@ def extract_zip(zip_path, extract_to):
     print("Extraction complete.")
 
 def download_coco_dataset(data_root):
-    train_url = "http://images.cocodataset.org/zips/train2017.zip"
-    val_url = "http://images.cocodataset.org/zips/val2017.zip"
+    """Download only COCO annotations and images containing dogs or people in parallel"""
     ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
-
-    train_dir = os.path.join(data_root, "train2017")
-    val_dir = os.path.join(data_root, "val2017")
     ann_dir = os.path.join(data_root, "annotations")
-
-    if not os.path.exists(train_dir):
-        train_zip = os.path.join(data_root, "train2017.zip")
-        download_file_torch(train_url, train_zip)
-        extract_zip(train_zip, data_root)
-        os.remove(train_zip)
-    else:
-        print("Train directory exists; skipping train download.")
-
-    if not os.path.exists(val_dir):
-        val_zip = os.path.join(data_root, "val2017.zip")
-        download_file_torch(val_url, val_zip)
-        extract_zip(val_zip, data_root)
-        os.remove(val_zip)
-    else:
-        print("Validation directory exists; skipping val download.")
-
+    
+    # First download and extract annotations as we need them to know which images to download
     if not os.path.exists(ann_dir):
         ann_zip = os.path.join(data_root, "annotations_trainval2017.zip")
         download_file_torch(ann_url, ann_zip)
@@ -140,3 +136,62 @@ def download_coco_dataset(data_root):
         os.remove(ann_zip)
     else:
         print("Annotations directory exists; skipping annotations download.")
+
+    # Initialize COCO API for both train and val sets
+    train_ann_file = os.path.join(ann_dir, "instances_train2017.json")
+    val_ann_file = os.path.join(ann_dir, "instances_val2017.json")
+    train_coco = COCO(train_ann_file)
+    val_coco = COCO(val_ann_file)
+
+    # Target categories
+    categories = {'dog': 18, 'person': 1}
+    category_ids = list(categories.values())
+
+    # Create image directories
+    train_dir = os.path.join(data_root, "train2017")
+    val_dir = os.path.join(data_root, "val2017")
+    os.makedirs(train_dir, exist_ok=True)
+    os.makedirs(val_dir, exist_ok=True)
+
+    def download_single_image(args):
+        img_info, target_dir, is_train = args
+        file_name = img_info['file_name']
+        target_path = os.path.join(target_dir, file_name)
+        
+        if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+            return f"Skipped {file_name} (already exists)"
+            
+        subset = "train2017" if is_train else "val2017"
+        url = f"http://images.cocodataset.org/{subset}/{file_name}"
+        try:
+            download_file_torch(url, target_path)
+            # Verify downloaded file
+            if os.path.exists(target_path) and os.path.getsize(target_path) > 0:
+                return f"Downloaded {file_name}"
+            else:
+                return f"Failed to download {file_name}: File is empty"
+        except Exception as e:
+            if os.path.exists(target_path):
+                os.remove(target_path)  # Remove potentially corrupt file
+            return f"Failed to download {file_name}: {e}"
+
+    # Prepare download tasks for both train and val sets
+    train_img_ids = train_coco.getImgIds(catIds=category_ids)
+    val_img_ids = val_coco.getImgIds(catIds=category_ids)
+    
+    print(f"Found {len(train_img_ids)} training images and {len(val_img_ids)} validation images")
+    
+    train_tasks = [(train_coco.loadImgs(img_id)[0], train_dir, True) for img_id in train_img_ids]
+    val_tasks = [(val_coco.loadImgs(img_id)[0], val_dir, False) for img_id in val_img_ids]
+    all_tasks = train_tasks + val_tasks
+    
+    # Use ThreadPoolExecutor for parallel downloads with progress bar
+    max_workers = min(32, len(all_tasks))  # Limit max concurrent downloads
+    print(f"Starting parallel download with {max_workers} workers...")
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [executor.submit(download_single_image, task) for task in all_tasks]
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Downloading images"):
+            result = future.result()
+            if "Failed" in result:
+                print(f"\n{result}")  # Print failures on new line

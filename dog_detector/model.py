@@ -50,8 +50,8 @@ class DogDetector(nn.Module):
         self.bn2 = nn.BatchNorm2d(256)
         # Output heads:
         self.num_anchors = len(config.ANCHOR_SCALES) * len(config.ANCHOR_RATIOS)
-        # Classification: 2 channels per anchor (background and dog)
-        self.cls_head = nn.Conv2d(256, 2 * self.num_anchors, kernel_size=3, padding=1)
+        # Classification: (num_classes + 1) channels per anchor (background + classes)
+        self.cls_head = nn.Conv2d(256, (num_classes + 1) * self.num_anchors, kernel_size=3, padding=1)
         # Regression: 4 values per anchor
         self.reg_head = nn.Conv2d(256, 4 * self.num_anchors, kernel_size=3, padding=1)
         self.anchor_scales = config.ANCHOR_SCALES

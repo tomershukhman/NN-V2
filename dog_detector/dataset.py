@@ -13,17 +13,21 @@ from concurrent.futures import ThreadPoolExecutor
 class CocoDogsDataset(Dataset):
     """
     A dataset for dog detection using the COCO 2017 dataset.
-    Returns a balanced set of images with and without dogs.
+    Downloads only images containing dogs or people to save space, but performs detection only for dogs.
     Returns a transformed image and a target dict with:
       - boxes (Tensor[N, 4]): in (x1, y1, x2, y2) format.
-      - labels (Tensor[N]): dog labels (1)
+      - labels (Tensor[N]): labels (all 1 for dog)
       - orig_size (tuple): original image dimensions before transform
     """
     def __init__(self, data_root, set_name, transform=None):
         self.data_root = data_root
         self.set_name = set_name
         self.transform = transform
-        self.dog_category_id = 18  # COCO category id for dog
+        self.categories_to_download = {
+            'dog': 18,  # COCO category id for dog
+            'person': 1  # COCO category id for person - used only for download filtering
+        }
+        self.dog_category_id = 18  # Only detect dogs
         
         # Create local cache directory in current working directory
         cache_dir = os.path.join(".", "cache")
@@ -63,56 +67,61 @@ class CocoDogsDataset(Dataset):
         ann_file = os.path.join(self.data_root, "annotations", f"instances_{self.set_name}.json")
         coco = COCO(ann_file)
         
-        # Get all image IDs with dogs
-        dog_img_ids = coco.getImgIds(catIds=[self.dog_category_id])
+        # Get image IDs containing either dogs or persons
+        dog_category_id = self.dog_category_id
+        person_category_id = self.categories_to_download['person']
+        
+        # Get separate sets of images with dogs and with only people (no dogs)
+        dog_img_ids = set(coco.getImgIds(catIds=[dog_category_id]))
+        person_img_ids = set(coco.getImgIds(catIds=[person_category_id]))
+        person_only_img_ids = person_img_ids - dog_img_ids  # Images with people but no dogs
+        
+        # Balance the dataset by taking equal numbers of each type
+        target_per_class = int(min(len(dog_img_ids), len(person_only_img_ids)) * config.DATA_FRACTION)
+        
+        # Randomly sample from each set
+        dog_img_ids = set(random.sample(list(dog_img_ids), target_per_class))
+        person_only_img_ids = set(random.sample(list(person_only_img_ids), target_per_class))
+        
+        print(f"Selected {len(dog_img_ids)} images with dogs and {len(person_only_img_ids)} images without dogs")
+        
+        # Combine and shuffle
+        target_img_ids = list(dog_img_ids | person_only_img_ids)
+        random.shuffle(target_img_ids)
+        
+        # Set up image directory path
+        if self.set_name == config.TRAIN_SET:
+            images_dir = os.path.join(self.data_root, "train2017")
+        else:
+            images_dir = os.path.join(self.data_root, "val2017")
         
         # Pre-fetch all annotations and image info in parallel
         with ThreadPoolExecutor() as executor:
-            # Process dog images
-            dog_futures = [executor.submit(self._process_image, img_id, coco) 
-                         for img_id in dog_img_ids]
+            futures = [executor.submit(self._process_image, img_id, coco) 
+                      for img_id in target_img_ids]
             
             ann_counts = {}
             annotations = {}
             img_info = {}
             
-            for future in dog_futures:
+            for future in futures:
                 img_id, img_anns, img_data = future.result()
-                if img_anns:  # Only include images with valid annotations
+                # Include all images - those with dog annotations will have them,
+                # those without will have empty annotations
+                image_path = os.path.join(images_dir, img_data["file_name"])
+                if os.path.exists(image_path):
                     ann_counts[img_id] = len(img_anns)
                     annotations[img_id] = img_anns
                     img_info[img_id] = img_data
+                else:
+                    pass
+                    # print(f"Warning: Image {img_data['file_name']} not found, skipping...")
         
-        # Sort images by number of dogs (descending)
-        sorted_dog_ids = sorted(ann_counts.keys(), 
-                              key=lambda k: ann_counts[k], 
-                              reverse=True)
+        if not annotations:
+            raise RuntimeError(f"No valid images found in {images_dir}. Please ensure the dataset is downloaded correctly.")
         
-        # Apply data fraction
-        target_dog_images = int(len(sorted_dog_ids) * config.DATA_FRACTION)
-        sampled_dog_ids = sorted_dog_ids[:target_dog_images]
-        
-        # Get non-dog images
-        all_img_ids = coco.getImgIds()
-        non_dog_img_ids = list(set(all_img_ids) - set(dog_img_ids))
-        
-        # Sample equal number of non-dog images
-        random.seed(42)
-        sampled_non_dog_ids = random.sample(non_dog_img_ids, target_dog_images)
-        
-        # Process non-dog images in parallel
-        with ThreadPoolExecutor() as executor:
-            non_dog_futures = [executor.submit(self._process_image, img_id, coco) 
-                             for img_id in sampled_non_dog_ids]
-            
-            for future in non_dog_futures:
-                img_id, _, img_data = future.result()
-                img_info[img_id] = img_data
-                annotations[img_id] = []  # Empty annotations for non-dog images
-        
-        # Combine and shuffle
-        self.img_ids = sampled_dog_ids + sampled_non_dog_ids
-        random.shuffle(self.img_ids)
+        # Store all image IDs - they're already balanced and shuffled
+        self.img_ids = list(annotations.keys())
         
         # Store processed data
         self.annotations = annotations
@@ -122,28 +131,34 @@ class CocoDogsDataset(Dataset):
         cache_data = {
             'img_ids': self.img_ids,
             'annotations': self.annotations,
-            'img_info': self.img_info
+            'img_info': self.img_info,
+            'stats': {
+                'with_dogs': len(dog_img_ids),
+                'without_dogs': len(person_only_img_ids)
+            }
         }
         with open(self.cache_file, 'wb') as f:
             pickle.dump(cache_data, f)
 
     def _process_image(self, img_id, coco):
-        """Process a single image and its annotations"""
+        """Process a single image and its annotations - only process dog annotations"""
         img_info = coco.loadImgs(img_id)[0]
+        # Get all dog annotations for this image
         ann_ids = coco.getAnnIds(imgIds=img_id, 
-                                catIds=[self.dog_category_id], 
+                                catIds=[self.dog_category_id],  # Only get dog annotations
                                 iscrowd=False)
         anns = coco.loadAnns(ann_ids)
         
-        # Pre-process annotations
+        # Pre-process annotations - only for dogs
         processed_anns = []
         for ann in anns:
-            x, y, w, h = ann["bbox"]
-            x1 = max(0, x)
-            y1 = max(0, y)
-            x2 = min(x + w, img_info["width"])
-            y2 = min(y + h, img_info["height"])
-            processed_anns.append([x1, y1, x2, y2])
+            if ann["category_id"] == self.dog_category_id:  # Double check it's a dog
+                x, y, w, h = ann["bbox"]
+                x1 = max(0, x)
+                y1 = max(0, y)
+                x2 = min(x + w, img_info["width"])
+                y2 = min(y + h, img_info["height"])
+                processed_anns.append([x1, y1, x2, y2, 1])  # Label is always 1 for dog
             
         return img_id, processed_anns, img_info
 
@@ -156,16 +171,30 @@ class CocoDogsDataset(Dataset):
         
         # Load and process image
         image_path = os.path.join(self.images_dir, img_info["file_name"])
-        img = Image.open(image_path).convert("RGB")
+        try:
+            img = Image.open(image_path).convert("RGB")
+        except (FileNotFoundError, IOError):
+            print(f"Error loading image {image_path}, removing from cache...")
+            # Remove this image from the dataset
+            self.img_ids.pop(idx)
+            if os.path.exists(self.cache_file):
+                os.remove(self.cache_file)  # Force regeneration of cache
+            # Try the next image instead
+            return self.__getitem__(idx % len(self.img_ids))
+            
         orig_width, orig_height = img.size
         orig_size = (orig_height, orig_width)
         
         # Get pre-processed annotations
-        boxes = self.annotations[img_id]
+        annotations = self.annotations[img_id]
         
-        # Convert to tensor
-        boxes = torch.tensor(boxes, dtype=torch.float32)
-        labels = torch.ones((boxes.shape[0],), dtype=torch.int64)  # dog label = 1
+        if annotations:
+            # Split boxes and labels
+            boxes = torch.tensor([ann[:4] for ann in annotations], dtype=torch.float32)
+            labels = torch.tensor([ann[4] for ann in annotations], dtype=torch.int64)
+        else:
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
+            labels = torch.zeros((0,), dtype=torch.int64)
         
         img = self.transform(img)
         
@@ -185,10 +214,32 @@ class CocoDogsDataset(Dataset):
         cache_dir = os.path.join(".", "cache")
         stats_cache = os.path.join(cache_dir, "dataset_stats.json")
         
-        if os.path.exists(stats_cache):
-            with open(stats_cache, 'r') as f:
-                return json.load(f)
+        # Load cached stats from train and val datasets directly
+        train_cache = os.path.join(cache_dir, "train2017_processed_data.pkl")
+        val_cache = os.path.join(cache_dir, "val2017_processed_data.pkl")
         
+        if os.path.exists(train_cache) and os.path.exists(val_cache):
+            with open(train_cache, 'rb') as f:
+                train_data = pickle.load(f)
+            with open(val_cache, 'rb') as f:
+                val_data = pickle.load(f)
+                
+            stats = {
+                'data_fraction': config.DATA_FRACTION,
+                'train_with_dogs': train_data['stats']['with_dogs'],
+                'train_without_dogs': train_data['stats']['without_dogs'],
+                'val_with_dogs': val_data['stats']['with_dogs'],
+                'val_without_dogs': val_data['stats']['without_dogs']
+            }
+            
+            # Cache the stats
+            os.makedirs(cache_dir, exist_ok=True)
+            with open(stats_cache, 'w') as f:
+                json.dump(stats, f)
+                
+            return stats
+            
+        # If no cache exists, compute full dataset stats
         stats = {}
         train_ann_file = os.path.join(data_root, "annotations", f"instances_{config.TRAIN_SET}.json")
         val_ann_file = os.path.join(data_root, "annotations", f"instances_{config.VAL_SET}.json")
@@ -196,23 +247,32 @@ class CocoDogsDataset(Dataset):
         train_coco = COCO(train_ann_file)
         val_coco = COCO(val_ann_file)
         
+        # Get image IDs for dogs and people separately
         dog_category_id = 18
+        person_category_id = 1
         
-        train_dog_img_ids = train_coco.getImgIds(catIds=[dog_category_id])
-        val_dog_img_ids = val_coco.getImgIds(catIds=[dog_category_id])
+        # Get train set statistics
+        train_dog_imgs = set(train_coco.getImgIds(catIds=[dog_category_id]))
+        train_person_imgs = set(train_coco.getImgIds(catIds=[person_category_id]))
+        train_person_only = train_person_imgs - train_dog_imgs
         
-        train_target_count = int(len(train_dog_img_ids) * config.DATA_FRACTION)
-        val_target_count = int(len(val_dog_img_ids) * config.DATA_FRACTION)
+        # Get validation set statistics
+        val_dog_imgs = set(val_coco.getImgIds(catIds=[dog_category_id]))
+        val_person_imgs = set(val_coco.getImgIds(catIds=[person_category_id]))
+        val_person_only = val_person_imgs - val_dog_imgs
         
+        # Calculate balanced counts
+        train_target = int(min(len(train_dog_imgs), len(train_person_only)) * config.DATA_FRACTION)
+        val_target = int(min(len(val_dog_imgs), len(val_person_only)) * config.DATA_FRACTION)
+        
+        # Store balanced stats
         stats['data_fraction'] = config.DATA_FRACTION
-        stats['train_with_dogs'] = train_target_count
-        stats['train_without_dogs'] = train_target_count
-        stats['val_with_dogs'] = val_target_count
-        stats['val_without_dogs'] = val_target_count
-        stats['train_total'] = train_target_count * 2
-        stats['val_total'] = val_target_count * 2
+        stats['train_with_dogs'] = train_target
+        stats['train_without_dogs'] = train_target
+        stats['val_with_dogs'] = val_target
+        stats['val_without_dogs'] = val_target
         
-        # Cache the stats in local directory
+        # Cache the stats
         os.makedirs(cache_dir, exist_ok=True)
         with open(stats_cache, 'w') as f:
             json.dump(stats, f)
