@@ -280,11 +280,15 @@ class Trainer:
     def validate(self, epoch):
         self.model.eval()
         total_loss = 0
+        total_conf_loss = 0  # Track confidence loss across batches
+        total_bbox_loss = 0  # Track bounding box loss across batches
         all_predictions = []
         all_targets = []
+        num_batches = 0
         
         with torch.no_grad():
             for images, _, boxes in tqdm(self.val_loader, desc='Validating'):
+                num_batches += 1
                 images = torch.stack([image.to(self.device) for image in images])
                 targets = []
                 for boxes_per_image in boxes:
@@ -298,6 +302,8 @@ class Trainer:
                 predictions = self.model(images, targets)  # For loss calculation
                 loss_dict = self.criterion(predictions, targets)
                 total_loss += loss_dict['total_loss'].item()
+                total_conf_loss += loss_dict['conf_loss']  # Sum confidence losses
+                total_bbox_loss += loss_dict['bbox_loss']  # Sum bbox losses
                 
                 # Get inference predictions for metrics
                 inference_preds = self.model(images, None)
@@ -305,12 +311,15 @@ class Trainer:
                 all_targets.extend(targets)
         
         # Calculate metrics
-        avg_loss = total_loss / len(self.val_loader)
+        avg_loss = total_loss / num_batches
+        avg_conf_loss = total_conf_loss / num_batches  # Average confidence loss
+        avg_bbox_loss = total_bbox_loss / num_batches  # Average bbox loss
+        
         metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
         metrics.update({
             'total_loss': avg_loss,
-            'conf_loss': loss_dict['conf_loss'],
-            'bbox_loss': loss_dict['bbox_loss']
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
         })
         
         # Log validation metrics
