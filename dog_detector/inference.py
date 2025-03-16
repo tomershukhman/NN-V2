@@ -9,9 +9,9 @@ from PIL import Image
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 
-from model import DogDetector
-from utils import visualize_detection
-import config
+from dog_detector.model import DogDetector
+from dog_detector.visualization import visualize_predictions
+from dog_detector.config import config
 
 
 def load_model(checkpoint_path, device):
@@ -42,8 +42,10 @@ def process_image(img_path, transform=None):
     return img_tensor, img_pil, orig_size
 
 
-def detect_dogs(model, img_tensor, device, conf_threshold=config.CONF_THRESHOLD):
+def detect_dogs(model, img_tensor, device, conf_threshold=None):
     """Run inference on an image."""
+    conf_threshold = conf_threshold or config.CONF_THRESHOLD
+    
     # Add batch dimension
     img_tensor = img_tensor.unsqueeze(0).to(device)
     
@@ -67,7 +69,7 @@ def detect_dogs(model, img_tensor, device, conf_threshold=config.CONF_THRESHOLD)
 
 def main(args):
     # Set up device
-    device = config.get_device()
+    device = config.DEVICE
     print(f"Using device: {device}")
     
     # Load model
@@ -94,17 +96,17 @@ def main(args):
             boxes[:, 2] *= scale_x
             boxes[:, 3] *= scale_y
         
+        # Create target dict for visualization
+        target = {"boxes": torch.zeros((0, 4))}  # Empty boxes for visualization
+        
         # Visualize detections
-        img_vis = visualize_detection(img_np, boxes.cpu().numpy(), scores.cpu().numpy(), args.conf_threshold)
+        fig = visualize_predictions(transforms.ToTensor()(img_pil), target, boxes, scores)
         
         # Save or display the result
         if args.output_path:
-            cv2.imwrite(args.output_path, cv2.cvtColor(img_vis, cv2.COLOR_RGB2BGR))
+            plt.savefig(args.output_path)
             print(f"Detection result saved to {args.output_path}")
         else:
-            plt.figure(figsize=(12, 8))
-            plt.imshow(img_vis)
-            plt.axis('off')
             plt.show()
     
     # Process all images in a directory
@@ -130,9 +132,6 @@ def main(args):
             # Detect dogs
             boxes, scores = detect_dogs(model, img_tensor, device, args.conf_threshold)
             
-            # Convert PIL image to NumPy array for visualization
-            img_np = np.array(img_pil)
-            
             # Scale boxes back to original image size
             if boxes.size(0) > 0:
                 scale_x = orig_size[0] / img_tensor.shape[2]
@@ -142,11 +141,13 @@ def main(args):
                 boxes[:, 2] *= scale_x
                 boxes[:, 3] *= scale_y
             
-            # Visualize detections
-            img_vis = visualize_detection(img_np, boxes.cpu().numpy(), scores.cpu().numpy(), args.conf_threshold)
+            # Create target dict for visualization
+            target = {"boxes": torch.zeros((0, 4))}  # Empty boxes for visualization
             
-            # Save the result
-            cv2.imwrite(output_path, cv2.cvtColor(img_vis, cv2.COLOR_RGB2BGR))
+            # Visualize detections
+            fig = visualize_predictions(transforms.ToTensor()(img_pil), target, boxes, scores)
+            plt.savefig(output_path)
+            plt.close(fig)
             print(f"Detection result saved to {output_path}")
 
 

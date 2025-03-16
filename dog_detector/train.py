@@ -17,7 +17,9 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
     progress_bar.set_description(f"Epoch {epoch}")
     
     for batch_idx, (images, targets) in progress_bar:
-        images = images.to(device)
+        # Convert tuple of images to a batch tensor
+        images = torch.stack([img.to(device) for img in images])
+        targets = [{k: v.to(device) for k, v in t.items()} for t in targets]
         
         # Get feature map dimensions for anchor generation
         _, _, feat_h, feat_w = model.backbone(images).shape

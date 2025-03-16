@@ -32,70 +32,69 @@ def compute_iou(boxes1, boxes2):
 def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thresh=0.4):
     """
     Assign each anchor a classification target and a regression target.
-    Regression targets are computed using the parameterization:
-        t_x = (gt_cx - a_cx) / a_w
-        t_y = (gt_cy - a_cy) / a_h
-        t_w = log(gt_w / a_w)
-        t_h = log(gt_h / a_h)
+    Args:
+        anchors: (N, 4) tensor of anchor boxes
+        gt_boxes: (M, 4) tensor of ground truth boxes
+        pos_iou_thresh: IoU threshold for positive samples
+        neg_iou_thresh: IoU threshold for negative samples
     Returns:
-      - cls_targets: Tensor of shape (num_anchors,) with values {1: dog, 0: background, -1: ignore}
-      - reg_targets: Tensor of shape (num_anchors, 4)
-      - pos_mask: Boolean mask for positive anchors.
+        cls_targets: (N,) tensor with values {1: positive, 0: negative, -1: ignore}
+        reg_targets: (N, 4) tensor of regression targets
+        pos_mask: (N,) boolean tensor indicating positive anchors
     """
     num_anchors = anchors.size(0)
-    cls_targets = -torch.ones((num_anchors,), dtype=torch.int64, device=anchors.device)
-    reg_targets = torch.zeros((num_anchors, 4), dtype=torch.float32, device=anchors.device)
+    device = anchors.device
+    
+    # Initialize targets
+    cls_targets = -torch.ones((num_anchors,), dtype=torch.int64, device=device)
+    reg_targets = torch.zeros((num_anchors, 4), dtype=torch.float32, device=device)
 
     if gt_boxes.numel() == 0:
+        # No ground truth boxes, all anchors are negative
         cls_targets[:] = 0
-        pos_mask = cls_targets == 1
+        pos_mask = torch.zeros_like(cls_targets, dtype=torch.bool)
         return cls_targets, reg_targets, pos_mask
 
-    # Compute IoU between each anchor and ground truth box
-    ious = compute_iou(anchors, gt_boxes)
+    # Compute IoU between anchors and GT boxes
+    ious = compute_iou(anchors, gt_boxes)  # Shape: (num_anchors, num_gt)
+    
+    # For each anchor, find the best matching GT box
     max_iou, max_idx = ious.max(dim=1)
+    
+    # Assign positive/negative labels based on IoU thresholds
+    pos_mask = max_iou >= pos_iou_thresh
+    neg_mask = max_iou < neg_iou_thresh
+    cls_targets[pos_mask] = 1
+    cls_targets[neg_mask] = 0
+    
+    # For each GT box, ensure the best matching anchor is positive
+    if gt_boxes.size(0) > 0:  # Only if there are GT boxes
+        gt_best_anchors = ious.max(dim=0)[1]  # Best anchor for each GT
+        cls_targets[gt_best_anchors] = 1
+        pos_mask[gt_best_anchors] = True
+    
+    # Compute regression targets for positive anchors
+    if pos_mask.any():
+        matched_gt_boxes = gt_boxes[max_idx[pos_mask]]
+        pos_anchors = anchors[pos_mask]
+        
+        # Convert both boxes to center format
+        pos_anchor_w = pos_anchors[:, 2] - pos_anchors[:, 0]
+        pos_anchor_h = pos_anchors[:, 3] - pos_anchors[:, 1]
+        pos_anchor_cx = pos_anchors[:, 0] + 0.5 * pos_anchor_w
+        pos_anchor_cy = pos_anchors[:, 1] + 0.5 * pos_anchor_h
+        
+        gt_w = matched_gt_boxes[:, 2] - matched_gt_boxes[:, 0]
+        gt_h = matched_gt_boxes[:, 3] - matched_gt_boxes[:, 1]
+        gt_cx = matched_gt_boxes[:, 0] + 0.5 * gt_w
+        gt_cy = matched_gt_boxes[:, 1] + 0.5 * gt_h
+        
+        # Compute regression targets
+        reg_targets[pos_mask, 0] = (gt_cx - pos_anchor_cx) / pos_anchor_w
+        reg_targets[pos_mask, 1] = (gt_cy - pos_anchor_cy) / pos_anchor_h
+        reg_targets[pos_mask, 2] = torch.log(gt_w / pos_anchor_w)
+        reg_targets[pos_mask, 3] = torch.log(gt_h / pos_anchor_h)
 
-    # Assign positive and negative labels based on IoU thresholds
-    pos_inds = max_iou >= pos_iou_thresh
-    cls_targets[pos_inds] = 1
-    neg_inds = max_iou < neg_iou_thresh
-    cls_targets[neg_inds] = 0
-
-    # For positive anchors, compute the regression targets using the standard parameterization
-    if pos_inds.sum() > 0:
-        assigned_gt_boxes = gt_boxes[max_idx[pos_inds]]
-        pos_anchors = anchors[pos_inds]
-
-        # Compute anchor widths, heights, and centers
-        anchor_x1 = pos_anchors[:, 0]
-        anchor_y1 = pos_anchors[:, 1]
-        anchor_x2 = pos_anchors[:, 2]
-        anchor_y2 = pos_anchors[:, 3]
-        anchor_w = anchor_x2 - anchor_x1
-        anchor_h = anchor_y2 - anchor_y1
-        anchor_cx = anchor_x1 + 0.5 * anchor_w
-        anchor_cy = anchor_y1 + 0.5 * anchor_h
-
-        # Compute ground truth widths, heights, and centers
-        gt_x1 = assigned_gt_boxes[:, 0]
-        gt_y1 = assigned_gt_boxes[:, 1]
-        gt_x2 = assigned_gt_boxes[:, 2]
-        gt_y2 = assigned_gt_boxes[:, 3]
-        gt_w = gt_x2 - gt_x1
-        gt_h = gt_y2 - gt_y1
-        gt_cx = gt_x1 + 0.5 * gt_w
-        gt_cy = gt_y1 + 0.5 * gt_h
-
-        # Compute the regression targets
-        t_x = (gt_cx - anchor_cx) / anchor_w
-        t_y = (gt_cy - anchor_cy) / anchor_h
-        t_w = torch.log(gt_w / anchor_w)
-        t_h = torch.log(gt_h / anchor_h)
-
-        targets = torch.stack([t_x, t_y, t_w, t_h], dim=1)
-        reg_targets[pos_inds] = targets
-
-    pos_mask = cls_targets == 1
     return cls_targets, reg_targets, pos_mask
 
 
