@@ -6,7 +6,7 @@ from pycocotools.coco import COCO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
 from PIL import Image
-from dog_detector.config import config
+import config
 import random
 
 def compute_iou(boxes1, boxes2):

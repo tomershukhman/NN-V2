@@ -3,13 +3,13 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from dog_detector.config import config
+import config
 from torchvision.ops import nms
 from dog_detector.utils import compute_iou
 
 
 class DogDetector(nn.Module):
-    def __init__(self, num_classes=config.NUM_CLASSES, pretrained=config.PRETRAINED):
+    def __init__(self, num_classes=config.NUM_CLASSES, pretrained=True):
         super(DogDetector, self).__init__()
         # Load pretrained ResNet18 backbone (excluding final classification layers)
         resnet = torchvision.models.resnet18(pretrained=pretrained)

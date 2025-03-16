@@ -3,12 +3,13 @@ from tqdm import tqdm
 import os
 from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS, OUTPUT_ROOT,
-    WEIGHT_DECAY
+    WEIGHT_DECAY, DATA_ROOT, DOG_USAGE_RATIO, TRAIN_VAL_SPLIT
 )
-from dog_detector.data import get_data_loaders
+from dog_detector.data import get_data_loaders, CocoDogsDataset
 from dog_detector.model.model import get_model
 from dog_detector.model.losses import DetectionLoss
 from dog_detector.visualization.visualization import VisualizationLogger
+
 
 
 def train(data_root=None, download=True, batch_size=None):
@@ -26,56 +27,50 @@ def train(data_root=None, download=True, batch_size=None):
         download=download,
         batch_size=batch_size
     )
-
-    # Calculate dataset statistics
-    train_with_dogs = 0
-    train_without_dogs = 0
-    val_with_dogs = 0
-    val_without_dogs = 0
-
-    print('\nCalculating dataset statistics...')
-    for images, targets in tqdm(train_loader, desc='Analyzing training set'):
-        for target in targets:
-            if len(target['boxes']) > 0:
-                train_with_dogs += 1
-            else:
-                train_without_dogs += 1
-
-    for images, targets in tqdm(val_loader, desc='Analyzing validation set'):
-        for target in targets:
-            if len(target['boxes']) > 0:
-                val_with_dogs += 1
-            else:
-                val_without_dogs += 1
-
-    print('\nDataset Statistics:')
-    print('Training set:')
-    print(f'  Images with dogs: {train_with_dogs}')
-    print(f'  Images without dogs: {train_without_dogs}')
-    print('Validation set:')
-    print(f'  Images with dogs: {val_with_dogs}')
-    print(f'  Images without dogs: {val_without_dogs}\n')
-
-    # Log dataset statistics to tensorboard
-    vis_logger.log_metrics({
-        'dataset/train_with_dogs': train_with_dogs,
-        'dataset/train_without_dogs': train_without_dogs,
-        'dataset/val_with_dogs': val_with_dogs,
-        'dataset/val_without_dogs': val_without_dogs
-    }, 0, 'stats')
+    
+    if data_root is None:
+        data_root = DATA_ROOT
+        
+    # Get dataset statistics from data.py instead of recalculating
+    print('\nGetting dataset statistics...')
+    stats = CocoDogsDataset.get_dataset_stats(data_root)
+    
+    if stats:
+        total_train_dogs = stats.get('train_with_dogs', 0)
+        total_train_no_dogs = stats.get('train_without_dogs', 0)
+        total_val_dogs = stats.get('val_with_dogs', 0)
+        total_val_no_dogs = stats.get('val_without_dogs', 0)
+        total_available_dogs = stats.get('total_available_dogs', 0)
+        dog_usage_ratio = stats.get('dog_usage_ratio', DOG_USAGE_RATIO)
+        
+        print('\nDataset Statistics:')
+        print(f'Total available images with dogs: {total_available_dogs}')
+        print(f'Dog Usage Ratio: {dog_usage_ratio * 100:.1f}% ({int(total_available_dogs * dog_usage_ratio)} images)')
+        print(f'Train/Val Split: {TRAIN_VAL_SPLIT*100:.1f}%/{(1-TRAIN_VAL_SPLIT)*100:.1f}%')
+        print('\nTraining set:')
+        print(f'  Images with dogs: {total_train_dogs}')
+        print(f'  Images without dogs: {total_train_no_dogs}')
+        print('Validation set:')
+        print(f'  Images with dogs: {total_val_dogs}')
+        print(f'  Images without dogs: {total_val_no_dogs}\n')
+        
+        # Log dataset statistics to tensorboard
+        vis_logger.log_metrics({
+            'dataset/total_available_dogs': total_available_dogs,
+            'dataset/train_with_dogs': total_train_dogs,
+            'dataset/train_without_dogs': total_train_no_dogs,
+            'dataset/val_with_dogs': total_val_dogs,
+            'dataset/val_without_dogs': total_val_no_dogs,
+            'dataset/dog_usage_ratio': dog_usage_ratio
+        }, 0, 'stats')
+    else:
+        print("Warning: Dataset statistics not available")
 
     # Get model and criterion
     model = get_model(DEVICE)
     criterion = DetectionLoss().to(DEVICE)
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
-
-    # Get data loaders
-    train_loader, val_loader = get_data_loaders(
-        root=data_root,
-        download=download,
-        batch_size=batch_size
-    )
 
     # Training loop
     best_val_loss = float('inf')

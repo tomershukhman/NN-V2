@@ -23,6 +23,8 @@
 #     CLASS_NAMES = ['dog', 'person']
 #     DOG_CATEGORY_ID = 18
 #     DATA_FRACTION = 0.1  # Use 10% of dataset
+#     DATA_SET_TO_USE = 0.5  # Use 50% of available dog images
+#     TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
 #     IMAGE_SIZE = (512, 512)  # Fixed input size
 #     MEAN = [0.485, 0.456, 0.406]  # ImageNet normalization
 #     STD = [0.229, 0.224, 0.225]

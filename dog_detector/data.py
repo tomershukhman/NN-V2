@@ -1,3 +1,4 @@
+from concurrent.futures import ThreadPoolExecutor
 import os
 import torch
 import random
@@ -7,8 +8,7 @@ from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as transforms
 from pycocotools.coco import COCO
-from dog_detector.config import config
-from concurrent.futures import ThreadPoolExecutor
+import config
 
 
 class CocoDogsDataset(Dataset):
@@ -39,6 +39,11 @@ class CocoDogsDataset(Dataset):
         # Load or initialize dataset
         if os.path.exists(self.cache_file):
             self._load_from_cache()
+            # Check if DATA_SET_TO_USE has changed
+            if self.stats.get('data_set_to_use') != config.DOG_USAGE_RATIO:
+                print(
+                    f"DATA_SET_TO_USE changed from {self.stats.get('data_set_to_use')} to {config.DOG_USAGE_RATIO}, reinitializing dataset...")
+                self._initialize_dataset()
         else:
             self._initialize_dataset()
 
@@ -65,32 +70,41 @@ class CocoDogsDataset(Dataset):
 
     def _initialize_dataset(self):
         """Initialize dataset with parallel processing and caching"""
+        # Set fixed seed for reproducibility and consistency between train/val splits
+        random.seed(42)
+
         ann_file = os.path.join(
             self.data_root, "annotations", f"instances_{self.set_name}.json")
         coco = COCO(ann_file)
 
         # Get image IDs containing either dogs or persons
-        # Fix: use from categories_to_download
         dog_category_id = self.categories_to_download['dog']
         person_category_id = self.categories_to_download['person']
 
-        # Get separate sets of images with dogs and with only people (no dogs)
-        dog_img_ids = set(coco.getImgIds(catIds=[dog_category_id]))
+        # Get total available images
+        all_dog_img_ids = list(coco.getImgIds(catIds=[dog_category_id]))
         person_img_ids = set(coco.getImgIds(catIds=[person_category_id]))
-        person_only_img_ids = person_img_ids - \
-            dog_img_ids  # Images with people but no dogs
+        person_only_img_ids = list(person_img_ids - set(all_dog_img_ids))
 
-        # Balance the dataset by taking equal numbers of each type
-        target_per_class = int(min(len(dog_img_ids), len(
-            person_only_img_ids)) * config.DATA_FRACTION)
+        # Store total number of available dog images
+        total_available_dogs = len(all_dog_img_ids)
+        selected_dog_imgs = list(random.sample(list(all_dog_img_ids), total_dog_images_to_use))
 
-        # Randomly sample from each set
-        dog_img_ids = set(random.sample(list(dog_img_ids), target_per_class))
-        person_only_img_ids = set(random.sample(
-            list(person_only_img_ids), target_per_class))
+        # Calculate exact numbers for train/val split
+        train_dogs_target = int(total_dog_images_to_use * config.TRAIN_VAL_SPLIT)
+        val_dogs_target = total_dog_images_to_use - train_dogs_target  # Use remainder to avoid rounding errors
 
-        print(
-            f"Selected {len(dog_img_ids)} images with dogs and {len(person_only_img_ids)} images without dogs")
+        # Split dogs into train and val sets
+        if self.set_name == config.TRAIN_SET:
+            dog_img_ids = set(selected_dog_imgs[:train_dogs_target])
+        else:  # Validation set
+            dog_img_ids = set(selected_dog_imgs[train_dogs_target:])
+
+        # Get balanced number of person-only images for this split
+        target_person_images = len(dog_img_ids)  # Same number as dogs for balance
+        person_only_img_ids = set(random.sample(list(person_only_img_ids), target_person_images))
+
+        print(f"Selected {len(dog_img_ids)} images with dogs and {len(person_only_img_ids)} images without dogs for {self.set_name}")
 
         # Combine and shuffle
         target_img_ids = list(dog_img_ids | person_only_img_ids)
@@ -142,7 +156,10 @@ class CocoDogsDataset(Dataset):
             'img_info': self.img_info,
             'stats': {
                 'with_dogs': len(dog_img_ids),
-                'without_dogs': len(person_only_img_ids)
+                'without_dogs': len(person_only_img_ids),
+                'total_available_dogs': total_available_dogs,
+                'dog_usage_ratio': config.DOG_USAGE_RATIO,
+                'data_set_to_use': config.DOG_USAGE_RATIO
             }
         }
         with open(self.cache_file, 'wb') as f:
@@ -154,14 +171,14 @@ class CocoDogsDataset(Dataset):
         # Get all dog annotations for this image
         ann_ids = coco.getAnnIds(imgIds=img_id,
                                  # Only get dog annotations
-                                 catIds=[self.dog_category_id],
+                                 catIds=[config.DOG_CATEGORY_ID],
                                  iscrowd=False)
         anns = coco.loadAnns(ann_ids)
 
         # Pre-process annotations - only for dogs
         processed_anns = []
         for ann in anns:
-            if ann["category_id"] == self.dog_category_id:  # Double check it's a dog
+            if ann["category_id"] == config.DOG_CATEGORY_ID:  # Double check it's a dog
                 x, y, w, h = ann["bbox"]
                 x1 = max(0, x)
                 y1 = max(0, y)
@@ -187,6 +204,12 @@ class CocoDogsDataset(Dataset):
             print(f"Error loading image {image_path}, removing from cache...")
             # Remove this image from the dataset
             self.img_ids.pop(idx)
+            # Force regeneration of cache to maintain balance
+            if os.path.exists(self.cache_file):
+                os.remove(self.cache_file)
+            # Try the next image
+            return self.__getitem__(idx % len(self.img_ids))
+
             if os.path.exists(self.cache_file):
                 os.remove(self.cache_file)  # Force regeneration of cache
             # Try the next image instead
@@ -237,7 +260,8 @@ class CocoDogsDataset(Dataset):
                 val_data = pickle.load(f)
 
             stats = {
-                'data_fraction': config.DATA_FRACTION,
+                'total_available_dogs': train_data['stats'].get('total_available_dogs', 0),
+                'dog_usage_ratio': config.DOG_USAGE_RATIO,
                 'train_with_dogs': train_data['stats']['with_dogs'],
                 'train_without_dogs': train_data['stats']['without_dogs'],
                 'val_with_dogs': val_data['stats']['with_dogs'],
@@ -303,22 +327,17 @@ def collate_fn(batch):
 
 
 def get_data_loaders(root=None, download=True, batch_size=None):
-    """Create and return train and validation data loaders"""
-    # Use default data root if not provided
-    data_root = root or config.DATA_ROOT
-    batch_size = batch_size or config.BATCH_SIZE
+    """Get train and validation data loaders"""
+    if root is None:
+        root = config.DATA_ROOT
+    if batch_size is None:
+        batch_size = config.BATCH_SIZE
 
-    # Create train dataset
-    train_dataset = CocoDogsDataset(
-        data_root=data_root,
-        set_name=config.TRAIN_SET
-    )
+    # Create training and validation datasets separately
+    train_dataset = CocoDogsDataset(root, config.TRAIN_SET)
+    val_dataset = CocoDogsDataset(root, config.VAL_SET)
 
-    # Create validation dataset
-    val_dataset = CocoDogsDataset(
-        data_root=data_root,
-        set_name=config.VAL_SET
-    )
+    # Create data loaders directly from the balanced datasets
 
     # Create data loaders
     train_loader = torch.utils.data.DataLoader(

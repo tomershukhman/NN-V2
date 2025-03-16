@@ -1,6 +1,6 @@
 import argparse
 import os
-from dog_detector.config import config
+import config
 from dog_detector.training.trainer import train
 from dog_detector.utils import verify_dataset_integrity, download_coco_dataset
 
