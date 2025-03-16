@@ -9,34 +9,31 @@ from dog_detector.visualization import visualize_predictions
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
     model.train()
-    total_loss = 0.0
-    total_cls_loss = 0.0
-    total_reg_loss = 0.0
-    num_batches = len(dataloader)
-    cls_loss_fn = nn.CrossEntropyLoss(ignore_index=-1, reduction="sum")
-    reg_loss_fn = nn.SmoothL1Loss(reduction="sum")
+    total_loss = 0
+    cls_loss_fn = nn.CrossEntropyLoss(reduction='sum')
+    reg_loss_fn = nn.SmoothL1Loss(reduction='sum')
     
-    progress_bar = tqdm(enumerate(dataloader), total=num_batches, desc=f"Epoch {epoch} Training")
+    progress_bar = tqdm(enumerate(dataloader), total=len(dataloader))
+    progress_bar.set_description(f"Epoch {epoch}")
+    
     for batch_idx, (images, targets) in progress_bar:
         images = images.to(device)
-        cls_out, reg_out = model(images)
-        batch_size, _, feat_h, feat_w = cls_out.shape
         
-        # Generate anchors for this feature map size
+        # Get feature map dimensions for anchor generation
+        _, _, feat_h, feat_w = model.backbone(images).shape
+        
+        # Generate anchors once per batch
         anchors = model.generate_anchors((feat_h, feat_w), device)
         
-        # Reshape outputs properly based on feature map dimensions
-        # First reshape: [batch, channels, height, width] -> [batch, 2, num_anchors, height, width]
-        cls_out = cls_out.reshape(batch_size, 2, model.num_anchors, feat_h, feat_w)
-        # Then permute to [batch, height, width, num_anchors, 2]
-        cls_out = cls_out.permute(0, 3, 4, 2, 1)
-        # Finally reshape to [batch*height*width*num_anchors, 2]
-        cls_out_flat = cls_out.reshape(-1, 2)
+        # Forward pass - outputs are already in the correct shape:
+        # cls_out: [B, num_classes+1, num_anchors, H, W]
+        # reg_out: [B, 4, num_anchors, H, W]
+        cls_out, reg_out = model(images)
         
-        # Similar for regression outputs
-        reg_out = reg_out.reshape(batch_size, 4, model.num_anchors, feat_h, feat_w)
-        reg_out = reg_out.permute(0, 3, 4, 2, 1)
-        reg_out_flat = reg_out.reshape(-1, 4)
+        # Reshape outputs for loss computation
+        num_classes = cls_out.size(1)
+        cls_out_flat = cls_out.permute(0, 3, 4, 2, 1).reshape(-1, num_classes)  # [B*H*W*A, num_classes]
+        reg_out_flat = reg_out.permute(0, 3, 4, 2, 1).reshape(-1, 4)  # [B*H*W*A, 4]
         
         optimizer.zero_grad()
         
@@ -46,29 +43,13 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
         
         # Process each image in the batch
         for i, target in enumerate(targets):
-            # Extract boxes tensor from target dictionary and ensure it's on the right device
             gt_boxes = target["boxes"].to(device)
-            # Scale ground truth boxes to match the image size used by the model
-            if gt_boxes.numel() > 0:
-                img_height, img_width = config.IMAGE_SIZE[1], config.IMAGE_SIZE[0]
-                orig_height, orig_width = target.get("orig_size", (img_height, img_width))
-                
-                if orig_height != img_height or orig_width != img_width:
-                    # Scale the boxes
-                    scale_x = img_width / orig_width
-                    scale_y = img_height / orig_height
-                    
-                    gt_boxes[:, 0] *= scale_x  # x1
-                    gt_boxes[:, 1] *= scale_y  # y1
-                    gt_boxes[:, 2] *= scale_x  # x2
-                    gt_boxes[:, 3] *= scale_y  # y2
-            
-            # Assign anchors to ground truth boxes
             cls_labels, reg_targets, reg_mask = assign_anchors_to_image(anchors, gt_boxes)
             batch_cls_labels.append(cls_labels)
             batch_reg_targets.append(reg_targets)
             batch_reg_masks.append(reg_mask)
         
+        # Combine batch targets
         batch_cls_labels = torch.cat(batch_cls_labels).to(device)
         batch_reg_targets = torch.cat(batch_reg_targets).to(device)
         batch_reg_masks = torch.cat(batch_reg_masks).to(device)
@@ -84,19 +65,11 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
         
         # Calculate total loss with weighted regression component
         loss = cls_loss + config.REG_LOSS_WEIGHT * reg_loss
+        total_loss += loss.item()
+        
+        # Backward pass
         loss.backward()
         optimizer.step()
-        
-        # Track losses
-        total_loss += loss.item() * images.size(0)
-        total_cls_loss += cls_loss.item() * images.size(0)
-        total_reg_loss += reg_loss.item() * images.size(0)
-        
-        # Log per-step metrics
-        global_step = (epoch - 1) * num_batches + batch_idx
-        writer.add_scalar("Train/BatchLoss", loss.item(), global_step)
-        writer.add_scalar("Train/BatchClsLoss", cls_loss.item(), global_step)
-        writer.add_scalar("Train/BatchRegLoss", reg_loss.item(), global_step)
         
         # Update progress bar
         progress_bar.set_postfix({
@@ -104,29 +77,19 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
             'cls_loss': f"{cls_loss.item():.4f}",
             'reg_loss': f"{reg_loss.item():.4f}"
         })
+        
+        # Log to tensorboard
+        step = epoch * len(dataloader) + batch_idx
+        writer.add_scalar('Loss/train_batch', loss.item(), step)
+        writer.add_scalar('Loss/train_cls_batch', cls_loss.item(), step)
+        writer.add_scalar('Loss/train_reg_batch', reg_loss.item(), step)
     
-    progress_bar.close()
-    
-    # Calculate average losses per sample
-    dataset_size = len(dataloader.dataset)
-    avg_loss = total_loss / dataset_size
-    avg_cls_loss = total_cls_loss / dataset_size
-    avg_reg_loss = total_reg_loss / dataset_size
-    
-    metrics = {
-        "loss": avg_loss,
-        "cls_loss": avg_cls_loss,
-        "reg_loss": avg_reg_loss
+    avg_loss = total_loss / len(dataloader)
+    return {
+        'loss': avg_loss,
+        'cls_loss': cls_loss.item(),
+        'reg_loss': reg_loss.item()
     }
-    
-    print(f"Epoch {epoch} Average Loss: {avg_loss:.4f} (Cls: {avg_cls_loss:.4f}, Reg: {avg_reg_loss:.4f})")
-    
-    # Add epoch metrics to tensorboard
-    writer.add_scalar("Train/EpochLoss", avg_loss, epoch)
-    writer.add_scalar("Train/EpochClsLoss", avg_cls_loss, epoch)
-    writer.add_scalar("Train/EpochRegLoss", avg_reg_loss, epoch)
-    
-    return metrics
 
 def evaluate(model, dataloader, device, epoch, writer, log_images=False):
     model.eval()
@@ -148,18 +111,22 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
     with torch.no_grad():
         for batch_idx, (images, targets) in progress_bar:
             images = images.to(device)
-            cls_out, reg_out = model(images)
-            batch_size, _, feat_h, feat_w = cls_out.shape
+            
+            # Get feature map dimensions for anchor generation
+            _, _, feat_h, feat_w = model.backbone(images).shape
+            
+            # Generate anchors once per batch
             anchors = model.generate_anchors((feat_h, feat_w), device)
             
-            # Process outputs using the same reshaping as in training
-            cls_out = cls_out.reshape(batch_size, 2, model.num_anchors, feat_h, feat_w)
-            cls_out = cls_out.permute(0, 3, 4, 2, 1).contiguous()
-            cls_out_flat = cls_out.reshape(-1, 2)
+            # Forward pass - outputs are already in the correct shape
+            # cls_out: [B, num_classes+1, num_anchors, H, W]
+            # reg_out: [B, 4, num_anchors, H, W]
+            cls_out, reg_out = model(images)
             
-            reg_out = reg_out.reshape(batch_size, 4, model.num_anchors, feat_h, feat_w)
-            reg_out = reg_out.permute(0, 3, 4, 2, 1).contiguous()
-            reg_out_flat = reg_out.reshape(-1, 4)
+            # Reshape outputs for loss computation - matching training
+            num_classes = cls_out.size(1)
+            cls_out_flat = cls_out.permute(0, 3, 4, 2, 1).reshape(-1, num_classes)
+            reg_out_flat = reg_out.permute(0, 3, 4, 2, 1).reshape(-1, 4)
             
             # Calculate losses for evaluation
             batch_cls_labels = []
@@ -201,12 +168,10 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
             total_cls_loss += cls_loss.item() * images.size(0)
             total_reg_loss += reg_loss.item() * images.size(0)
             
-            # Get predictions using post_process method - pass the original outputs from model
-            # Not the reshaped outputs we use for loss calculation
-            orig_cls_out, orig_reg_out = model(images)
-            boxes_list, scores_list = model.post_process(orig_cls_out, orig_reg_out, anchors)
+            # Get predictions using post_process method
+            boxes_list, scores_list = model.post_process(cls_out, reg_out, anchors)
             
-            for i in range(batch_size):
+            for i in range(len(images)):
                 if log_images and images_logged < config.NUM_VAL_IMAGES_TO_LOG:
                     fig = visualize_predictions(images[i], targets[i], boxes_list[i], scores_list[i])
                     writer.add_figure(f"Validation/Image_{images_logged+1}", fig, epoch)

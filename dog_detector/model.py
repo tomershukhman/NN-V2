@@ -63,8 +63,22 @@ class DogDetector(nn.Module):
         features = self.backbone(x)
         x = F.relu(self.bn1(self.conv1(features)))
         x = F.relu(self.bn2(self.conv2(x)))
-        cls_output = self.cls_head(x)   # [B, 2*num_anchors, H, W]
-        reg_output = self.reg_head(x)   # [B, 4*num_anchors, H, W]
+        
+        # Get current feature map size
+        batch_size, _, feat_h, feat_w = x.shape
+        
+        # Classification head: [B, (num_classes+1)*num_anchors, H, W]
+        cls_output = self.cls_head(x)
+        # Reshape to [B, num_classes+1, num_anchors, H, W]
+        cls_output = cls_output.reshape(batch_size, self.num_anchors, -1, feat_h, feat_w)
+        cls_output = cls_output.permute(0, 2, 1, 3, 4).contiguous()
+        
+        # Regression head: [B, 4*num_anchors, H, W]
+        reg_output = self.reg_head(x)
+        # Reshape to [B, 4, num_anchors, H, W]
+        reg_output = reg_output.reshape(batch_size, self.num_anchors, 4, feat_h, feat_w)
+        reg_output = reg_output.permute(0, 2, 1, 3, 4).contiguous()
+        
         return cls_output, reg_output
 
     def generate_anchors(self, feature_map_size, device):
@@ -113,32 +127,23 @@ class DogDetector(nn.Module):
         return 32
 
     def post_process(self, cls_output, reg_output, anchors, conf_threshold=None, nms_threshold=None):
+        """Post-process outputs to get final detections"""
         conf_threshold = conf_threshold or config.CONF_THRESHOLD
         nms_threshold = nms_threshold or config.NMS_THRESHOLD
         
         batch_size = cls_output.size(0)
         
-        # Reshape outputs properly based on feature map dimensions
-        # Handle both 3D and 4D tensors
-        if len(cls_output.shape) == 4:
-            # Standard 4D tensor: [batch_size, channels, height, width]
-            _, _, height, width = cls_output.shape
-        else:
-            # Handle 3D tensor: likely [batch_size, channels, flattened_spatial_dim]
-            # Need to infer height and width
-            _, channels, flattened_dim = cls_output.shape
-            # Compute a reasonable feature map size based on the input image size and model stride
-            feature_map_size = [dim // self.stride for dim in self.input_size]
-            width, height = feature_map_size
-            # Reshape to 4D for consistent processing
-            cls_output = cls_output.reshape(batch_size, channels, height, width)
-            reg_output = reg_output.reshape(batch_size, -1, height, width)
+        # Our model outputs are already in shape [B, num_classes+1, num_anchors, H, W]
+        # and [B, 4, num_anchors, H, W] respectively
         
-        cls_output = cls_output.reshape(batch_size, 2, self.num_anchors, height, width)
-        cls_output = cls_output.permute(0, 3, 4, 2, 1).contiguous().reshape(batch_size, -1, 2)
+        # Reshape classification output to [batch_size, H*W*num_anchors, 2]
+        _, _, _, height, width = cls_output.shape
+        cls_output = cls_output.permute(0, 3, 4, 2, 1).contiguous()
+        cls_output = cls_output.view(batch_size, -1, 2)
         
-        reg_output = reg_output.reshape(batch_size, 4, self.num_anchors, height, width)
-        reg_output = reg_output.permute(0, 3, 4, 2, 1).contiguous().reshape(batch_size, -1, 4)
+        # Reshape regression output to [batch_size, H*W*num_anchors, 4]
+        reg_output = reg_output.permute(0, 3, 4, 2, 1).contiguous()
+        reg_output = reg_output.view(batch_size, -1, 4)
         
         # Apply softmax to get proper probabilities
         cls_probs = F.softmax(cls_output, dim=-1)

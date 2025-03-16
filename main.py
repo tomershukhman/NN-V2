@@ -9,7 +9,7 @@ from dog_detector.config import config
 from dog_detector.dataset import CocoDogsDataset
 from dog_detector.model import DogDetector
 from dog_detector.train import train_one_epoch, evaluate
-from dog_detector.utils import download_coco_dataset
+from dog_detector.utils import download_coco_dataset, verify_dataset_integrity
 
 # Define a top-level collate function so that images are stacked into a batch tensor.
 def collate_fn(batch):
@@ -96,7 +96,10 @@ def display_dataset_stats(data_root):
     return stats
 
 def main():
-    download_coco_dataset(config.DATA_ROOT)
+    # Check dataset integrity and download if needed
+    if not verify_dataset_integrity(config.DATA_ROOT):
+        print("Dataset incomplete or missing. Downloading COCO dataset...")
+        download_coco_dataset(config.DATA_ROOT)
     
     # Display dataset statistics
     display_dataset_stats(config.DATA_ROOT)
