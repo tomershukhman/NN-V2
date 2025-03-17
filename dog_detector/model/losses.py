@@ -2,14 +2,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from dog_detector.utils import compute_iou
-
+from config import POS_IOU_THRESHOLD, NEG_IOU_THRESHOLD, BOX_REG_SCALE, REG_LOSS_WEIGHT
 
 class DetectionLoss(nn.Module):
-    def __init__(self, model, reg_loss_scale=4.0):
+    def __init__(self, model):
         super(DetectionLoss, self).__init__()
         self.bce_loss = nn.BCEWithLogitsLoss(reduction='none')
-        self.smooth_l1_loss = nn.SmoothL1Loss(reduction='none')
-        self.reg_loss_scale = reg_loss_scale  # Should match scale in _decode_boxes
+        # Use L1Loss instead of SmoothL1Loss for stronger gradients
+        self.reg_loss_fn = nn.L1Loss(reduction='none')
+        self.reg_loss_scale = BOX_REG_SCALE  # Use constant from config
         self.model = model.module if hasattr(model, 'module') else model
 
     def forward(self, predictions, targets):
@@ -44,10 +45,19 @@ class DetectionLoss(nn.Module):
             ious = compute_iou(decoded_boxes, target_boxes)
             max_ious, max_idx = ious.max(dim=1)  # For each anchor, get best GT box
 
-            # Assign positive and negative samples
-            pos_mask = max_ious >= 0.25  # Use same threshold as in model's post-processing
-            neg_mask = max_ious < 0.1
-
+            # Assign positive and negative samples using constants from config
+            pos_mask = max_ious >= POS_IOU_THRESHOLD
+            neg_mask = max_ious < NEG_IOU_THRESHOLD
+            
+            # Forcefully ensure we have at least some positive anchors
+            # If no anchors exceed the threshold, take the top-K highest IoU anchors
+            if pos_mask.sum() < 10 and len(target_boxes) > 0:
+                top_k = min(10, len(max_ious))
+                _, top_anchor_idx = max_ious.topk(top_k)
+                new_pos_mask = torch.zeros_like(pos_mask)
+                new_pos_mask[top_anchor_idx] = True
+                pos_mask = new_pos_mask
+            
             # Ensure at least one positive match per GT box if available
             if pos_mask.sum() > 0:
                 # Classification loss for positive samples
@@ -56,34 +66,24 @@ class DetectionLoss(nn.Module):
                 cls_loss_pos = F.cross_entropy(pos_pred_cls, pos_target_cls, reduction='mean')
                 cls_losses[i] += cls_loss_pos
 
-                # For regression, convert GT boxes to offsets relative to anchors
-                pos_pred_reg = reg_output_i[pos_mask]
+                # For regression, directly compare the decoded boxes with GT boxes
+                pos_pred_boxes = decoded_boxes[pos_mask]
                 pos_gt_boxes = target_boxes[max_idx[pos_mask]]
                 
-                # Calculate regression targets in the same format as predictions
-                pos_anchors = anchors[pos_mask]
-                anchor_widths = pos_anchors[:, 2] - pos_anchors[:, 0]
-                anchor_heights = pos_anchors[:, 3] - pos_anchors[:, 1]
-                anchor_ctr_x = pos_anchors[:, 0] + 0.5 * anchor_widths
-                anchor_ctr_y = pos_anchors[:, 1] + 0.5 * anchor_heights
+                # Normalize boxes by image dimensions for better scaling
+                h, w = 512, 512  # IMAGE_SIZE from config
+                pos_pred_boxes_norm = pos_pred_boxes.clone()
+                pos_gt_boxes_norm = pos_gt_boxes.clone()
                 
-                gt_widths = pos_gt_boxes[:, 2] - pos_gt_boxes[:, 0]
-                gt_heights = pos_gt_boxes[:, 3] - pos_gt_boxes[:, 1]
-                gt_ctr_x = pos_gt_boxes[:, 0] + 0.5 * gt_widths
-                gt_ctr_y = pos_gt_boxes[:, 1] + 0.5 * gt_heights
-
-                # Compute regression targets using inverse of _decode_boxes transformation
-                tx = (gt_ctr_x - anchor_ctr_x) * (4.0 / anchor_widths)
-                ty = (gt_ctr_y - anchor_ctr_y) * (4.0 / anchor_heights)
-                tw = torch.log(gt_widths / anchor_widths)
-                th = torch.log(gt_heights / anchor_heights)
-
-                # Convert tx, ty back to logits for sigmoid
-                tx = (tx + 1) / 2  # Map [-1, 1] to [0, 1] for sigmoid
-                ty = (ty + 1) / 2
-
-                reg_targets = torch.stack([tx, ty, tw, th], dim=1)
-                reg_loss = self.smooth_l1_loss(pos_pred_reg, reg_targets).mean()
+                # Normalize coordinates to [0, 1] range
+                pos_pred_boxes_norm[:, 0::2] /= w  # x coordinates
+                pos_pred_boxes_norm[:, 1::2] /= h  # y coordinates
+                pos_gt_boxes_norm[:, 0::2] /= w
+                pos_gt_boxes_norm[:, 1::2] /= h
+                
+                # Direct L1 loss on normalized box coordinates (stronger signal)
+                reg_loss = self.reg_loss_fn(pos_pred_boxes_norm, pos_gt_boxes_norm).mean(dim=1).mean()
+                
                 reg_losses[i] = reg_loss
                 total_positive_samples += pos_mask.sum()
 
@@ -96,8 +96,15 @@ class DetectionLoss(nn.Module):
                 
         # Calculate final losses
         cls_loss_final = cls_losses.mean()
-        reg_loss_final = reg_losses.sum() / (total_positive_samples if total_positive_samples > 0 else 1)
-        total_loss = cls_loss_final + reg_loss_final
+        
+        # Ensure regression loss isn't zero even with few positive samples
+        if total_positive_samples > 0:
+            reg_loss_final = reg_losses.mean()  # Use mean instead of sum/count
+        else:
+            reg_loss_final = torch.tensor(0.0, device=device)
+            
+        # Apply REG_LOSS_WEIGHT from config
+        total_loss = cls_loss_final + REG_LOSS_WEIGHT * reg_loss_final
 
         return {
             'total_loss': total_loss,

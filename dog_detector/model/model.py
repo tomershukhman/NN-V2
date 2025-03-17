@@ -4,13 +4,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
 from config import (
-    NUM_CLASSES,CONFIDENCE_THRESHOLD,NMS_THRESHOLD,MAX_DETECTIONS, ANCHOR_SCALES,ANCHOR_RATIOS,IMAGE_SIZE
+    NUM_CLASSES, CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS, 
+    ANCHOR_SCALES, ANCHOR_RATIOS, IMAGE_SIZE, BOX_REG_SCALE, PRETRAINED
 )
 from torchvision.ops import nms
 
 
 class DogDetector(nn.Module):
-    def __init__(self, num_classes=NUM_CLASSES, pretrained=True):
+    def __init__(self, num_classes=NUM_CLASSES, pretrained=PRETRAINED):
         super(DogDetector, self).__init__()
         # Load pretrained ResNet18 backbone (excluding final classification layers)
         resnet = torchvision.models.resnet18(pretrained=pretrained)
@@ -202,8 +203,8 @@ class DogDetector(nn.Module):
         tw = reg_output[:, 2]
         th = reg_output[:, 3]
 
-        # Apply transformations with scale factor for better stability
-        scale = 4.0  # Scale factor for offsets
+        # Apply transformations with scale factor from config
+        scale = BOX_REG_SCALE  # Get scale factor from config
         cx = anchor_cx + tx * anchor_w / scale
         cy = anchor_cy + ty * anchor_h / scale
         w = torch.exp(torch.clamp(tw, -4, 4)) * anchor_w  # Clamp to prevent extreme scaling
