@@ -19,22 +19,22 @@ NUM_WORKERS = 4
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 50
 WEIGHT_DECAY = 1e-4
-REG_LOSS_WEIGHT = 10.0  # Reduced from 1000.0 to make regression loss more balanced with classification
+REG_LOSS_WEIGHT = 5.0  # Reduced to prevent overfitting to few positive samples
 
 # Loss function parameters
-POS_IOU_THRESHOLD = 0.35  # Increased from 0.25 for higher quality matches
-NEG_IOU_THRESHOLD = 0.15  # Slightly increased to maintain good negative examples
-BOX_REG_SCALE = 4.0       # Scale factor for box regression
+POS_IOU_THRESHOLD = 0.4   # More balanced threshold for positive matches
+NEG_IOU_THRESHOLD = 0.2   # Maintains good separation while allowing more training signal
+BOX_REG_SCALE = 4.0      # Back to original scale
 
 # Device configuration
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 # Model parameters
 IMAGE_SIZE = (512, 512)  # Fixed input size as width,height tuple
-CONFIDENCE_THRESHOLD = 0.3
-NMS_THRESHOLD = 0.5
+CONFIDENCE_THRESHOLD = 0.35  # Slightly higher than original but not too strict
+NMS_THRESHOLD = 0.45       
 MAX_DETECTIONS = 100
-IOU_THRESHOLD = 0.25  # For evaluation metrics
+IOU_THRESHOLD = 0.4        # More balanced evaluation threshold
 PRETRAINED = True  # Use pretrained backbone
 
 # Visualization parameters

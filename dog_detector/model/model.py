@@ -204,19 +204,26 @@ class DogDetector(nn.Module):
         th = reg_output[:, 3]
 
         # Apply transformations with scale factor from config
-        scale = BOX_REG_SCALE  # Get scale factor from config
+        scale = BOX_REG_SCALE
         cx = anchor_cx + tx * anchor_w / scale
         cy = anchor_cy + ty * anchor_h / scale
-        w = torch.exp(torch.clamp(tw, -4, 4)) * anchor_w  # Clamp to prevent extreme scaling
-        h = torch.exp(torch.clamp(th, -4, 4)) * anchor_h
+        
+        # More conservative clamping for width/height to prevent collapse
+        w = torch.exp(torch.clamp(tw, -2, 2)) * anchor_w
+        h = torch.exp(torch.clamp(th, -2, 2)) * anchor_h
 
-        # Convert back to x1,y1,x2,y2 format
+        # Add size constraints to prevent degenerate boxes
+        min_size = 4.0  # Minimum 4 pixels
+        w = torch.clamp(w, min=min_size)
+        h = torch.clamp(h, min=min_size)
+
+        # Convert to x1,y1,x2,y2 format
         x1 = cx - w/2
         y1 = cy - h/2
         x2 = cx + w/2
         y2 = cy + h/2
 
-        # Stack and ensure valid boxes
+        # Clamp to image boundaries and ensure valid boxes
         boxes = torch.stack([
             x1.clamp(min=0, max=self.input_size[0]),
             y1.clamp(min=0, max=self.input_size[1]),
@@ -224,12 +231,12 @@ class DogDetector(nn.Module):
             y2.clamp(min=0, max=self.input_size[1])
         ], dim=1)
         
-        # Ensure x2 > x1 and y2 > y1
+        # Ensure x2 > x1 and y2 > y1 with minimum size
         boxes = torch.stack([
             boxes[:, 0],
             boxes[:, 1],
-            torch.max(boxes[:, 2], boxes[:, 0] + 1),  # Ensure x2 > x1
-            torch.max(boxes[:, 3], boxes[:, 1] + 1)   # Ensure y2 > y1
+            torch.max(boxes[:, 2], boxes[:, 0] + min_size),  # Ensure minimum width
+            torch.max(boxes[:, 3], boxes[:, 1] + min_size)   # Ensure minimum height
         ], dim=1)
 
         return boxes
