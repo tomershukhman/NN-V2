@@ -123,8 +123,9 @@ class VisualizationLogger:
                 # Post-process outputs
                 boxes, scores = model.post_process(cls_output, reg_output, anchors)
                 
-                # Log the images with properly colored boxes
-                self.log_images(images, boxes, scores, step, f"best_model/{name}", targets)
+                # Log the images with properly colored boxes, include epoch in tag
+                self.log_images(images, boxes, scores, step, 
+                              f"best_model/{name}/epoch_{step}", targets)
                 
             except Exception as e:
                 print(f"Warning: Failed to log best model images: {e}")
