@@ -7,13 +7,16 @@ and creating appropriate train/val splits.
 import os
 import torch
 import random
-import json
 import pickle
 from torch.utils.data import Dataset
 from PIL import Image
 import torchvision.transforms as transforms
 from pycocotools.coco import COCO
 import config
+import psutil
+import gc
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dog_detector.utils import download_file_torch
 
 
 class CocoDogsDataset(Dataset):
@@ -117,7 +120,6 @@ class CocoDogsDataset(Dataset):
         total_dog_images = len(all_dog_imgs)
         total_person_images = len(all_person_imgs)
         
-        
         # Apply DOG_USAGE_RATIO to select subset of dog images
         num_dogs_to_use = int(total_dog_images * config.DOG_USAGE_RATIO)
         
@@ -178,12 +180,7 @@ class CocoDogsDataset(Dataset):
               f"{len(dog_subset)} dog images and {len(person_subset)} person-only images")
             
     def _get_verified_images(self, coco, split_name, category_id):
-        """Get set of image IDs for a category that exist on disk with memory-efficient parallel downloads"""
-        from dog_detector.utils import download_file_torch
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        import gc
-        import psutil
-
+        """Get set of image IDs for a category that exist on disk with optimized parallel downloading"""
         # First get all image IDs for this category
         img_ids = coco.getImgIds(catIds=[category_id])
         total_count = len(img_ids)
@@ -209,59 +206,71 @@ class CocoDogsDataset(Dataset):
             # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(download_tasks[0][1]), exist_ok=True)
             
-            # Increased batch size since we have more memory available
-            batch_size = 50  # Increased from 30
-            
-            # Use more workers based on available CPU cores
+            # System-adaptive parameters
             cpu_count = psutil.cpu_count(logical=True)
-            max_workers = min(cpu_count * 2, 16)  # Increased worker count, capped at 16
+            total_memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
             
-            print(f"Downloading {len(download_tasks)} missing images in batches of {batch_size} using {max_workers} workers")
+            # Use adaptive parameters based on system capabilities
+            max_workers = min(cpu_count * 2, int(total_memory_gb * 2), 32)  # Higher worker count with cap
+            initial_batch_size = min(int(total_memory_gb * 15), 120)  # Aggressive batching with cap
             
-            for i in range(0, len(download_tasks), batch_size):
-                batch = download_tasks[i:i + batch_size]
-                batch_num = i//batch_size + 1
-                total_batches = (len(download_tasks) + batch_size - 1)//batch_size
-                print(f"\rProcessing batch {batch_num}/{total_batches}", end="", flush=True)
+            print(f"Downloading {len(download_tasks)} missing images using {max_workers} workers")
+            print(f"Initial batch size: {initial_batch_size}, adapts based on memory usage")
+            
+            batch_size = initial_batch_size
+            total_batches = (len(download_tasks) + batch_size - 1) // batch_size
+            
+            # Process batches
+            for batch_idx in range(0, len(download_tasks), batch_size):
+                batch = download_tasks[batch_idx:batch_idx + batch_size]
+                current_batch_num = batch_idx // batch_size + 1
                 
+                # Check memory before each batch and adjust settings
+                current_memory = psutil.virtual_memory()
+                if current_memory.percent > 85:
+                    old_batch_size = batch_size
+                    batch_size = max(30, int(batch_size * 0.7))
+                    max_workers = max(8, int(max_workers * 0.8))
+                    print(f"\nMemory usage high ({current_memory.percent}%), reducing batch size to {batch_size}")
+                elif current_memory.percent < 60 and batch_size < initial_batch_size:
+                    old_batch_size = batch_size
+                    batch_size = min(initial_batch_size, batch_size + 20)
+                    print(f"\nMemory usage low ({current_memory.percent}%), increasing batch size to {batch_size}")
+                
+                # Recalculate total batches if batch size changed
+                if batch_size != old_batch_size:
+                    remaining_tasks = len(download_tasks) - batch_idx
+                    remaining_batches = (remaining_tasks + batch_size - 1) // batch_size
+                    total_batches = current_batch_num + remaining_batches - 1
+                
+                print(f"\rProcessing batch {current_batch_num}/{total_batches}", end="", flush=True)
+                
+                # Download batch with ThreadPoolExecutor
                 with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    futures = []
+                    futures = {}
                     for url, path, img_id in batch:
                         future = executor.submit(download_file_torch, url, path)
-                        futures.append((future, img_id, path))
+                        futures[future] = img_id
                     
-                    for future, img_id, path in futures:
+                    # Collect results
+                    for future in as_completed(futures):
+                        img_id = futures[future]
                         try:
                             if future.result():
                                 verified_imgs.add(img_id)
                             else:
                                 missing_count += 1
-                                print(f"\nFailed to download {path}")
-                        except Exception as e:
+                        except Exception:
                             missing_count += 1
-                            print(f"\nFailed to download {path}: {e}")
                 
-                # Force garbage collection after each batch
+                # Memory management
                 gc.collect()
-                
-                # More aggressive memory management
-                current_memory = psutil.virtual_memory()
-                if current_memory.percent > 90:  # Changed from 85
-                    batch_size = max(20, batch_size // 2)  # Minimum batch size increased
-                    print(f"\nHigh memory usage detected ({current_memory.percent}%), reducing batch size to {batch_size}")
-                elif current_memory.percent < 70 and batch_size < 100:  # Changed from 60 and increased max batch size
-                    batch_size = min(100, batch_size + 10)  # More aggressive batch size increase
-                    print(f"\nLow memory usage ({current_memory.percent}%), increasing batch size to {batch_size}")
-                
-                # Reduced delay between batches
-                if current_memory.percent > 85:  # Changed from 75
+                if psutil.virtual_memory().percent > 85:
                     import time
-                    time.sleep(0.2)  # Reduced from 0.5
-        
-        print("\nDownload complete!")
-        
-        if missing_count > 0:
-            print(f"{split_name} - {coco.loadCats([category_id])[0]['name']}: {missing_count} images failed to download")
+                    time.sleep(0.3)
+                    
+        print(f"\n{split_name} - {coco.loadCats([category_id])[0]['name']}: {missing_count} images failed to download")
+        print(f"Total images available: {len(verified_imgs)}")
                 
         return verified_imgs
     
@@ -311,9 +320,7 @@ class CocoDogsDataset(Dataset):
             
             if os.path.exists(image_path) and os.path.getsize(image_path) > 0:
                 valid_img_ids.append(img_id)
-            else:
-                print(f"Removing missing image: {image_path}")
-                
+            
         # Update dataset with only valid images
         self.img_ids = valid_img_ids
         
@@ -370,114 +377,6 @@ class CocoDogsDataset(Dataset):
         }
         
         return img, target
-    
-    @staticmethod
-    def get_dataset_stats(data_root):
-        """Get statistics about the datasets"""
-        # Check for cached stats
-        cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
-        cache_key = f"{config.DOG_USAGE_RATIO}_{config.TRAIN_VAL_SPLIT}"
-        train_cache = os.path.join(cache_dir, f"train_{cache_key}.pkl")
-        val_cache = os.path.join(cache_dir, f"val_{cache_key}.pkl")
-        
-        stats = {}
-        
-        # Try to load from cache
-        if os.path.exists(train_cache) and os.path.exists(val_cache):
-            try:
-                with open(train_cache, 'rb') as f:
-                    train_data = pickle.load(f)
-                    train_stats = train_data.get('stats', {})
-                
-                with open(val_cache, 'rb') as f:
-                    val_data = pickle.load(f)
-                    val_stats = val_data.get('stats', {})
-                
-                # Combine stats
-                stats = {
-                    'dog_usage_ratio': config.DOG_USAGE_RATIO,
-                    'train_val_split': config.TRAIN_VAL_SPLIT,
-                    'total_available_dogs': train_stats.get('total_available_dogs', 0),
-                    'total_available_persons': train_stats.get('total_available_persons', 0),
-                    'train_with_dogs': train_stats.get('with_dogs', 0),
-                    'train_without_dogs': train_stats.get('without_dogs', 0),
-                    'val_with_dogs': val_stats.get('with_dogs', 0),
-                    'val_without_dogs': val_stats.get('without_dogs', 0)
-                }
-                
-                # Print dataset stats
-                print("\nDataset Configuration:")
-                print("--------------------")
-                print(f"DOG_USAGE_RATIO: {config.DOG_USAGE_RATIO * 100:.1f}%")
-                print(f"TRAIN_VAL_SPLIT: {config.TRAIN_VAL_SPLIT * 100:.1f}%/{(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%")
-                
-                print("\nTotal Available Images:")
-                print("--------------------")
-                print(f"Images with dogs: {stats['total_available_dogs']}")
-                print(f"Images without dogs (person only): {stats['total_available_persons']}")
-                
-                print("\nTraining Set ({config.TRAIN_VAL_SPLIT * 100:.1f}%):")
-                print("--------------------")
-                print(f"Images with dogs: {stats['train_with_dogs']}")
-                print(f"Images without dogs: {stats['train_without_dogs']}")
-                print(f"Total training images: {stats['train_with_dogs'] + stats['train_without_dogs']}")
-                
-                print("\nValidation Set ({(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%):")
-                print("--------------------")
-                print(f"Images with dogs: {stats['val_with_dogs']}")
-                print(f"Images without dogs: {stats['val_without_dogs']}")
-                print(f"Total validation images: {stats['val_with_dogs'] + stats['val_without_dogs']}\n")
-                
-                return stats
-            
-            except (EOFError, pickle.UnpicklingError, KeyError) as e:
-                print(f"Error loading cached stats: {e}")
-                print("Generating new dataset...")
-        
-        # If we're here, we need to compute stats from scratch by creating the datasets 
-        print("Computing dataset statistics from scratch...")
-        train_dataset = CocoDogsDataset(data_root, is_train=True)
-        val_dataset = CocoDogsDataset(data_root, is_train=False)
-        
-        # Compute and return stats
-        train_stats = train_dataset.stats
-        val_stats = val_dataset.stats
-        
-        stats = {
-            'dog_usage_ratio': config.DOG_USAGE_RATIO,
-            'train_val_split': config.TRAIN_VAL_SPLIT,
-            'total_available_dogs': train_stats.get('total_available_dogs', 0),
-            'total_available_persons': train_stats.get('total_available_persons', 0),
-            'train_with_dogs': train_stats.get('with_dogs', 0),
-            'train_without_dogs': train_stats.get('without_dogs', 0),
-            'val_with_dogs': val_stats.get('with_dogs', 0),
-            'val_without_dogs': val_stats.get('without_dogs', 0)
-        }
-        
-        # Print dataset stats
-        print("\nDataset Configuration:")
-        print("--------------------")
-        print(f"DOG_USAGE_RATIO: {config.DOG_USAGE_RATIO * 100:.1f}%")
-        print(f"TRAIN_VAL_SPLIT: {config.TRAIN_VAL_SPLIT * 100:.1f}%/{(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%")
-        
-        print("\nTotal Available Images:")
-        print("--------------------")
-        print(f"Images with dogs: {stats['total_available_dogs']}")
-        print(f"Images without dogs (person only): {stats['total_available_persons']}")
-        
-        print("\nTraining Set ({config.TRAIN_VAL_SPLIT * 100:.1f}%):")
-        print("--------------------")
-        print(f"Images with dogs: {stats['train_with_dogs']}")
-        print(f"Images without dogs: {stats['train_without_dogs']}")
-        print(f"Total training images: {stats['train_with_dogs'] + stats['train_without_dogs']}")
-        
-        print("\nValidation Set ({(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%):")
-        print("--------------------")
-        print(f"Images with dogs: {stats['val_with_dogs']}")
-        print(f"Images without dogs: {stats['val_without_dogs']}")
-        print(f"Total validation images: {stats['val_with_dogs'] + stats['val_without_dogs']}\n")
-        
-        return stats
 
 
 def collate_fn(batch):

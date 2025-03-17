@@ -5,23 +5,25 @@ import torch
 from pycocotools.coco import COCO
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from tqdm import tqdm
-from PIL import Image
 import config
 import random
 import urllib3
 import time
 from urllib3.util import Retry
 import socket
+import gc
+import psutil
 
-# Create a global connection pool for reuse - aggressive but stable settings
+# Create a global connection pool with optimal settings
 http = urllib3.PoolManager(
-    maxsize=100,  # Increased to 100 concurrent connections
+    maxsize=150,
     retries=Retry(
-        total=2,  # Minimal retries
+        total=3,
         backoff_factor=0.1,
-        status_forcelist=[500, 502, 503, 504]
+        status_forcelist=[429, 500, 502, 503, 504]
     ),
-    timeout=urllib3.Timeout(connect=5, read=20)
+    timeout=urllib3.Timeout(connect=3, read=15),
+    block=False
 )
 
 def compute_iou(boxes1, boxes2):
@@ -113,8 +115,8 @@ def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thres
     return cls_targets, reg_targets, pos_mask
 
 
-def download_file_torch(url, dest_path, max_retries=2):
-    """Optimized download with minimal overhead"""
+def download_file_torch(url, dest_path, max_retries=3):
+    """Optimized download with adaptive timeout and connection reuse"""
     if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
         return True
     
@@ -122,14 +124,18 @@ def download_file_torch(url, dest_path, max_retries=2):
     
     for attempt in range(max_retries):
         try:
-            response = http.request('GET', url, preload_content=False)
+            # Request streaming response with better error handling
+            response = http.request('GET', url, preload_content=False, timeout=urllib3.Timeout(connect=3, read=10))
             
             if response.status != 200:
+                if response.status in (429, 503):  # Rate limiting or service unavailable
+                    time.sleep((attempt + 1) * 2)  # Exponential backoff
                 raise Exception(f"HTTP error {response.status}")
                 
+            # Stream to file in larger chunks
             with open(dest_path, 'wb') as out_file:
                 while True:
-                    data = response.read(65536)  # Increased to 64KB chunks
+                    data = response.read(131072)  # 128KB chunks for better throughput
                     if not data:
                         break
                     out_file.write(data)
@@ -137,13 +143,13 @@ def download_file_torch(url, dest_path, max_retries=2):
             response.release_conn()
             return True
             
-        except Exception as e:
+        except (urllib3.exceptions.HTTPError, urllib3.exceptions.TimeoutError, socket.error) as e:
             if attempt == max_retries - 1:
                 if os.path.exists(dest_path):
                     os.remove(dest_path)
                 return False
             
-            time.sleep(0.1)  # Minimal delay between retries
+            time.sleep(0.2 * (attempt + 1))  # Increasing backoff
             continue
     return False
 
@@ -168,7 +174,7 @@ def download_single_image(args):
         return f"Failed to download {file_name}"
 
 def download_coco_dataset(data_root):
-    """Download COCO dataset with maximum stable performance"""
+    """Download COCO dataset with adaptive concurrency and memory management"""
     ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
     ann_dir = os.path.join(data_root, "annotations")
     
@@ -199,7 +205,8 @@ def download_coco_dataset(data_root):
         person_imgs = set(coco.getImgIds(catIds=[1]))
         person_only_imgs = person_imgs - dog_imgs
         
-        target_size = int(min(len(dog_imgs), len(person_only_imgs)) * config.DATA_FRACTION)
+        # Use DOG_USAGE_RATIO instead of DATA_FRACTION
+        target_size = int(min(len(dog_imgs), len(person_only_imgs)) * config.DOG_USAGE_RATIO)
         dog_imgs = set(random.sample(list(dog_imgs), target_size))
         person_only_imgs = set(random.sample(list(person_only_imgs), target_size))
         
@@ -213,24 +220,40 @@ def download_coco_dataset(data_root):
     val_tasks = [(val_coco.loadImgs(img_id)[0], val_dir, False) for img_id in val_img_ids]
     all_tasks = train_tasks + val_tasks
 
-    # Maximum stable performance settings for 8GB RAM
-    import psutil
-    total_memory = psutil.virtual_memory().total / (1024 * 1024 * 1024)  # GB
+    # Adaptive concurrency based on system resources
+    total_memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
     cpu_count = psutil.cpu_count(logical=True)
     
-    # Aggressive but stable worker count based on available memory
-    max_workers = min(cpu_count * 4, int(total_memory * 2))  # 2 workers per GB of RAM
-    batch_size = min(80, int(total_memory * 10))  # 10 downloads per GB of RAM
+    # Calculate optimal workers & batch size based on system specs
+    max_workers = min(int(cpu_count * 1.5), int(total_memory_gb * 2), 32)  # Cap at 32 workers
+    initial_batch_size = min(int(total_memory_gb * 15), 120)  # Up to 120 per batch
     
     print(f"\nStarting optimized download with {max_workers} workers")
-    print(f"Downloading {len(all_tasks)} images in batches of {batch_size}")
+    print(f"Downloading {len(all_tasks)} images in initial batches of {initial_batch_size}")
     
     completed = 0
     failed = 0
     total = len(all_tasks)
+    batch_size = initial_batch_size
+    
+    # Use pool size proportional to batch size but respecting max connections
+    http.pool.maxsize = max(150, batch_size + 50)
     
     for i in range(0, len(all_tasks), batch_size):
         batch = all_tasks[i:i + batch_size]
+        
+        # Monitor memory and adjust batch size before each batch
+        current_memory = psutil.virtual_memory()
+        if current_memory.percent > 85:
+            old_batch_size = batch_size
+            batch_size = max(30, int(batch_size * 0.7))  # Reduce batch size when memory is high
+            if batch_size != old_batch_size:
+                print(f"\nMemory usage high ({current_memory.percent}%), reducing batch size to {batch_size}")
+        elif current_memory.percent < 60 and batch_size < initial_batch_size:
+            old_batch_size = batch_size
+            batch_size = min(initial_batch_size, batch_size + 20)  # Increase when memory is available
+            if batch_size != old_batch_size:
+                print(f"\nMemory usage low ({current_memory.percent}%), increasing batch size to {batch_size}")
         
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = [executor.submit(download_single_image, task) for task in batch]
@@ -243,15 +266,17 @@ def download_coco_dataset(data_root):
                 
                 if completed % 20 == 0:
                     success_rate = ((completed - failed) / completed * 100) if completed > 0 else 0
-                    print(f"\rProgress: {completed}/{total} ({success_rate:.1f}% success rate)", end="", flush=True)
+                    progress_pct = completed / total * 100
+                    print(f"\rProgress: {completed}/{total} ({progress_pct:.1f}% | {success_rate:.1f}% success)", end="", flush=True)
         
-        # Minimal cleanup
+        # Force garbage collection and brief pause between batches if needed
         gc.collect()
-        time.sleep(0.2)  # Minimal delay between batches
+        if psutil.virtual_memory().percent > 80:
+            time.sleep(0.5)
     
     print("\nDownload phase completed!")
     
-    # Quick verification only for completely missing files
+    # Quick verification for missing files
     missing_train = quick_verify_downloads(train_img_ids, train_coco, train_dir)
     missing_val = quick_verify_downloads(val_img_ids, val_coco, val_dir)
     
@@ -271,15 +296,20 @@ def quick_verify_downloads(img_ids, coco, target_dir):
     return missing
 
 def retry_downloads(missing_files, subset, target_dir):
-    """Minimal retry logic for failed downloads"""
+    """Retry missing downloads with increased timeouts"""
     if not missing_files:
         return
         
     print(f"\nRetrying {len(missing_files)} files from {subset}...")
-    for file_name in missing_files:
-        url = f"http://images.cocodataset.org/{subset}/{file_name}"
-        target_path = os.path.join(target_dir, file_name)
-        download_file_torch(url, target_path)
+    with ThreadPoolExecutor(max_workers=10) as executor:  # Lower concurrency for retries
+        futures = []
+        for file_name in missing_files:
+            url = f"http://images.cocodataset.org/{subset}/{file_name}"
+            target_path = os.path.join(target_dir, file_name)
+            futures.append(executor.submit(download_file_torch, url, target_path, max_retries=4))
+        
+        for future in tqdm(as_completed(futures), total=len(futures), desc="Retrying"):
+            future.result()
 
 def verify_dataset_integrity(data_root):
     """Verify dataset exists and contains necessary files"""
@@ -298,6 +328,7 @@ def verify_dataset_integrity(data_root):
     if not all(os.path.exists(os.path.join(ann_dir, f)) for f in required_annotations):
         return False
         
+    # Minimum number of images required
     min_images = 100
     train_images = [f for f in os.listdir(train_dir) if f.endswith('.jpg')]
     val_images = [f for f in os.listdir(val_dir) if f.endswith('.jpg')]
