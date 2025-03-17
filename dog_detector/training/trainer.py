@@ -58,7 +58,7 @@ def train(data_root=None, download=True, batch_size=None):
         print(f"  - Total dataset size:             {stats.get('total_images', 0)} images")
         print("="*80 + "\n")
         
-        # Also log to tensorboard
+        # Also log to tensorboard and CSV
         vis_logger.log_metrics({
             'dataset/total_available_dogs': stats.get('total_available_dogs', 0),
             'dataset/train_with_dogs': stats.get('train_with_dogs', 0),
@@ -74,7 +74,7 @@ def train(data_root=None, download=True, batch_size=None):
 
     # Get model and criterion
     model = get_model(DEVICE)
-    criterion = DetectionLoss().to(DEVICE)
+    criterion = DetectionLoss(model).to(DEVICE)  # Pass model instance to DetectionLoss
     optimizer = torch.optim.Adam(
         model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
 
@@ -96,6 +96,12 @@ def train(data_root=None, download=True, batch_size=None):
         
         # Display metrics summary
         vis_logger.display_metrics_summary(train_metrics, val_metrics, epoch, epoch_duration)
+        
+        # Log metrics to CSV with epoch number
+        train_metrics['epoch'] = epoch
+        val_metrics['epoch'] = epoch
+        vis_logger.log_metrics(train_metrics, epoch, 'train')  # Will log to both tensorboard and CSV
+        vis_logger.log_metrics(val_metrics, epoch, 'val')      # Will log to both tensorboard and CSV
         
         # Save best model (by validation loss)
         if val_metrics['total_loss'] < best_val_loss:
@@ -147,6 +153,13 @@ def train(data_root=None, download=True, batch_size=None):
     print(f"📈 Logs saved to: {os.path.join(OUTPUT_ROOT, 'tensorboard')}")
     print("="*80)
     
+    # Log final metrics
+    vis_logger.log_metrics({
+        'training/best_val_loss': best_val_loss,
+        'training/best_f1_score': best_f1_score,
+        'training/total_time_hours': hours + minutes/60 + seconds/3600
+    }, NUM_EPOCHS, 'final')
+    
     vis_logger.close()
 
 
@@ -165,37 +178,25 @@ def train_epoch(model, train_loader, criterion, optimizer, epoch):
         targets = [{k: (v.to(DEVICE) if isinstance(v, torch.Tensor) else v)
                     for k, v in t.items()} for t in targets]
 
-        # Forward pass
-        predictions = model(images)
-        loss = criterion(predictions, targets)
+        # Forward pass - now returns anchors too
+        cls_output, reg_output, anchors = model(images)
+        predictions = (cls_output, reg_output, anchors)  # Package outputs for criterion
+        loss_dict = criterion(predictions, targets)
         
-        # Extract individual loss components if available
-        if isinstance(loss, dict):
-            cls_loss = loss.get('cls_loss', 0)
-            reg_loss = loss.get('reg_loss', 0)
-            total_loss = loss.get('total_loss', loss)  # Fallback to combined loss
-        else:
-            # Approximate individual losses if not provided
-            total_loss = loss
-            cls_loss = 0
-            reg_loss = 0
+        # Extract individual loss components
+        cls_loss = loss_dict['cls_loss']
+        reg_loss = loss_dict['reg_loss']
+        total_loss = loss_dict['total_loss']
 
         # Backward pass
         optimizer.zero_grad()
-        if isinstance(total_loss, torch.Tensor):
-            total_loss.backward()
-        else:
-            loss.backward()  # Fallback to original loss object
+        total_loss.backward()
         optimizer.step()
 
         # Update metrics
-        if isinstance(total_loss, torch.Tensor):
-            train_loss += total_loss.item()
-        else:
-            train_loss += loss.item()
-            
-        cls_loss_total += cls_loss if isinstance(cls_loss, (int, float)) else (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else 0)
-        reg_loss_total += reg_loss if isinstance(reg_loss, (int, float)) else (reg_loss.item() if isinstance(reg_loss, torch.Tensor) else 0)
+        train_loss += total_loss.item()
+        cls_loss_total += cls_loss.item()
+        reg_loss_total += reg_loss.item()
         train_steps += 1
         
         # Update progress bar
@@ -241,106 +242,57 @@ def validate_epoch(model, val_loader, criterion, epoch):
             targets = [{k: (v.to(DEVICE) if isinstance(v, torch.Tensor) else v)
                        for k, v in t.items()} for t in targets]
 
-            # Forward pass
-            predictions = model(images)
-            loss = criterion(predictions, targets)
+            # Forward pass - now returns anchors also
+            cls_output, reg_output, anchors = model(images)
+            predictions = (cls_output, reg_output, anchors)
+            loss_dict = criterion(predictions, targets)
             
-            # Extract individual loss components if available
-            if isinstance(loss, dict):
-                cls_loss = loss.get('cls_loss', 0)
-                reg_loss = loss.get('reg_loss', 0)
-                total_loss = loss.get('total_loss', loss)  # Fallback to combined loss
-            else:
-                # Approximate individual losses if not provided
-                total_loss = loss
-                cls_loss = 0
-                reg_loss = 0
-            
-            # Update loss metrics
-            if isinstance(total_loss, torch.Tensor):
-                val_loss += total_loss.item()
-            else:
-                val_loss += loss.item()
-                
-            cls_loss_total += cls_loss if isinstance(cls_loss, (int, float)) else (cls_loss.item() if isinstance(cls_loss, torch.Tensor) else 0)
-            reg_loss_total += reg_loss if isinstance(reg_loss, (int, float)) else (reg_loss.item() if isinstance(reg_loss, torch.Tensor) else 0)
+            # Update loss metrics - handle dictionary return type
+            val_loss += loss_dict['total_loss'].item()
+            cls_loss_total += loss_dict['cls_loss'].item()
+            reg_loss_total += loss_dict['reg_loss'].item()
             val_steps += 1
             
-            # Generate feature map sizes for anchor generation - FIXED ERROR HERE
-            if isinstance(predictions, tuple) and len(predictions) >= 2:
-                cls_output, reg_output = predictions[:2]
-                
-                # Safely get feature map dimensions
-                if len(cls_output.shape) == 5:  # [B, num_classes, num_anchors, H, W]
-                    _, _, _, feat_h, feat_w = cls_output.shape
-                elif len(cls_output.shape) == 4:  # [B, C, H, W]
-                    _, _, feat_h, feat_w = cls_output.shape
-                else:
-                    # Fallback: can't determine feature map size directly
-                    # Instead, run backbone to get feature map size
-                    with torch.no_grad():
-                        features = model.backbone(images)
-                        _, _, feat_h, feat_w = features.shape
-            else:
-                # If predictions format is unexpected, we can't proceed
-                print(f"Warning: Unexpected predictions format: {type(predictions)}")
-                continue  # Skip this batch
+            # Post-process outputs to get bounding boxes and scores using the same anchors
+            boxes, scores = model.post_process(cls_output, reg_output, anchors)
             
-            # Generate anchors
-            try:
-                anchors = model.generate_anchors((feat_h, feat_w), DEVICE)
-            
-                # Post-process outputs to get bounding boxes and scores
-                boxes, scores = model.post_process(cls_output, reg_output, anchors)
+            # Calculate detection metrics
+            for i, (pred_boxes, pred_scores, target) in enumerate(zip(boxes, scores, targets)):
+                gt_boxes = target["boxes"]
+                total_gt_boxes += len(gt_boxes)  # This will be 0 for negative samples
                 
-                # Calculate detection metrics
-                for i, (pred_boxes, pred_scores, target) in enumerate(zip(boxes, scores, targets)):
-                    gt_boxes = target["boxes"]
-                    total_gt_boxes += len(gt_boxes)
+                # For positive samples, compute IoU and count TP/FP
+                if len(gt_boxes) > 0 and len(pred_boxes) > 0:
+                    iou_matrix = compute_iou(pred_boxes, gt_boxes)
+                    max_iou_per_pred, _ = iou_matrix.max(dim=1)
                     
-                    # Store for calculating avg IOU
-                    if len(pred_boxes) > 0 and len(gt_boxes) > 0:
-                        iou_matrix = compute_iou(pred_boxes, gt_boxes)
-                        max_iou_per_pred, _ = iou_matrix.max(dim=1)
+                    # Add IoU scores to list
+                    for iou in max_iou_per_pred:
+                        iou_scores.append(iou.item())
                         
-                        # Add IoU scores to list
-                        for iou in max_iou_per_pred:
-                            iou_scores.append(iou.item())
-                            
-                        # Count true and false positives
-                        for j, score in enumerate(pred_scores):
-                            if score > CONFIDENCE_THRESHOLD:  # Changed from CONF_THRESHOLD to CONFIDENCE_THRESHOLD
-                                if max_iou_per_pred[j] > IOU_THRESHOLD:  # IoU threshold
-                                    true_positives += 1
-                                else:
-                                    false_positives += 1
-                    elif len(pred_boxes) > 0:
-                        # All predictions are false positives if there are no gt boxes
-                        false_positives += len(pred_scores[pred_scores > CONFIDENCE_THRESHOLD])  # Changed from CONF_THRESHOLD to CONFIDENCE_THRESHOLD
-            except Exception as e:
-                print(f"Warning: Error during post-processing: {str(e)}")
-                continue  # Skip this batch on error
+                    # Count true and false positives
+                    for j, score in enumerate(pred_scores):
+                        if score > CONFIDENCE_THRESHOLD:
+                            if max_iou_per_pred[j] > IOU_THRESHOLD:
+                                true_positives += 1
+                            else:
+                                false_positives += 1
+                else:
+                    # For negative samples or no predictions, any prediction above threshold is a false positive
+                    false_positives += len(pred_scores[pred_scores > CONFIDENCE_THRESHOLD])
+                    
+                # Store predictions for later analysis
+                all_pred_boxes.extend(pred_boxes)
+                all_pred_scores.extend(pred_scores)
+                if len(gt_boxes) > 0:
+                    all_gt_boxes.extend(gt_boxes)
 
     # Calculate average metrics
-    avg_val_loss = val_loss / (val_steps if val_steps > 0 else 1)
-    avg_cls_loss = cls_loss_total / (val_steps if val_steps > 0 else 1)
-    avg_reg_loss = reg_loss_total / (val_steps if val_steps > 0 else 1)
+    avg_val_loss = val_loss / val_steps
+    avg_cls_loss = cls_loss_total / val_steps
+    avg_reg_loss = reg_loss_total / val_steps
     
-    # Compute average number of predictions per image
-    pred_counts = [len(boxes) for boxes in all_pred_boxes]
-    avg_pred_count = sum(pred_counts) / len(pred_counts) if pred_counts else 0
-    
-    # Calculate confidence scores
-    try:
-        if all_pred_scores and any(len(scores) > 0 for scores in all_pred_scores):
-            all_scores = torch.cat([scores for scores in all_pred_scores if len(scores) > 0], dim=0).cpu().numpy()
-            avg_confidence = all_scores.mean() if len(all_scores) > 0 else 0
-        else:
-            avg_confidence = 0
-    except Exception:
-        avg_confidence = 0
-    
-    # Calculate mean IoU
+    # Calculate mean IoU only if we have any valid IoU scores
     mean_iou = sum(iou_scores) / len(iou_scores) if iou_scores else 0
     
     # Compute precision, recall, and F1 score
@@ -359,13 +311,23 @@ def validate_epoch(model, val_loader, criterion, epoch):
     else:
         f1_score = 0
     
+    # Calculate average predictions per image
+    pred_counts = [len(boxes) for boxes in all_pred_boxes]
+    avg_pred_count = sum(pred_counts) / len(pred_counts) if pred_counts else 0
+    
+    # Calculate mean confidence score
+    if all_pred_scores:
+        mean_confidence = sum(s.item() for s in all_pred_scores) / len(all_pred_scores)
+    else:
+        mean_confidence = 0
+        
     # Return all metrics
     metrics = {
         'total_loss': avg_val_loss,
         'cls_loss': avg_cls_loss,
         'reg_loss': avg_reg_loss,
         'mean_pred_count': avg_pred_count,
-        'mean_confidence': avg_confidence,
+        'mean_confidence': mean_confidence,
         'mean_iou': mean_iou,
         'precision': precision,
         'recall': recall,

@@ -369,15 +369,17 @@ class CocoDogsDataset(Dataset):
                     y2 = min(y + h, img_info["height"]) 
                     dog_boxes.append([x1, y1, x2, y2, 0])  # 0 is the class index for dog
             
-            # Only keep images with valid annotations
+            # Only keep images with valid annotations or person-only images
+            # We want to keep person-only images as negative samples
             if split_name == "train2017" or split_name == "val2017":
                 self.img_ids.append(img_id)
-                self.annotations[img_id] = dog_boxes
+                self.annotations[img_id] = dog_boxes  # This will be empty for person-only images
                 self.img_info[img_id] = {
                     "file_name": img_info["file_name"],
                     "height": img_info["height"],
                     "width": img_info["width"],
-                    "split": split_name  # Track the original split
+                    "split": split_name,  # Track the original split
+                    "has_dogs": len(dog_boxes) > 0  # Track if image contains dogs
                 }
     
     def _verify_images(self):
@@ -417,6 +419,7 @@ class CocoDogsDataset(Dataset):
         
         try:
             img = Image.open(image_path).convert("RGB")
+            orig_width, orig_height = img.size
         except (FileNotFoundError, IOError) as e:
             print(f"Error loading image {image_path}, skipping...")
             
@@ -426,28 +429,46 @@ class CocoDogsDataset(Dataset):
             else:
                 # Create a dummy image if no other images are available
                 img = Image.new('RGB', (100, 100), color=(73, 109, 137))
+                orig_width, orig_height = 100, 100
         
         # Process annotations
         boxes = self.annotations.get(img_id, [])
         
-        # Convert to tensors
+        # Apply transformations to image first
+        if self.transform:
+            img = self.transform(img)
+        
+        # Convert boxes to tensors and scale to target size
         if boxes:
             boxes_tensor = torch.tensor([box[:4] for box in boxes], dtype=torch.float32)
             labels_tensor = torch.tensor([box[4] + 1 for box in boxes], dtype=torch.int64)  # +1 because 0 is background
+            
+            # Scale boxes to match the target image size (512x512)
+            # Note: IMAGE_SIZE is now expected to be a tuple of (width, height)
+            scale_x = IMAGE_SIZE[0] / orig_width
+            scale_y = IMAGE_SIZE[1] / orig_height
+            
+            # Scale the coordinates - keep in absolute pixel coordinates
+            boxes_tensor[:, [0, 2]] *= scale_x  # Scale x coordinates
+            boxes_tensor[:, [1, 3]] *= scale_y  # Scale y coordinates
+            
+            # Clamp to ensure boxes stay within image bounds
+            boxes_tensor[:, [0, 2]] = boxes_tensor[:, [0, 2]].clamp(0, IMAGE_SIZE[0])
+            boxes_tensor[:, [1, 3]] = boxes_tensor[:, [1, 3]].clamp(0, IMAGE_SIZE[1])
+            
+            # Ensure x2 > x1 and y2 > y1
+            boxes_tensor[:, 2] = torch.max(boxes_tensor[:, 2], boxes_tensor[:, 0] + 1.0)
+            boxes_tensor[:, 3] = torch.max(boxes_tensor[:, 3], boxes_tensor[:, 1] + 1.0)
         else:
             boxes_tensor = torch.zeros((0, 4), dtype=torch.float32)
             labels_tensor = torch.zeros((0,), dtype=torch.int64)
-            
-        # Apply transformations
-        if self.transform:
-            img = self.transform(img)
             
         # Create target dictionary
         target = {
             "boxes": boxes_tensor,
             "labels": labels_tensor,
             "image_id": torch.tensor([img_id]),
-            "orig_size": (img_info["height"], img_info["width"])
+            "orig_size": (orig_height, orig_width)
         }
         
         return img, target

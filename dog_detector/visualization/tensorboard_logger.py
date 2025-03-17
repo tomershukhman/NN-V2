@@ -126,19 +126,44 @@ class VisualizationLogger:
         # Add step/epoch to metrics
         metrics_dict['step'] = step
         
-        # Open file if not already open
-        if self.csv_file is None:
-            is_new_file = not os.path.exists(self.csv_path)
-            self.csv_file = open(self.csv_path, 'a', newline='')
-            self.csv_writer = csv.DictWriter(self.csv_file, fieldnames=['step'] + sorted(list(set(metrics_dict.keys()) - {'step'})))
-            
-            # Write header if it's a new file
-            if is_new_file:
-                self.csv_writer.writeheader()
+        # Read existing rows and get all column names if file exists
+        existing_rows = []
+        all_columns = {'step'} | set(metrics_dict.keys())
         
-        # Write row
-        self.csv_writer.writerow(metrics_dict)
-        self.csv_file.flush()
+        if os.path.exists(self.csv_path):
+            try:
+                with open(self.csv_path, 'r', newline='') as f:
+                    reader = csv.DictReader(f)
+                    all_columns |= set(reader.fieldnames or [])
+                    existing_rows = list(reader)
+            except Exception:
+                # If there's any error reading the file, we'll start fresh
+                pass
+        
+        # Write to temporary file
+        temp_path = self.csv_path + '.tmp'
+        with open(temp_path, 'w', newline='') as f:
+            writer = csv.DictWriter(f, fieldnames=sorted(list(all_columns)))
+            writer.writeheader()
+            
+            # Write existing rows
+            for row in existing_rows:
+                writer.writerow(row)
+            
+            # Write new row
+            writer.writerow(metrics_dict)
+        
+        # Atomic replace
+        os.replace(temp_path, self.csv_path)
+        
+        # Close existing file handle if open
+        if self.csv_file:
+            try:
+                self.csv_file.close()
+            except Exception:
+                pass
+            self.csv_file = None
+            self.csv_writer = None
         
     def display_metrics_summary(self, train_metrics, val_metrics, epoch, epoch_time=None):
         """Display a formatted summary of key metrics at the end of each train/val cycle

@@ -21,18 +21,20 @@ class DogDetector(nn.Module):
         self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(256)
         # Output heads:
-        self.num_anchors = len(ANCHOR_SCALES) * \
-            len(ANCHOR_RATIOS)
+        self.num_anchors = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
         # Classification: (num_classes + 1) channels per anchor (background + classes)
-        self.cls_head = nn.Conv2d(
-            256, (num_classes + 1) * self.num_anchors, kernel_size=3, padding=1)
+        self.cls_head = nn.Conv2d(256, (num_classes + 1) * self.num_anchors, kernel_size=3, padding=1)
         # Regression: 4 values per anchor
-        self.reg_head = nn.Conv2d(
-            256, 4 * self.num_anchors, kernel_size=3, padding=1)
+        self.reg_head = nn.Conv2d(256, 4 * self.num_anchors, kernel_size=3, padding=1)
         self.anchor_scales = ANCHOR_SCALES
-        self.anchor_ratios =ANCHOR_RATIOS
+        self.anchor_ratios = ANCHOR_RATIOS
         # Store the input image size for proper coordinate mapping
-        self.input_size = IMAGE_SIZE  # (width, height)
+        if isinstance(IMAGE_SIZE, (list, tuple)):
+            self.input_size = (IMAGE_SIZE[0], IMAGE_SIZE[1])  # width, height
+        else:
+            self.input_size = (IMAGE_SIZE, IMAGE_SIZE)  # square image
+        self._anchors = None
+        self._feature_map_size = None
 
     def forward(self, x):
         features = self.backbone(x)
@@ -41,22 +43,25 @@ class DogDetector(nn.Module):
 
         # Get current feature map size
         batch_size, _, feat_h, feat_w = x.shape
+        
+        # Generate anchors if feature map size changed
+        if self._feature_map_size != (feat_h, feat_w):
+            self._feature_map_size = (feat_h, feat_w)
+            self._anchors = self.generate_anchors((feat_h, feat_w), x.device)
 
         # Classification head: [B, (num_classes+1)*num_anchors, H, W]
         cls_output = self.cls_head(x)
         # Reshape to [B, num_classes+1, num_anchors, H, W]
-        cls_output = cls_output.reshape(
-            batch_size, self.num_anchors, -1, feat_h, feat_w)
+        cls_output = cls_output.reshape(batch_size, self.num_anchors, -1, feat_h, feat_w)
         cls_output = cls_output.permute(0, 2, 1, 3, 4).contiguous()
 
         # Regression head: [B, 4*num_anchors, H, W]
         reg_output = self.reg_head(x)
         # Reshape to [B, 4, num_anchors, H, W]
-        reg_output = reg_output.reshape(
-            batch_size, self.num_anchors, 4, feat_h, feat_w)
+        reg_output = reg_output.reshape(batch_size, self.num_anchors, 4, feat_h, feat_w)
         reg_output = reg_output.permute(0, 2, 1, 3, 4).contiguous()
 
-        return cls_output, reg_output
+        return cls_output, reg_output, self._anchors
 
     def generate_anchors(self, feature_map_size, device):
         """
@@ -64,43 +69,91 @@ class DogDetector(nn.Module):
         Maps feature map coordinates to the original image space.
         """
         fm_height, fm_width = feature_map_size
-
+        
         # Calculate stride based on input image size and feature map size
         stride_x = self.input_size[0] / fm_width
         stride_y = self.input_size[1] / fm_height
-
-        # Generate grid centers in image coordinates
-        shifts_x = torch.arange(
-            0, fm_width, device=device, dtype=torch.float32) * stride_x + stride_x / 2
-        shifts_y = torch.arange(
-            0, fm_height, device=device, dtype=torch.float32) * stride_y + stride_y / 2
+        
+        # Debug original stride calculation
+        print(f"Input size: {self.input_size}, Feature map: {feature_map_size}, Stride: ({stride_x}, {stride_y})")
+        
+        # Generate grid centers properly scaled to image coordinates
+        shifts_x = torch.arange(0, fm_width, device=device, dtype=torch.float32) * stride_x + stride_x / 2
+        shifts_y = torch.arange(0, fm_height, device=device, dtype=torch.float32) * stride_y + stride_y / 2
         shift_y, shift_x = torch.meshgrid(shifts_y, shifts_x, indexing="ij")
         shift_x = shift_x.reshape(-1)
         shift_y = shift_y.reshape(-1)
-        centers = torch.stack((shift_x, shift_y, shift_x, shift_y), dim=1)
-
-        # Generate different scale and aspect ratio anchors
+        centers = torch.stack((shift_x, shift_y), dim=1)
+        
+        # Generate anchors with absolute pixel values 
         anchors = []
         for scale in self.anchor_scales:
             for ratio in self.anchor_ratios:
-                w = float(scale) * np.sqrt(1.0 / ratio)  # Ensure float32
-                h = float(scale) * np.sqrt(ratio)        # Ensure float32
-                anchor = torch.tensor(
-                    [-w/2, -h/2, w/2, h/2], device=device, dtype=torch.float32)
-                anchors.append(anchor)
+                # Calculate width and height in pixels
+                h = scale  # Base height is the scale
+                w = scale * ratio  # Width is scale * ratio
+                
+                # Create anchors for this scale and ratio
+                anchors.append(torch.tensor([
+                    -w/2, -h/2, w/2, h/2
+                ], device=device, dtype=torch.float32))
+        
+        # Stack all base anchors
+        base_anchors = torch.stack(anchors, dim=0)
+        
+        # Debug anchors sizes
+        print(f"Generated {len(base_anchors)} unique anchor shapes:")
+        for i, anchor in enumerate(base_anchors):
+            w = anchor[2] - anchor[0]
+            h = anchor[3] - anchor[1]
+            print(f"  Anchor {i}: size = ({w.item():.1f}, {h.item():.1f})")
+        
+        # Add anchors at each grid cell by broadcasting
+        num_anchors = base_anchors.size(0)
+        num_centers = centers.size(0)
+        
+        # Reshape for broadcasting
+        # centers: [num_centers, 2] -> [num_centers, 1, 2] -> broadcast to [num_centers, num_anchors, 2]
+        # base_anchors: [num_anchors, 4] -> [1, num_anchors, 4] -> broadcast to [num_centers, num_anchors, 4]
+        expanded_centers = centers.unsqueeze(1).expand(num_centers, num_anchors, 2)
+        expanded_anchors = base_anchors.unsqueeze(0).expand(num_centers, num_anchors, 4)
+        
+        # Apply centers to anchors
+        all_anchors = torch.zeros((num_centers, num_anchors, 4), device=device)
+        all_anchors[..., 0] = expanded_centers[..., 0] + expanded_anchors[..., 0]  # x1 = center_x + (-w/2)
+        all_anchors[..., 1] = expanded_centers[..., 1] + expanded_anchors[..., 1]  # y1 = center_y + (-h/2)
+        all_anchors[..., 2] = expanded_centers[..., 0] + expanded_anchors[..., 2]  # x2 = center_x + (w/2)
+        all_anchors[..., 3] = expanded_centers[..., 1] + expanded_anchors[..., 3]  # y2 = center_y + (h/2)
+        
+        # Reshape to [num_centers * num_anchors, 4]
+        all_anchors = all_anchors.view(-1, 4)
 
-        anchors = torch.stack(anchors, dim=0)
-        # Add anchors at each grid cell
-        anchors = anchors[None, :, :] + centers[:, None, :]
-        anchors = anchors.reshape(-1, 4)
+        # Double-check that all anchors have x1<x2 and y1<y2
+        invalid_anchors = (all_anchors[:, 0] >= all_anchors[:, 2]) | (all_anchors[:, 1] >= all_anchors[:, 3])
+        if invalid_anchors.any():
+            print(f"WARNING: {invalid_anchors.sum().item()} invalid anchors detected!")
+            print("Sample invalid anchors:")
+            for i in range(min(5, invalid_anchors.sum().item())):
+                idx = torch.where(invalid_anchors)[0][i]
+                print(f"  Invalid anchor {idx}: {all_anchors[idx].tolist()}")
+
+        # Debug a sample of final anchors
+        print(f"Total anchors: {len(all_anchors)}, sample (first 3):")
+        for i in range(min(3, len(all_anchors))):
+            x1, y1, x2, y2 = all_anchors[i].tolist()
+            w = x2 - x1
+            h = y2 - y1
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
+            print(f"  Anchor at ({cx:.1f}, {cy:.1f}), size = ({w:.1f}, {h:.1f})")
 
         # Clip anchors to stay within image bounds
-        anchors[:, 0].clamp_(min=0, max=self.input_size[0])
-        anchors[:, 1].clamp_(min=0, max=self.input_size[1])
-        anchors[:, 2].clamp_(min=0, max=self.input_size[0])
-        anchors[:, 3].clamp_(min=0, max=self.input_size[1])
+        all_anchors[:, 0].clamp_(min=0, max=self.input_size[0])
+        all_anchors[:, 1].clamp_(min=0, max=self.input_size[1])
+        all_anchors[:, 2].clamp_(min=0, max=self.input_size[0])
+        all_anchors[:, 3].clamp_(min=0, max=self.input_size[1])
 
-        return anchors
+        return all_anchors
 
     @property
     def stride(self):
@@ -172,14 +225,18 @@ class DogDetector(nn.Module):
         anchor_cx = (anchor_x1 + anchor_x2) / 2
         anchor_cy = (anchor_y1 + anchor_y2) / 2
 
-        # Extract regression values
-        tx, ty, tw, th = reg_output.unbind(1)
+        # Extract regression values and apply sigmoid to constrain offsets
+        tx = torch.sigmoid(reg_output[:, 0]) * 2 - 1  # [-1, 1]
+        ty = torch.sigmoid(reg_output[:, 1]) * 2 - 1  # [-1, 1]
+        tw = reg_output[:, 2]
+        th = reg_output[:, 3]
 
-        # Apply transformations
-        cx = tx * anchor_w + anchor_cx
-        cy = ty * anchor_h + anchor_cy
-        w = torch.exp(tw) * anchor_w
-        h = torch.exp(th) * anchor_h
+        # Apply transformations with scale factor for better stability
+        scale = 4.0  # Scale factor for offsets
+        cx = anchor_cx + tx * anchor_w / scale
+        cy = anchor_cy + ty * anchor_h / scale
+        w = torch.exp(torch.clamp(tw, -4, 4)) * anchor_w  # Clamp to prevent extreme scaling
+        h = torch.exp(torch.clamp(th, -4, 4)) * anchor_h
 
         # Convert back to x1,y1,x2,y2 format
         x1 = cx - w/2
@@ -187,7 +244,23 @@ class DogDetector(nn.Module):
         x2 = cx + w/2
         y2 = cy + h/2
 
-        return torch.stack([x1, y1, x2, y2], dim=1)
+        # Stack and ensure valid boxes
+        boxes = torch.stack([
+            x1.clamp(min=0, max=self.input_size[0]),
+            y1.clamp(min=0, max=self.input_size[1]),
+            x2.clamp(min=0, max=self.input_size[0]),
+            y2.clamp(min=0, max=self.input_size[1])
+        ], dim=1)
+        
+        # Ensure x2 > x1 and y2 > y1
+        boxes = torch.stack([
+            boxes[:, 0],
+            boxes[:, 1],
+            torch.max(boxes[:, 2], boxes[:, 0] + 1),  # Ensure x2 > x1
+            torch.max(boxes[:, 3], boxes[:, 1] + 1)   # Ensure y2 > y1
+        ], dim=1)
+
+        return boxes
 
 
 def get_model(device):
