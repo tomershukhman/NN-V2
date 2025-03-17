@@ -116,7 +116,8 @@ def download_file_torch(url, dest_path, max_retries=3):
     
     for attempt in range(max_retries):
         try:
-            torch.hub.download_url_to_file(url, dest_path)
+            # Use hub.download_url_to_file with progress=False to disable progress bar
+            torch.hub.download_url_to_file(url, dest_path, progress=False)
             if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
                 try:
                     # Verify the downloaded image
@@ -208,18 +209,22 @@ def download_coco_dataset(data_root):
     val_tasks = [(val_coco.loadImgs(img_id)[0], val_dir, False) for img_id in val_img_ids]
     all_tasks = train_tasks + val_tasks
 
-    # Use ThreadPoolExecutor for parallel downloads with progress bar
+    # Use ThreadPoolExecutor for parallel downloads without progress bar
     max_workers = min(32, len(all_tasks))
     print(f"Starting parallel download with {max_workers} workers...")
+    completed = 0
+    total = len(all_tasks)
 
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [executor.submit(download_single_image, task) for task in all_tasks]
-        with tqdm(total=len(futures), desc="Downloading images") as pbar:
-            for future in as_completed(futures):
-                result = future.result()
-                if "Failed" in result:
-                    print(f"\n{result}")
-                pbar.update(1)
+        for future in as_completed(futures):
+            result = future.result()
+            completed += 1
+            if "Failed" in result:
+                print(f"\n{result}")
+            if completed % 100 == 0:  # Print status every 100 downloads
+                print(f"\rCompleted {completed}/{total} downloads", end="", flush=True)
+    print("\nAll download tasks completed.")
 
     # Verify all images were downloaded successfully
     def verify_downloads(img_ids, coco, target_dir):

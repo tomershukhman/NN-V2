@@ -178,10 +178,12 @@ class CocoDogsDataset(Dataset):
               f"{len(dog_subset)} dog images and {len(person_subset)} person-only images")
             
     def _get_verified_images(self, coco, split_name, category_id):
-        """Get set of image IDs for a category that exist on disk with parallel downloads"""
+        """Get set of image IDs for a category that exist on disk with memory-efficient parallel downloads"""
         from dog_detector.utils import download_file_torch
         from concurrent.futures import ThreadPoolExecutor, as_completed
-        
+        import gc
+        import psutil
+
         # First get all image IDs for this category
         img_ids = coco.getImgIds(catIds=[category_id])
         total_count = len(img_ids)
@@ -207,27 +209,59 @@ class CocoDogsDataset(Dataset):
             # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(download_tasks[0][1]), exist_ok=True)
             
-            # Use ThreadPoolExecutor for parallel downloads
-            max_workers = min(32, len(download_tasks))  # Limit max workers
-            print(f"Downloading {len(download_tasks)} missing images in parallel with {max_workers} workers...")
+            # Dynamic batch size based on available memory
+            available_memory = psutil.virtual_memory().available
+            target_memory_per_batch = 2 * 1024 * 1024 * 1024  # 2GB
+            batch_size = min(30, max(10, int(available_memory / target_memory_per_batch)))
             
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_task = {
-                    executor.submit(download_file_torch, url, path): (img_id, path)
-                    for url, path, img_id in download_tasks
-                }
+            # Use more workers based on CPU cores
+            cpu_count = psutil.cpu_count(logical=True)
+            max_workers = min(cpu_count - 1, 8)
+            
+            print(f"Downloading {len(download_tasks)} missing images in batches of {batch_size} using {max_workers} workers")
+            
+            for i in range(0, len(download_tasks), batch_size):
+                batch = download_tasks[i:i + batch_size]
+                batch_num = i//batch_size + 1
+                total_batches = (len(download_tasks) + batch_size - 1)//batch_size
+                print(f"\rProcessing batch {batch_num}/{total_batches}", end="", flush=True)
                 
-                for future in as_completed(future_to_task):
-                    img_id, path = future_to_task[future]
-                    try:
-                        if future.result():
-                            verified_imgs.add(img_id)
-                        else:
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for url, path, img_id in batch:
+                        future = executor.submit(download_file_torch, url, path)
+                        futures.append((future, img_id, path))
+                    
+                    # Process completed downloads without progress bar
+                    for future, img_id, path in futures:
+                        try:
+                            if future.result():
+                                verified_imgs.add(img_id)
+                            else:
+                                missing_count += 1
+                                print(f"\nFailed to download {path}")
+                        except Exception as e:
                             missing_count += 1
-                            print(f"Failed to download {path}")
-                    except Exception as e:
-                        missing_count += 1
-                        print(f"Failed to download {path}: {e}")
+                            print(f"\nFailed to download {path}: {e}")
+                
+                # Force garbage collection after each batch
+                gc.collect()
+                
+                # Check memory usage and adjust batch size if needed
+                current_memory = psutil.virtual_memory()
+                if current_memory.percent > 85:
+                    batch_size = max(5, batch_size // 2)
+                    print(f"\nHigh memory usage detected ({current_memory.percent}%), reducing batch size to {batch_size}")
+                elif current_memory.percent < 60 and batch_size < 30:
+                    batch_size = min(30, batch_size + 5)
+                    print(f"\nLow memory usage ({current_memory.percent}%), increasing batch size to {batch_size}")
+                
+                # Add a short delay between batches if memory usage is high
+                if current_memory.percent > 75:
+                    import time
+                    time.sleep(0.5)
+        
+        print("\nDownload complete!")
         
         if missing_count > 0:
             print(f"{split_name} - {coco.loadCats([category_id])[0]['name']}: {missing_count} images failed to download")
