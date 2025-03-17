@@ -89,7 +89,7 @@ def train(data_root=None, download=True, batch_size=None):
         train_metrics = train_epoch(model, train_loader, criterion, optimizer, epoch)
         
         # Validate with detailed metrics
-        val_metrics = validate_epoch(model, val_loader, criterion, epoch)
+        val_metrics = validate_epoch(model, val_loader, criterion, epoch, vis_logger, log_images=True)
         
         # Calculate epoch duration
         epoch_duration = time.time() - epoch_start_time
