@@ -10,7 +10,7 @@ import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 
 from dog_detector.model import DogDetector
-from dog_detector.visualization import visualize_predictions
+from dog_detector.visualization.image_utils import visualize_predictions
 from dog_detector.config import config
 
 

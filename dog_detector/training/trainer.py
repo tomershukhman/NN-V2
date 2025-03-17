@@ -8,9 +8,7 @@ from config import (
 from dog_detector.data import get_data_loaders, CocoDogsDataset
 from dog_detector.model.model import get_model
 from dog_detector.model.losses import DetectionLoss
-from dog_detector.visualization.visualization import VisualizationLogger
-
-
+from dog_detector.visualization.tensorboard_logger import VisualizationLogger
 
 def train(data_root=None, download=True, batch_size=None):
     """Train the dog detection model"""

@@ -1,8 +1,10 @@
-#dog_detector/visualization.py
+"""
+Image visualization utilities for detection results and groundtruth annotations.
+"""
 import matplotlib.pyplot as plt
 import torch
-from dog_detector.config import config
-
+import numpy as np
+import config
 
 def visualize_predictions(image, target, boxes_list, scores_list):
     """
@@ -15,8 +17,6 @@ def visualize_predictions(image, target, boxes_list, scores_list):
     Returns:
         matplotlib.figure.Figure: The created figure with visualizations
     """
-    import matplotlib.pyplot as plt
-    
     # Convert and denormalize the image
     img_tensor = image.cpu().clone()
     # Ensure image is in [C, H, W] format

@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 from tqdm import tqdm  # progress bar
 from dog_detector.config import config
 from dog_detector.utils import assign_anchors_to_image, compute_iou
-from dog_detector.visualization import visualize_predictions
+from dog_detector.visualization.image_utils import visualize_predictions
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
     model.train()
