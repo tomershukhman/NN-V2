@@ -51,8 +51,8 @@ DOG_CATEGORY_ID = 18
 MEAN = [0.485, 0.456, 0.406]  # ImageNet normalization
 STD = [0.229, 0.224, 0.225]
 
-# Model architecture settings - Better anchor scales based on dataset analysis
-# GT box sizes range from ~5px to ~400px, with median around 86px
-ANCHOR_SCALES = [16, 32, 64, 128, 256]  # Better distribution across observed sizes
-ANCHOR_RATIOS = [0.3, 0.7, 1.0, 1.5]    # Better coverage of observed aspect ratios
+# Model architecture settings - Updated based on dataset analysis
+# GT box sizes range from ~5px to ~506px, with median around 85-106px
+ANCHOR_SCALES = [32, 64, 128, 256, 512]  # Increased scales to better match GT size range
+ANCHOR_RATIOS = [0.25, 0.5, 0.75, 1.0, 1.5]  # Better coverage of observed aspect ratios (0.264 to 1.674)
 BACKBONE_FROZEN_LAYERS = 2
