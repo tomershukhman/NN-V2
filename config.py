@@ -6,9 +6,10 @@ DATA_ROOT = 'data'
 OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
 
 # Dataset parameters
-DOG_USAGE_RATIO = 0.05  # Use 10% of total available dog images
+DOG_USAGE_RATIO = 0.25  # Use 10% of total available dog images
 TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
 COCO_DOG_CATEGORY_ID = 18
+VISUALZIE_TOP_K = 5
 
 # Training parameters
 BATCH_SIZE = 16

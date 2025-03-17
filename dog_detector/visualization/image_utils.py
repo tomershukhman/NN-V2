@@ -4,9 +4,9 @@ Image visualization utilities for detection results and groundtruth annotations.
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
-from config import MEAN, STD, CONFIDENCE_THRESHOLD
+from config import MEAN, STD, CONFIDENCE_THRESHOLD, VISUALZIE_TOP_K
 
-def visualize_predictions(image, target, boxes_list, scores_list, max_boxes=10):
+def visualize_predictions(image, target, boxes_list, scores_list, max_boxes=VISUALZIE_TOP_K):
     """
     Creates a visualization of ground truth boxes and predictions on a single image.
     
