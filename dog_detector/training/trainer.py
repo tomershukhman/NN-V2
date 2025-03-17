@@ -6,7 +6,7 @@ from datetime import datetime
 from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS, OUTPUT_ROOT,
     WEIGHT_DECAY, DATA_ROOT, DOG_USAGE_RATIO, TRAIN_VAL_SPLIT,
-    CONFIDENCE_THRESHOLD, IOU_THRESHOLD
+    CONFIDENCE_THRESHOLD, IOU_THRESHOLD, REG_LOSS_WEIGHT
 )
 from dog_detector.data import get_data_loaders, CocoDogsDataset
 from dog_detector.model.model import get_model
@@ -98,7 +98,7 @@ def train(data_root=None, download=True, batch_size=None):
 
         # Validate with detailed metrics
         val_metrics = validate_epoch(
-            model, val_loader, criterion, epoch, vis_logger, log_images=True)
+            model, val_loader, criterion, epoch, vis_logger, log_images=(epoch % 5 == 0))
 
         # Calculate epoch duration
         epoch_duration = time.time() - epoch_start_time
@@ -115,21 +115,24 @@ def train(data_root=None, download=True, batch_size=None):
         # Will log to both tensorboard and CSV
         vis_logger.log_metrics(val_metrics, epoch, 'val')
 
-        # Save best model (by validation loss)
+        # Save best model (by validation loss) and generate visualization images
         if val_metrics['total_loss'] < best_val_loss:
             best_val_loss = val_metrics['total_loss']
+            model_path = os.path.join(OUTPUT_ROOT, 'checkpoints', 'best_model_loss.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'val_loss': val_metrics['total_loss'],
-            }, os.path.join(OUTPUT_ROOT, 'checkpoints', 'best_model_loss.pth'))
-            print(
-                f'✨ New best model saved (val_loss: {val_metrics["total_loss"]:.4f})')
+            }, model_path)
+            # Generate and log visualization images with the best model
+            vis_logger.log_best_model_images(model, val_loader, DEVICE, epoch, name="best_loss_model")
+            print(f'✨ New best model saved (val_loss: {val_metrics["total_loss"]:.4f})')
 
-        # Also save best model by F1 score
+        # Also save best model by F1 score and generate visualization images
         if val_metrics.get('f1_score', 0) > best_f1_score:
             best_f1_score = val_metrics.get('f1_score', 0)
+            model_path = os.path.join(OUTPUT_ROOT, 'checkpoints', 'best_model_f1.pth')
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
@@ -137,7 +140,9 @@ def train(data_root=None, download=True, batch_size=None):
                 'f1_score': best_f1_score,
                 'precision': val_metrics.get('precision', 0),
                 'recall': val_metrics.get('recall', 0),
-            }, os.path.join(OUTPUT_ROOT, 'checkpoints', 'best_model_f1.pth'))
+            }, model_path)
+            # Generate and log visualization images with the best F1 model
+            vis_logger.log_best_model_images(model, val_loader, DEVICE, epoch, name="best_f1_model")
             print(f'✨ New best model saved (F1 score: {best_f1_score:.4f})')
 
         # Save checkpoint every 10 epochs
@@ -252,7 +257,7 @@ def validate_epoch(model, val_loader, criterion, epoch, vis_logger, log_images=F
     val_bar = tqdm(val_loader, desc=f'Epoch {epoch+1}/{NUM_EPOCHS} [Val]')
 
     with torch.no_grad():
-        for images, targets in val_bar:
+        for batch_idx, (images, targets) in enumerate(val_bar):
             # Prepare batch
             images = torch.stack([img.to(DEVICE) for img in images])
             targets = [{k: (v.to(DEVICE) if isinstance(v, torch.Tensor) else v)
@@ -272,10 +277,9 @@ def validate_epoch(model, val_loader, criterion, epoch, vis_logger, log_images=F
             # Post-process outputs to get bounding boxes and scores using the same anchors
             boxes, scores = model.post_process(cls_output, reg_output, anchors)
 
-            # Log validation images with predictions if requested
-            if log_images:
-                vis_logger.log_images(
-                    images, boxes, scores, epoch, prefix='val')
+            # Log validation images with predictions if requested - only log a few batches
+            if log_images and batch_idx < 3:
+                vis_logger.log_images(images, boxes, scores, epoch, prefix='val', targets=targets)
 
             # Calculate detection metrics
             for i, (pred_boxes, pred_scores, target) in enumerate(zip(boxes, scores, targets)):

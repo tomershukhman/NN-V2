@@ -8,6 +8,8 @@ import cv2
 from torch.utils.tensorboard import SummaryWriter
 import csv
 from datetime import datetime
+from dog_detector.visualization.image_utils import visualize_predictions
+import matplotlib.pyplot as plt
 
 class VisualizationLogger:
     def __init__(self, log_dir):
@@ -69,8 +71,8 @@ class VisualizationLogger:
         prefixed_metrics = {f'{prefix}_{name}': value for name, value in metrics.items()}
         self._log_to_csv(prefixed_metrics, step)
 
-    def log_images(self, images, boxes, scores, step, prefix='train'):
-        """Log images with detected boxes
+    def log_images(self, images, boxes, scores, step, prefix='train', targets=None):
+        """Log images with detected boxes using the better visualization function.
 
         Args:
             images (torch.Tensor): Batch of images
@@ -78,30 +80,58 @@ class VisualizationLogger:
             scores (list): List of confidence scores for each image
             step (int): Current training step
             prefix (str): Prefix for the image tags
+            targets (list, optional): List of target dictionaries with ground truth boxes
         """
-        for i, (image, image_boxes, image_scores) in enumerate(zip(images, boxes, scores)):
-            # Convert image from tensor to numpy
-            img = image.cpu().numpy().transpose(1, 2, 0)
+        if targets is None:
+            # Create empty targets if none provided
+            targets = [{"boxes": torch.zeros((0, 4), device=images[0].device)} for _ in range(len(images))]
 
-            # Draw boxes on image
-            img_with_boxes = self._draw_boxes(img, image_boxes, image_scores)
+        for i, (image, image_boxes, image_scores, target) in enumerate(zip(images, boxes, scores, targets)):
+            # Use the visualize_predictions function to get properly colored boxes
+            fig = visualize_predictions(image, target, image_boxes, image_scores)
+            
+            # Log the figure to tensorboard
+            self.writer.add_figure(f'{prefix}/detection_{i}', fig, step)
+            
+            # Close figure to free memory
+            plt.close(fig)
 
-            # Log to tensorboard
-            self.writer.add_image(f'{prefix}/detection_{i}',
-                                  torch.from_numpy(
-                                      img_with_boxes).permute(2, 0, 1),
-                                  step)
-
-    def _draw_boxes(self, image, boxes, scores):
-        """Draw bounding boxes on image
-
+    def log_best_model_images(self, model, val_loader, device, step, name="best_model"):
+        """
+        Generate and log validation images with the current (best) model
+        
         Args:
-            image (numpy.ndarray): Image to draw on
-            boxes (torch.Tensor): Detected boxes
-            scores (torch.Tensor): Confidence scores
-
-        Returns:
-            numpy.ndarray: Image with drawn boxes
+            model (torch.nn.Module): The best model
+            val_loader (DataLoader): Validation data loader
+            device (torch.device): Device to run inference on
+            step (int): Current training step
+            name (str): Name suffix for the images
+        """
+        model.eval()
+        
+        # Get a batch of validation images
+        with torch.no_grad():
+            try:
+                images, targets = next(iter(val_loader))
+                images = torch.stack([img.to(device) for img in images])
+                targets = [{k: (v.to(device) if isinstance(v, torch.Tensor) else v)
+                          for k, v in t.items()} for t in targets]
+                
+                # Forward pass
+                cls_output, reg_output, anchors = model(images)
+                
+                # Post-process outputs
+                boxes, scores = model.post_process(cls_output, reg_output, anchors)
+                
+                # Log the images with properly colored boxes
+                self.log_images(images, boxes, scores, step, f"best_model/{name}", targets)
+                
+            except Exception as e:
+                print(f"Warning: Failed to log best model images: {e}")
+    
+    def _draw_boxes(self, image, boxes, scores):
+        """
+        Legacy method - Use log_images with visualize_predictions instead
         """
         image = (image * 255).astype(np.uint8).copy()
 
