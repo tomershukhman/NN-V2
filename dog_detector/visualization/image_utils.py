@@ -4,7 +4,7 @@ Image visualization utilities for detection results and groundtruth annotations.
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
-import config
+from config import MEAN, STD,CONFIDENCE_THRESHOLD
 
 def visualize_predictions(image, target, boxes_list, scores_list):
     """
@@ -24,7 +24,7 @@ def visualize_predictions(image, target, boxes_list, scores_list):
         img_tensor = img_tensor.squeeze(0)
     
     # Denormalize
-    for t, m, s in zip(img_tensor, config.MEAN, config.STD):
+    for t, m, s in zip(img_tensor, MEAN, STD):
         t.mul_(s).add_(m)
     img_tensor = img_tensor.mul(255).byte()
     
@@ -61,7 +61,7 @@ def visualize_predictions(image, target, boxes_list, scores_list):
     # Ensure we have valid boxes
     if len(boxes_np) > 0:
         for box, score in zip(boxes_np, scores_np):
-            if score > config.CONF_THRESHOLD:
+            if score > CONFIDENCE_THRESHOLD:
                 x1, y1, x2, y2 = box
                 # Color code based on confidence
                 if score > 0.8:

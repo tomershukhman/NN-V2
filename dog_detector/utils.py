@@ -13,6 +13,7 @@ from urllib3.util import Retry
 import socket
 import gc
 import psutil
+from config import DOG_USAGE_RATIO
 
 # Create a global connection pool with optimal settings
 http = urllib3.PoolManager(
@@ -206,7 +207,7 @@ def download_coco_dataset(data_root):
         person_only_imgs = person_imgs - dog_imgs
         
         # Use DOG_USAGE_RATIO instead of DATA_FRACTION
-        target_size = int(min(len(dog_imgs), len(person_only_imgs)) * config.DOG_USAGE_RATIO)
+        target_size = int(min(len(dog_imgs), len(person_only_imgs)) * DOG_USAGE_RATIO)
         dog_imgs = set(random.sample(list(dog_imgs), target_size))
         person_only_imgs = set(random.sample(list(person_only_imgs), target_size))
         

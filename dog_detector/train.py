@@ -3,9 +3,11 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 from tqdm import tqdm  # progress bar
-from dog_detector.config import config
 from dog_detector.utils import assign_anchors_to_image, compute_iou
 from dog_detector.visualization.image_utils import visualize_predictions
+from config import (
+    REG_LOSS_WEIGHT, IMAGE_SIZE,NUM_VAL_IMAGES_TO_LOG,CONFIDENCE_THRESHOLD,IOU_THRESHOLD
+)
 
 def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
     model.train()
@@ -66,7 +68,7 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
             reg_loss = torch.tensor(0.0, device=device)
         
         # Calculate total loss with weighted regression component
-        loss = cls_loss + config.REG_LOSS_WEIGHT * reg_loss
+        loss = cls_loss + REG_LOSS_WEIGHT * reg_loss
         total_loss += loss.item()
         
         # Backward pass
@@ -139,7 +141,7 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
                 gt_boxes = target["boxes"].to(device)
                 # Scale ground truth boxes if needed (same as in training)
                 if gt_boxes.numel() > 0:
-                    img_height, img_width = config.IMAGE_SIZE[1], config.IMAGE_SIZE[0]
+                    img_height, img_width = IMAGE_SIZE[1], IMAGE_SIZE[0]
                     orig_height, orig_width = target.get("orig_size", (img_height, img_width))
                     
                     if orig_height != img_height or orig_width != img_width:
@@ -174,7 +176,7 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
             boxes_list, scores_list = model.post_process(cls_out, reg_out, anchors)
             
             for i in range(len(images)):
-                if log_images and images_logged < config.NUM_VAL_IMAGES_TO_LOG:
+                if log_images and images_logged < NUM_VAL_IMAGES_TO_LOG:
                     fig = visualize_predictions(images[i], targets[i], boxes_list[i], scores_list[i])
                     writer.add_figure(f"Validation/Image_{images_logged+1}", fig, epoch)
                     plt.close(fig)
@@ -192,7 +194,7 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
                 gt_boxes = targets[i]["boxes"].to(device)
                 if count > 0 and gt_boxes.numel() > 0:
                     # Scale ground truth boxes if needed (as above)
-                    img_height, img_width = config.IMAGE_SIZE[1], config.IMAGE_SIZE[0]
+                    img_height, img_width = IMAGE_SIZE[1], IMAGE_SIZE[0]
                     orig_height, orig_width = targets[i].get("orig_size", (img_height, img_width))
                     
                     if orig_height != img_height or orig_width != img_width:
@@ -216,15 +218,16 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
                 if len(pred_boxes) > 0 and len(gt_boxes) > 0:
                     iou_matrix = compute_iou(pred_boxes, gt_boxes)
                     for pred_idx in range(len(pred_boxes)):
-                        if pred_scores[pred_idx] > config.CONF_THRESHOLD:
+                        # Count true and false positives
+                        if pred_scores[pred_idx] > CONFIDENCE_THRESHOLD:
                             max_iou, _ = iou_matrix[pred_idx].max(dim=0)
-                            if max_iou >= config.IOU_THRESHOLD:
+                            if max_iou >= IOU_THRESHOLD:
                                 true_positives += 1
                             else:
                                 false_positives += 1
                 elif len(pred_boxes) > 0:
                     # All predictions are false positives if there are no ground truth boxes
-                    false_positives += len([s for s in pred_scores if s > config.CONF_THRESHOLD])
+                    false_positives += len([s for s in pred_scores if s > CONFIDENCE_THRESHOLD])
 
     # Calculate metrics
     mean_pred_count = sum(pred_counts) / len(pred_counts) if pred_counts else 0
@@ -239,7 +242,7 @@ def evaluate(model, dataloader, device, epoch, writer, log_images=False):
     dataset_size = len(dataloader.dataset)
     avg_cls_loss = total_cls_loss / dataset_size
     avg_reg_loss = total_reg_loss / dataset_size
-    total_loss = avg_cls_loss + config.REG_LOSS_WEIGHT * avg_reg_loss
+    total_loss = avg_cls_loss + REG_LOSS_WEIGHT * avg_reg_loss
     
     # Add loss metrics to tensorboard
     writer.add_scalar("Eval/Loss", total_loss, epoch)

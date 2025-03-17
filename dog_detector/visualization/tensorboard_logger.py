@@ -7,6 +7,7 @@ import numpy as np
 import cv2
 from torch.utils.tensorboard import SummaryWriter
 import csv
+from datetime import datetime
 
 class VisualizationLogger:
     def __init__(self, log_dir):
@@ -23,6 +24,9 @@ class VisualizationLogger:
         self.csv_file = None
         self.csv_writer = None
         self.header_written = False
+        
+        # Store metrics history
+        self.history = {}
 
     def log_loss(self, loss, step, prefix='train'):
         """Log loss values
@@ -36,6 +40,12 @@ class VisualizationLogger:
         
         # Also log to CSV
         self._log_to_csv({f'{prefix}_loss': loss}, step)
+        
+        # Store in history
+        key = f"{prefix}_loss"
+        if key not in self.history:
+            self.history[key] = []
+        self.history[key].append((step, loss))
 
     def log_metrics(self, metrics, step, prefix='train'):
         """Log evaluation metrics
@@ -48,6 +58,12 @@ class VisualizationLogger:
         # Log to TensorBoard
         for name, value in metrics.items():
             self.writer.add_scalar(f'{prefix}/{name}', value, step)
+            
+            # Store in history
+            key = f"{prefix}_{name}"
+            if key not in self.history:
+                self.history[key] = []
+            self.history[key].append((step, value))
         
         # Log to CSV with prefixed keys
         prefixed_metrics = {f'{prefix}_{name}': value for name, value in metrics.items()}
@@ -123,7 +139,85 @@ class VisualizationLogger:
         # Write row
         self.csv_writer.writerow(metrics_dict)
         self.csv_file.flush()
-
+        
+    def display_metrics_summary(self, train_metrics, val_metrics, epoch, epoch_time=None):
+        """Display a formatted summary of key metrics at the end of each train/val cycle
+        
+        Args:
+            train_metrics (dict): Dictionary of training metrics
+            val_metrics (dict): Dictionary of validation metrics
+            epoch (int): Current epoch number
+            epoch_time (float, optional): Time taken for the epoch in seconds
+        """
+        border_line = "=" * 80
+        print(f"\n{border_line}")
+        print(f"📊 MODEL PERFORMANCE SUMMARY - EPOCH {epoch+1} 📊")
+        print(border_line)
+        
+        if epoch_time is not None:
+            mins, secs = divmod(epoch_time, 60)
+            print(f"⏱️  Epoch duration: {int(mins)}m {int(secs)}s")
+            
+        # Create columns for train and validation
+        print("\n📈 LOSS METRICS:")
+        print(f"  {'Metric':<20} {'Training':<15} {'Validation':<15} {'Δ (Change)':<15}")
+        print("  " + "-" * 65)
+        
+        # Compare key metrics
+        for metric in ['total_loss', 'cls_loss', 'reg_loss']:
+            train_val = train_metrics.get(metric, 0)
+            val_val = val_metrics.get(metric, 0)
+            
+            diff = val_val - train_val
+            diff_str = f"{diff:+.4f}"
+            
+            # Add color indicators (using Unicode box-drawing chars)
+            if metric == 'total_loss' and diff < 0:
+                indicator = "✓"  # Good: validation loss lower than training (might be overfitting though)
+            elif metric == 'total_loss' and diff > 0:
+                indicator = "!"  # Warning: validation loss higher than training
+            else:
+                indicator = " "
+                
+            print(f"  {metric:<20} {train_val:<15.4f} {val_val:<15.4f} {diff_str:<15} {indicator}")
+        
+        # If we have more advanced metrics in validation
+        if any(k in val_metrics for k in ['precision', 'recall', 'f1_score', 'mean_iou']):
+            print("\n🎯 DETECTION METRICS:")
+            for metric in ['precision', 'recall', 'f1_score', 'mean_iou']:
+                if metric in val_metrics:
+                    val = val_metrics[metric]
+                    
+                    # Add symbols for important metrics based on thresholds
+                    symbol = ""
+                    if metric == 'precision' or metric == 'recall' or metric == 'f1_score':
+                        if val >= 0.9:
+                            symbol = "🔥"  # Excellent
+                        elif val >= 0.8:
+                            symbol = "✓"   # Good
+                        elif val >= 0.6:
+                            symbol = "⚠️"  # Moderate
+                        else:
+                            symbol = "⚠️"  # Needs improvement
+                            
+                    metric_name = metric.replace('_', ' ').title()
+                    print(f"  {metric_name:<20} {val:.4f}  {symbol}")
+                    
+        # Show statistics about predictions
+        if 'mean_pred_count' in val_metrics:
+            print("\n📏 MODEL STATISTICS:")
+            print(f"  - Average predictions per image: {val_metrics['mean_pred_count']:.2f}")
+            if 'mean_confidence' in val_metrics:
+                print(f"  - Average confidence score: {val_metrics['mean_confidence']:.4f}")
+            if 'true_positives' in val_metrics and 'false_positives' in val_metrics:
+                tp = val_metrics['true_positives']
+                fp = val_metrics['false_positives']
+                print(f"  - True positives: {tp}, False positives: {fp}")
+            
+        # Print current time
+        print(f"\n⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        print(border_line)
+        
     def close(self):
         """Close the tensorboard writer and CSV file"""
         self.writer.close()

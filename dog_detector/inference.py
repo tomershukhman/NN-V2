@@ -11,12 +11,14 @@ import matplotlib.pyplot as plt
 
 from dog_detector.model import DogDetector
 from dog_detector.visualization.image_utils import visualize_predictions
-from dog_detector.config import config
+from config import (
+    NUM_CLASSES, MEAN, STD, IMAGE_SIZE, CONFIDENCE_THRESHOLD, OUTPUT_DIR, DEVICE, IMAGE_EXTENSIONS
+)
 
 
 def load_model(checkpoint_path, device):
     """Load trained model from checkpoint."""
-    model = DogDetector(num_classes=config.NUM_CLASSES, pretrained=False)
+    model = DogDetector(num_classes=NUM_CLASSES, pretrained=False)
     model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.to(device)
     model.eval()
@@ -28,8 +30,8 @@ def process_image(img_path, transform=None):
     if transform is None:
         transform = transforms.Compose([
             transforms.ToTensor(),
-            transforms.Normalize(mean=config.MEAN, std=config.STD),
-            transforms.Resize(config.IMAGE_SIZE, antialias=True)
+            transforms.Normalize(mean=MEAN, std=STD),
+            transforms.Resize(IMAGE_SIZE, antialias=True)
         ])
     
     # Load image
@@ -44,7 +46,7 @@ def process_image(img_path, transform=None):
 
 def detect_dogs(model, img_tensor, device, conf_threshold=None):
     """Run inference on an image."""
-    conf_threshold = conf_threshold or config.CONF_THRESHOLD
+    conf_threshold = conf_threshold or CONFIDENCE_THRESHOLD
     
     # Add batch dimension
     img_tensor = img_tensor.unsqueeze(0).to(device)
@@ -69,7 +71,7 @@ def detect_dogs(model, img_tensor, device, conf_threshold=None):
 
 def main(args):
     # Set up device
-    device = config.DEVICE
+    device = DEVICE
     print(f"Using device: {device}")
     
     # Load model
@@ -117,7 +119,7 @@ def main(args):
         image_files = [
             f for f in os.listdir(args.image_dir)
             if os.path.isfile(os.path.join(args.image_dir, f)) and
-            os.path.splitext(f)[1].lower() in config.IMAGE_EXTENSIONS
+            os.path.splitext(f)[1].lower() in IMAGE_EXTENSIONS
         ]
         
         print(f"Found {len(image_files)} images in {args.image_dir}")
@@ -158,8 +160,8 @@ if __name__ == "__main__":
     group.add_argument("--image_path", type=str, help="Path to input image")
     group.add_argument("--image_dir", type=str, help="Directory containing images to process")
     parser.add_argument("--output_path", type=str, help="Path to save output image (used with --image_path)")
-    parser.add_argument("--output_dir", type=str, default=config.OUTPUT_DIR, help="Directory to save output images")
-    parser.add_argument("--conf_threshold", type=float, default=config.CONF_THRESHOLD, help="Confidence threshold")
+    parser.add_argument("--output_dir", type=str, default=OUTPUT_DIR, help="Directory to save output images")
+    parser.add_argument("--conf_threshold", type=float, default=CONFIDENCE_THRESHOLD, help="Confidence threshold")
     
     args = parser.parse_args()
     main(args)

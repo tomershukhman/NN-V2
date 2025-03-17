@@ -3,12 +3,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torchvision
-from dog_detector.config import config
 from torchvision.ops import nms
 from dog_detector.utils import compute_iou
+from config import (
+    PRETRAINED  , NUM_CLASSES,ANCHOR_SCALES,ANCHOR_RATIOS, IMAGE_SIZE,CONFIDENCE_THRESHOLD, NMS_THRESHOLD,MAX_DETECTIONS
+)
 
 class DogDetector(nn.Module):
-    def __init__(self, num_classes=config.NUM_CLASSES, pretrained=config.PRETRAINED):
+    def __init__(self, num_classes=NUM_CLASSES, pretrained=PRETRAINED):
         super(DogDetector, self).__init__()
         # Load pretrained ResNet18 backbone (excluding final classification layers)
         resnet = torchvision.models.resnet18(pretrained=pretrained)
@@ -19,15 +21,15 @@ class DogDetector(nn.Module):
         self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(256)
         # Output heads:
-        self.num_anchors = len(config.ANCHOR_SCALES) * len(config.ANCHOR_RATIOS)
+        self.num_anchors = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
         # Classification: (num_classes + 1) channels per anchor (background + classes)
         self.cls_head = nn.Conv2d(256, (num_classes + 1) * self.num_anchors, kernel_size=3, padding=1)
         # Regression: 4 values per anchor
         self.reg_head = nn.Conv2d(256, 4 * self.num_anchors, kernel_size=3, padding=1)
-        self.anchor_scales = config.ANCHOR_SCALES
-        self.anchor_ratios = config.ANCHOR_RATIOS
+        self.anchor_scales = ANCHOR_SCALES
+        self.anchor_ratios = ANCHOR_RATIOS
         # Store the input image size for proper coordinate mapping
-        self.input_size = config.IMAGE_SIZE  # (width, height)
+        self.input_size = IMAGE_SIZE  # (width, height)
 
     def forward(self, x):
         features = self.backbone(x)
@@ -98,8 +100,8 @@ class DogDetector(nn.Module):
 
     def post_process(self, cls_output, reg_output, anchors, conf_threshold=None, nms_threshold=None):
         """Post-process outputs to get final detections"""
-        conf_threshold = conf_threshold or config.CONF_THRESHOLD
-        nms_threshold = nms_threshold or config.NMS_THRESHOLD
+        conf_threshold = conf_threshold or CONFIDENCE_THRESHOLD  # Changed from CONF_THRESHOLD
+        nms_threshold = nms_threshold or NMS_THRESHOLD
         
         batch_size = cls_output.size(0)
         num_classes = cls_output.size(1)
@@ -133,8 +135,8 @@ class DogDetector(nn.Module):
                 keep_indices = nms(filtered_boxes, filtered_scores, nms_threshold)
                 
                 # Limit maximum detections according to config
-                if len(keep_indices) > config.MAX_DETECTIONS_PER_IMAGE:
-                    keep_indices = keep_indices[:config.MAX_DETECTIONS_PER_IMAGE]
+                if len(keep_indices) > MAX_DETECTIONS:
+                    keep_indices = keep_indices[:MAX_DETECTIONS]
                 
                 processed_boxes.append(filtered_boxes[keep_indices])
                 processed_scores.append(filtered_scores[keep_indices])

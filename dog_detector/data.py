@@ -17,6 +17,17 @@ import psutil
 import gc
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dog_detector.utils import download_file_torch
+from config import (
+    DOG_USAGE_RATIO,
+    TRAIN_VAL_SPLIT,
+    COCO_DOG_CATEGORY_ID,
+    IMAGE_SIZE,
+    MEAN,
+    STD,
+    NUM_WORKERS,
+    DATA_ROOT,
+    BATCH_SIZE
+)
 
 
 class CocoDogsDataset(Dataset):
@@ -39,7 +50,7 @@ class CocoDogsDataset(Dataset):
         self.data_root = data_root
         self.is_train = is_train
         self.transform = transform
-        self.dog_category_id = config.COCO_DOG_CATEGORY_ID
+        self.dog_category_id = COCO_DOG_CATEGORY_ID
         self.person_category_id = 1
         
         # Create cache directory
@@ -58,9 +69,9 @@ class CocoDogsDataset(Dataset):
         # Set up default transform if none provided
         if self.transform is None:
             self.transform = transforms.Compose([
-                transforms.Resize(config.IMAGE_SIZE),
+                transforms.Resize(IMAGE_SIZE),
                 transforms.ToTensor(),
-                transforms.Normalize(mean=config.MEAN, std=config.STD)
+                transforms.Normalize(mean=MEAN, std=STD)
             ])
 
     @classmethod
@@ -83,7 +94,7 @@ class CocoDogsDataset(Dataset):
         combined_stats = {}
         
         # Try to load from both train and val cache files to get complete stats
-        cache_key = f"{config.DOG_USAGE_RATIO}_{config.TRAIN_VAL_SPLIT}"
+        cache_key = f"{DOG_USAGE_RATIO}_{TRAIN_VAL_SPLIT}"
         train_cache_file = os.path.join(cache_dir, f"train_{cache_key}.pkl")
         val_cache_file = os.path.join(cache_dir, f"val_{cache_key}.pkl")
         
@@ -134,7 +145,7 @@ class CocoDogsDataset(Dataset):
         4. Processing annotations for selected images
         """
         # Key for dataset caching
-        cache_key = f"{config.DOG_USAGE_RATIO}_{config.TRAIN_VAL_SPLIT}"
+        cache_key = f"{DOG_USAGE_RATIO}_{TRAIN_VAL_SPLIT}"
         cache_file = os.path.join(self.cache_dir, f"{'train' if self.is_train else 'val'}_{cache_key}.pkl")
         
         # Try to load from cache first
@@ -184,7 +195,7 @@ class CocoDogsDataset(Dataset):
         total_person_images = len(all_person_imgs)
         
         # Apply DOG_USAGE_RATIO to select subset of dog images
-        num_dogs_to_use = int(total_dog_images * config.DOG_USAGE_RATIO)
+        num_dogs_to_use = int(total_dog_images * DOG_USAGE_RATIO)
         
         # Ensure we don't exceed available person-only images (for balance)
         num_persons_to_use = min(num_dogs_to_use, total_person_images)
@@ -199,8 +210,8 @@ class CocoDogsDataset(Dataset):
         selected_person_imgs = random.sample(all_person_imgs, num_persons_to_use)
         
         # Calculate train/val split
-        train_dog_count = int(num_dogs_to_use * config.TRAIN_VAL_SPLIT)
-        train_person_count = int(num_persons_to_use * config.TRAIN_VAL_SPLIT)
+        train_dog_count = int(num_dogs_to_use * TRAIN_VAL_SPLIT)
+        train_person_count = int(num_persons_to_use * TRAIN_VAL_SPLIT)
         
         # Split data
         if self.is_train:
@@ -223,8 +234,8 @@ class CocoDogsDataset(Dataset):
             'without_dogs': len(person_subset),
             'total_available_dogs': total_dog_images,
             'total_available_persons': total_person_images,
-            'dog_usage_ratio': config.DOG_USAGE_RATIO,
-            'train_val_split': config.TRAIN_VAL_SPLIT
+            'dog_usage_ratio': DOG_USAGE_RATIO,
+            'train_val_split': TRAIN_VAL_SPLIT
         }
         
         self.stats = stats
@@ -450,9 +461,9 @@ def collate_fn(batch):
 def get_data_loaders(root=None, download=True, batch_size=None):
     """Get train and validation data loaders"""
     if root is None:
-        root = config.DATA_ROOT
+        root = DATA_ROOT
     if batch_size is None:
-        batch_size = config.BATCH_SIZE
+        batch_size = BATCH_SIZE
 
     # Create datasets
     train_dataset = CocoDogsDataset(root, is_train=True)
@@ -463,7 +474,7 @@ def get_data_loaders(root=None, download=True, batch_size=None):
         train_dataset,
         batch_size=batch_size,
         shuffle=True,
-        num_workers=config.NUM_WORKERS,
+        num_workers=NUM_WORKERS,
         collate_fn=collate_fn
     )
 
@@ -471,7 +482,7 @@ def get_data_loaders(root=None, download=True, batch_size=None):
         val_dataset,
         batch_size=batch_size,
         shuffle=False,
-        num_workers=config.NUM_WORKERS,
+        num_workers=NUM_WORKERS,
         collate_fn=collate_fn
     )
 
