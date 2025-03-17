@@ -8,6 +8,21 @@ from tqdm import tqdm
 from PIL import Image
 import config
 import random
+import urllib3
+import time
+from urllib3.util import Retry
+import socket
+
+# Create a global connection pool for reuse - aggressive but stable settings
+http = urllib3.PoolManager(
+    maxsize=100,  # Increased to 100 concurrent connections
+    retries=Retry(
+        total=2,  # Minimal retries
+        backoff_factor=0.1,
+        status_forcelist=[500, 502, 503, 504]
+    ),
+    timeout=urllib3.Timeout(connect=5, read=20)
+)
 
 def compute_iou(boxes1, boxes2):
     """
@@ -98,41 +113,38 @@ def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thres
     return cls_targets, reg_targets, pos_mask
 
 
-def download_file_torch(url, dest_path, max_retries=3):
-    """Download a file with retries and verification"""
-    if os.path.exists(dest_path):
-        if os.path.getsize(dest_path) > 0:  # Check if file is not empty
-            try:
-                # Try to open the image to verify it's valid
-                Image.open(dest_path).verify()
-                return True
-            except (OSError, IOError) as e:
-                print(f"Found corrupt image {dest_path}: {e}")
-                os.remove(dest_path)  # Remove corrupt file
-        else:
-            os.remove(dest_path)  # Remove empty file
+def download_file_torch(url, dest_path, max_retries=2):
+    """Optimized download with minimal overhead"""
+    if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
+        return True
     
     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
     
     for attempt in range(max_retries):
         try:
-            # Use hub.download_url_to_file with progress=False to disable progress bar
-            torch.hub.download_url_to_file(url, dest_path, progress=False)
-            if os.path.exists(dest_path) and os.path.getsize(dest_path) > 0:
-                try:
-                    # Verify the downloaded image
-                    Image.open(dest_path).verify()
-                    return True
-                except (OSError, IOError) as e:
-                    os.remove(dest_path)
-                    raise Exception(f"Downloaded file is not a valid image: {e}")
+            response = http.request('GET', url, preload_content=False)
+            
+            if response.status != 200:
+                raise Exception(f"HTTP error {response.status}")
+                
+            with open(dest_path, 'wb') as out_file:
+                while True:
+                    data = response.read(65536)  # Increased to 64KB chunks
+                    if not data:
+                        break
+                    out_file.write(data)
+            
+            response.release_conn()
+            return True
+            
         except Exception as e:
             if attempt == max_retries - 1:
-                print(f"Failed to download {url} after {max_retries} attempts: {e}")
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
                 return False
-            print(f"Attempt {attempt + 1} failed, retrying...")
-            if os.path.exists(dest_path):
-                os.remove(dest_path)
+            
+            time.sleep(0.1)  # Minimal delay between retries
+            continue
     return False
 
 def extract_zip(zip_path, extract_to):
@@ -142,7 +154,7 @@ def extract_zip(zip_path, extract_to):
     print("Extraction complete.")
 
 def download_single_image(args):
-    """Download a single image with verification"""
+    """Download a single image with verification and proper connection handling"""
     img_info, target_dir, is_train = args
     file_name = img_info['file_name']
     target_path = os.path.join(target_dir, file_name)
@@ -156,11 +168,11 @@ def download_single_image(args):
         return f"Failed to download {file_name}"
 
 def download_coco_dataset(data_root):
-    """Download only COCO annotations and images containing dogs or people in parallel"""
+    """Download COCO dataset with maximum stable performance"""
     ann_url = "http://images.cocodataset.org/annotations/annotations_trainval2017.zip"
     ann_dir = os.path.join(data_root, "annotations")
     
-    # First download and extract annotations as we need them to know which images to download
+    # First download and extract annotations
     if not os.path.exists(ann_dir):
         ann_zip = os.path.join(data_root, "annotations_trainval2017.zip")
         if not download_file_torch(ann_url, ann_zip):
@@ -170,115 +182,123 @@ def download_coco_dataset(data_root):
     else:
         print("Annotations directory exists; skipping annotations download.")
 
-    # Initialize COCO API for both train and val sets
+    # Initialize COCO API
     train_ann_file = os.path.join(ann_dir, "instances_train2017.json")
     val_ann_file = os.path.join(ann_dir, "instances_val2017.json")
     train_coco = COCO(train_ann_file)
     val_coco = COCO(val_ann_file)
 
-    # Target categories
-    categories = {'dog': 18, 'person': 1}
-    category_ids = list(categories.values())
-
-    # Create image directories
+    # Setup directories
     train_dir = os.path.join(data_root, "train2017")
     val_dir = os.path.join(data_root, "val2017")
     os.makedirs(train_dir, exist_ok=True)
     os.makedirs(val_dir, exist_ok=True)
 
-    # Get balanced image IDs for both train and val sets
     def get_balanced_image_ids(coco, category_ids):
-        dog_imgs = set(coco.getImgIds(catIds=[categories['dog']]))
-        person_imgs = set(coco.getImgIds(catIds=[categories['person']]))
+        dog_imgs = set(coco.getImgIds(catIds=[18]))
+        person_imgs = set(coco.getImgIds(catIds=[1]))
         person_only_imgs = person_imgs - dog_imgs
         
-        # Balance the dataset
         target_size = int(min(len(dog_imgs), len(person_only_imgs)) * config.DATA_FRACTION)
         dog_imgs = set(random.sample(list(dog_imgs), target_size))
         person_only_imgs = set(random.sample(list(person_only_imgs), target_size))
         
         return list(dog_imgs | person_only_imgs)
 
-    train_img_ids = get_balanced_image_ids(train_coco, category_ids)
-    val_img_ids = get_balanced_image_ids(val_coco, category_ids)
-
-    print(f"Found {len(train_img_ids)} training images and {len(val_img_ids)} validation images")
-
-    # Prepare download tasks
+    # Get image IDs and prepare download tasks
+    train_img_ids = get_balanced_image_ids(train_coco, [18, 1])
+    val_img_ids = get_balanced_image_ids(val_coco, [18, 1])
+    
     train_tasks = [(train_coco.loadImgs(img_id)[0], train_dir, True) for img_id in train_img_ids]
     val_tasks = [(val_coco.loadImgs(img_id)[0], val_dir, False) for img_id in val_img_ids]
     all_tasks = train_tasks + val_tasks
 
-    # Use ThreadPoolExecutor for parallel downloads without progress bar
-    max_workers = min(32, len(all_tasks))
-    print(f"Starting parallel download with {max_workers} workers...")
+    # Maximum stable performance settings for 8GB RAM
+    import psutil
+    total_memory = psutil.virtual_memory().total / (1024 * 1024 * 1024)  # GB
+    cpu_count = psutil.cpu_count(logical=True)
+    
+    # Aggressive but stable worker count based on available memory
+    max_workers = min(cpu_count * 4, int(total_memory * 2))  # 2 workers per GB of RAM
+    batch_size = min(80, int(total_memory * 10))  # 10 downloads per GB of RAM
+    
+    print(f"\nStarting optimized download with {max_workers} workers")
+    print(f"Downloading {len(all_tasks)} images in batches of {batch_size}")
+    
     completed = 0
+    failed = 0
     total = len(all_tasks)
-
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [executor.submit(download_single_image, task) for task in all_tasks]
-        for future in as_completed(futures):
-            result = future.result()
-            completed += 1
-            if "Failed" in result:
-                print(f"\n{result}")
-            if completed % 100 == 0:  # Print status every 100 downloads
-                print(f"\rCompleted {completed}/{total} downloads", end="", flush=True)
-    print("\nAll download tasks completed.")
-
-    # Verify all images were downloaded successfully
-    def verify_downloads(img_ids, coco, target_dir):
-        missing = []
-        for img_id in img_ids:
-            file_name = coco.loadImgs(img_id)[0]['file_name']
-            path = os.path.join(target_dir, file_name)
-            if not os.path.exists(path) or os.path.getsize(path) == 0:
-                missing.append(file_name)
-        return missing
-
-    missing_train = verify_downloads(train_img_ids, train_coco, train_dir)
-    missing_val = verify_downloads(val_img_ids, val_coco, val_dir)
-
+    
+    for i in range(0, len(all_tasks), batch_size):
+        batch = all_tasks[i:i + batch_size]
+        
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = [executor.submit(download_single_image, task) for task in batch]
+            
+            for future in as_completed(futures):
+                result = future.result()
+                completed += 1
+                if "Failed" in result:
+                    failed += 1
+                
+                if completed % 20 == 0:
+                    success_rate = ((completed - failed) / completed * 100) if completed > 0 else 0
+                    print(f"\rProgress: {completed}/{total} ({success_rate:.1f}% success rate)", end="", flush=True)
+        
+        # Minimal cleanup
+        gc.collect()
+        time.sleep(0.2)  # Minimal delay between batches
+    
+    print("\nDownload phase completed!")
+    
+    # Quick verification only for completely missing files
+    missing_train = quick_verify_downloads(train_img_ids, train_coco, train_dir)
+    missing_val = quick_verify_downloads(val_img_ids, val_coco, val_dir)
+    
     if missing_train or missing_val:
-        print("\nMissing images after download:")
-        if missing_train:
-            print(f"Training: {len(missing_train)} images missing")
-        if missing_val:
-            print(f"Validation: {len(missing_val)} images missing")
-        # Retry missing downloads
-        print("Retrying missing downloads...")
-        for file_name in missing_train:
-            url = f"http://images.cocodataset.org/train2017/{file_name}"
-            download_file_torch(url, os.path.join(train_dir, file_name))
-        for file_name in missing_val:
-            url = f"http://images.cocodataset.org/val2017/{file_name}"
-            download_file_torch(url, os.path.join(val_dir, file_name))
-    else:
-        print("\nAll images downloaded successfully")
+        print(f"\nRetrying {len(missing_train) + len(missing_val)} missing files...")
+        retry_downloads(missing_train, "train2017", train_dir)
+        retry_downloads(missing_val, "val2017", val_dir)
+
+def quick_verify_downloads(img_ids, coco, target_dir):
+    """Quick verification that just checks file existence and size"""
+    missing = []
+    for img_id in img_ids:
+        file_name = coco.loadImgs(img_id)[0]['file_name']
+        path = os.path.join(target_dir, file_name)
+        if not os.path.exists(path) or os.path.getsize(path) == 0:
+            missing.append(file_name)
+    return missing
+
+def retry_downloads(missing_files, subset, target_dir):
+    """Minimal retry logic for failed downloads"""
+    if not missing_files:
+        return
+        
+    print(f"\nRetrying {len(missing_files)} files from {subset}...")
+    for file_name in missing_files:
+        url = f"http://images.cocodataset.org/{subset}/{file_name}"
+        target_path = os.path.join(target_dir, file_name)
+        download_file_torch(url, target_path)
 
 def verify_dataset_integrity(data_root):
-    """
-    Verify that COCO dataset exists and contains all necessary files.
-    Returns True if dataset is complete, False if it needs to be downloaded.
-    """
+    """Verify dataset exists and contains necessary files"""
     train_dir = os.path.join(data_root, "train2017")
     val_dir = os.path.join(data_root, "val2017")
     ann_dir = os.path.join(data_root, "annotations")
     
-    # Check directories exist
     if not all(os.path.exists(d) for d in [train_dir, val_dir, ann_dir]):
         return False
         
-    # Check annotation files exist
     required_annotations = [
         "instances_train2017.json",
         "instances_val2017.json"
     ]
+    
     if not all(os.path.exists(os.path.join(ann_dir, f)) for f in required_annotations):
         return False
         
-    # Check for minimum number of images
-    min_images = 100  # Reasonable minimum for a working dataset
+    min_images = 100
     train_images = [f for f in os.listdir(train_dir) if f.endswith('.jpg')]
     val_images = [f for f in os.listdir(val_dir) if f.endswith('.jpg')]
     

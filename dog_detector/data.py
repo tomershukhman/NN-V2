@@ -209,14 +209,12 @@ class CocoDogsDataset(Dataset):
             # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(download_tasks[0][1]), exist_ok=True)
             
-            # Dynamic batch size based on available memory
-            available_memory = psutil.virtual_memory().available
-            target_memory_per_batch = 2 * 1024 * 1024 * 1024  # 2GB
-            batch_size = min(30, max(10, int(available_memory / target_memory_per_batch)))
+            # Increased batch size since we have more memory available
+            batch_size = 50  # Increased from 30
             
-            # Use more workers based on CPU cores
+            # Use more workers based on available CPU cores
             cpu_count = psutil.cpu_count(logical=True)
-            max_workers = min(cpu_count - 1, 8)
+            max_workers = min(cpu_count * 2, 16)  # Increased worker count, capped at 16
             
             print(f"Downloading {len(download_tasks)} missing images in batches of {batch_size} using {max_workers} workers")
             
@@ -232,7 +230,6 @@ class CocoDogsDataset(Dataset):
                         future = executor.submit(download_file_torch, url, path)
                         futures.append((future, img_id, path))
                     
-                    # Process completed downloads without progress bar
                     for future, img_id, path in futures:
                         try:
                             if future.result():
@@ -247,19 +244,19 @@ class CocoDogsDataset(Dataset):
                 # Force garbage collection after each batch
                 gc.collect()
                 
-                # Check memory usage and adjust batch size if needed
+                # More aggressive memory management
                 current_memory = psutil.virtual_memory()
-                if current_memory.percent > 85:
-                    batch_size = max(5, batch_size // 2)
+                if current_memory.percent > 90:  # Changed from 85
+                    batch_size = max(20, batch_size // 2)  # Minimum batch size increased
                     print(f"\nHigh memory usage detected ({current_memory.percent}%), reducing batch size to {batch_size}")
-                elif current_memory.percent < 60 and batch_size < 30:
-                    batch_size = min(30, batch_size + 5)
+                elif current_memory.percent < 70 and batch_size < 100:  # Changed from 60 and increased max batch size
+                    batch_size = min(100, batch_size + 10)  # More aggressive batch size increase
                     print(f"\nLow memory usage ({current_memory.percent}%), increasing batch size to {batch_size}")
                 
-                # Add a short delay between batches if memory usage is high
-                if current_memory.percent > 75:
+                # Reduced delay between batches
+                if current_memory.percent > 85:  # Changed from 75
                     import time
-                    time.sleep(0.5)
+                    time.sleep(0.2)  # Reduced from 0.5
         
         print("\nDownload complete!")
         
