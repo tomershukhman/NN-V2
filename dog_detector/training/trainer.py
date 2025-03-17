@@ -31,40 +31,18 @@ def train(data_root=None, download=True, batch_size=None):
     if data_root is None:
         data_root = DATA_ROOT
         
-    # Get dataset statistics from data.py instead of recalculating
-    print('\nGetting dataset statistics...')
+    # Log dataset statistics to tensorboard only, without printing them again
     stats = CocoDogsDataset.get_dataset_stats(data_root)
     
     if stats:
-        total_train_dogs = stats.get('train_with_dogs', 0)
-        total_train_no_dogs = stats.get('train_without_dogs', 0)
-        total_val_dogs = stats.get('val_with_dogs', 0)
-        total_val_no_dogs = stats.get('val_without_dogs', 0)
-        total_available_dogs = stats.get('total_available_dogs', 0)
-        dog_usage_ratio = stats.get('dog_usage_ratio', DOG_USAGE_RATIO)
-        
-        print('\nDataset Statistics:')
-        print(f'Total available images with dogs: {total_available_dogs}')
-        print(f'Dog Usage Ratio: {dog_usage_ratio * 100:.1f}% ({int(total_available_dogs * dog_usage_ratio)} images)')
-        print(f'Train/Val Split: {TRAIN_VAL_SPLIT*100:.1f}%/{(1-TRAIN_VAL_SPLIT)*100:.1f}%')
-        print('\nTraining set:')
-        print(f'  Images with dogs: {total_train_dogs}')
-        print(f'  Images without dogs: {total_train_no_dogs}')
-        print('Validation set:')
-        print(f'  Images with dogs: {total_val_dogs}')
-        print(f'  Images without dogs: {total_val_no_dogs}\n')
-        
-        # Log dataset statistics to tensorboard
         vis_logger.log_metrics({
-            'dataset/total_available_dogs': total_available_dogs,
-            'dataset/train_with_dogs': total_train_dogs,
-            'dataset/train_without_dogs': total_train_no_dogs,
-            'dataset/val_with_dogs': total_val_dogs,
-            'dataset/val_without_dogs': total_val_no_dogs,
-            'dataset/dog_usage_ratio': dog_usage_ratio
+            'dataset/total_available_dogs': stats.get('total_available_dogs', 0),
+            'dataset/train_with_dogs': stats.get('train_with_dogs', 0),
+            'dataset/train_without_dogs': stats.get('train_without_dogs', 0),
+            'dataset/val_with_dogs': stats.get('val_with_dogs', 0),
+            'dataset/val_without_dogs': stats.get('val_without_dogs', 0),
+            'dataset/dog_usage_ratio': stats.get('dog_usage_ratio', DOG_USAGE_RATIO)
         }, 0, 'stats')
-    else:
-        print("Warning: Dataset statistics not available")
 
     # Get model and criterion
     model = get_model(DEVICE)
