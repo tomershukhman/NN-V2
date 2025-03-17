@@ -4,7 +4,8 @@ Image visualization utilities for detection results and groundtruth annotations.
 import matplotlib.pyplot as plt
 import torch
 import numpy as np
-from config import MEAN, STD,CONFIDENCE_THRESHOLD
+from config import MEAN, STD, CONFIDENCE_THRESHOLD
+
 
 def visualize_predictions(image, target, boxes_list, scores_list):
     """
@@ -22,34 +23,34 @@ def visualize_predictions(image, target, boxes_list, scores_list):
     # Ensure image is in [C, H, W] format
     if img_tensor.dim() == 4:
         img_tensor = img_tensor.squeeze(0)
-    
+
     # Denormalize
-    for t, m, s in zip(img_tensor, MEAN, STD):
-        t.mul_(s).add_(m)
-    img_tensor = img_tensor.mul(255).byte()
-    
+    img_tensor = torch.clamp(img_tensor, 0, 1)  # Ensure values are in [0,1]
+    img_tensor = img_tensor * 255
+    img_tensor = img_tensor.byte()
+
     # Convert to numpy and correct format for matplotlib
     img_np = img_tensor.permute(1, 2, 0).numpy()
-    
+
     # Create figure without margins
     fig = plt.figure(figsize=(10, 10))
     ax = fig.add_axes([0, 0, 1, 1])
-    
+
     # Display the image
     ax.imshow(img_np)
-    
+
     # Plot ground truth boxes in green
     gt_boxes = target["boxes"].cpu().numpy()
     for box in gt_boxes:
         x1, y1, x2, y2 = box
         ax.add_patch(plt.Rectangle((x1, y1),
-                                 x2 - x1,
-                                 y2 - y1,
-                                 fill=False,
-                                 color="green",
-                                 linewidth=2,
-                                 label='Ground Truth'))
-    
+                                   x2 - x1,
+                                   y2 - y1,
+                                   fill=False,
+                                   color="green",
+                                   linewidth=2,
+                                   label='Ground Truth'))
+
     # Plot predictions with color coding based on confidence
     if isinstance(boxes_list, torch.Tensor):
         boxes_np = boxes_list.cpu().numpy()
@@ -57,7 +58,7 @@ def visualize_predictions(image, target, boxes_list, scores_list):
     else:
         boxes_np = boxes_list
         scores_np = scores_list
-    
+
     # Ensure we have valid boxes
     if len(boxes_np) > 0:
         for box, score in zip(boxes_np, scores_np):
@@ -65,26 +66,26 @@ def visualize_predictions(image, target, boxes_list, scores_list):
                 x1, y1, x2, y2 = box
                 # Color code based on confidence
                 if score > 0.8:
-                    color = 'red'
+                    color = 'blue'
                 elif score > 0.6:
-                    color = 'orange'
+                    color = 'cyan'
                 else:
-                    color = 'yellow'
-                
+                    color = 'magenta'
+
                 # Add box
                 ax.add_patch(plt.Rectangle((x1, y1),
-                                         x2 - x1,
-                                         y2 - y1,
-                                         fill=False,
-                                         color=color,
-                                         linewidth=2))
+                                           x2 - x1,
+                                           y2 - y1,
+                                           fill=False,
+                                           color=color,
+                                           linewidth=2))
                 # Add score text
                 ax.text(x1, y1 - 5, f"{score:.2f}",
-                       color=color,
-                       fontsize=10,
-                       bbox=dict(facecolor="white", alpha=0.7))
-    
+                        color=color,
+                        fontsize=10,
+                        bbox=dict(facecolor="white", alpha=0.7))
+
     # Remove axes for clean visualization
     ax.set_axis_off()
-    
+
     return fig
