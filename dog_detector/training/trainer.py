@@ -31,17 +31,41 @@ def train(data_root=None, download=True, batch_size=None):
     if data_root is None:
         data_root = DATA_ROOT
         
-    # Log dataset statistics to tensorboard only, without printing them again
+    # Get and display dataset statistics
     stats = CocoDogsDataset.get_dataset_stats(data_root)
     
     if stats:
+        print("\n" + "="*50)
+        print("📊 DATASET STATISTICS 📊")
+        print("="*50)
+        print(f"🐕 Dog images:")
+        print(f"  - Training:   {stats.get('train_with_dogs', 0)} images")
+        print(f"  - Validation: {stats.get('val_with_dogs', 0)} images")
+        print(f"  - Total:      {stats.get('total_with_dogs', 0)} images")
+        print(f"\n👤 Person-only images (no dogs):")
+        print(f"  - Training:   {stats.get('train_without_dogs', 0)} images")
+        print(f"  - Validation: {stats.get('val_without_dogs', 0)} images") 
+        print(f"  - Total:      {stats.get('total_without_dogs', 0)} images")
+        print(f"\n📈 Dataset configuration:")
+        print(f"  - Total available dog images:     {stats.get('total_available_dogs', 0)}")
+        print(f"  - Total available person images:  {stats.get('total_available_persons', 0)}")
+        print(f"  - Dog usage ratio:                {stats.get('dog_usage_ratio', DOG_USAGE_RATIO)}")
+        print(f"  - Train/val split:                {stats.get('train_val_split', TRAIN_VAL_SPLIT)}")
+        print(f"  - Total dataset size:             {stats.get('total_images', 0)} images")
+        print("="*50 + "\n")
+        
+        # Also log to tensorboard
         vis_logger.log_metrics({
             'dataset/total_available_dogs': stats.get('total_available_dogs', 0),
             'dataset/train_with_dogs': stats.get('train_with_dogs', 0),
             'dataset/train_without_dogs': stats.get('train_without_dogs', 0),
             'dataset/val_with_dogs': stats.get('val_with_dogs', 0),
             'dataset/val_without_dogs': stats.get('val_without_dogs', 0),
-            'dataset/dog_usage_ratio': stats.get('dog_usage_ratio', DOG_USAGE_RATIO)
+            'dataset/dog_usage_ratio': stats.get('dog_usage_ratio', DOG_USAGE_RATIO),
+            'dataset/train_val_split': stats.get('train_val_split', TRAIN_VAL_SPLIT),
+            'dataset/total_with_dogs': stats.get('total_with_dogs', 0),
+            'dataset/total_without_dogs': stats.get('total_without_dogs', 0),
+            'dataset/total_images': stats.get('total_images', 0)
         }, 0, 'stats')
 
     # Get model and criterion
@@ -92,12 +116,20 @@ def train(data_root=None, download=True, batch_size=None):
 
                 predictions = model(images)
                 loss = criterion(predictions, targets)
-                val_loss += loss.item()
+                
+                # Fix: Handle both tensor and integer loss values
+                if isinstance(loss, torch.Tensor):
+                    loss_value = loss.item()
+                else:
+                    # If loss is already a number (int/float), use it directly
+                    loss_value = float(loss)
+                    
+                val_loss += loss_value
                 val_steps += 1
 
         # Calculate epoch metrics
-        train_loss = train_loss / train_steps
-        val_loss = val_loss / val_steps
+        train_loss = train_loss / (train_steps if train_steps > 0 else 1)
+        val_loss = val_loss / (val_steps if val_steps > 0 else 1)
 
         # Log metrics
         print(f'\nEpoch {epoch+1}:')

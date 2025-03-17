@@ -50,6 +50,7 @@ class CocoDogsDataset(Dataset):
         self.img_ids = []
         self.annotations = {}
         self.img_info = {}
+        self.stats = {}
         
         # Process dataset
         self._prepare_dataset()
@@ -61,6 +62,68 @@ class CocoDogsDataset(Dataset):
                 transforms.ToTensor(),
                 transforms.Normalize(mean=config.MEAN, std=config.STD)
             ])
+
+    @classmethod
+    def get_dataset_stats(cls, data_root):
+        """
+        Get dataset statistics without creating a full dataset instance.
+        Uses cached stats if available or computes them if needed.
+        
+        Args:
+            data_root (str): Path to the COCO dataset root
+            
+        Returns:
+            dict: Statistics about the dataset
+        """
+        # Create cache directory path
+        cache_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "cache")
+        
+        # Check for all available cache files
+        stats = {}
+        combined_stats = {}
+        
+        # Try to load from both train and val cache files to get complete stats
+        cache_key = f"{config.DOG_USAGE_RATIO}_{config.TRAIN_VAL_SPLIT}"
+        train_cache_file = os.path.join(cache_dir, f"train_{cache_key}.pkl")
+        val_cache_file = os.path.join(cache_dir, f"val_{cache_key}.pkl")
+        
+        if os.path.exists(train_cache_file):
+            try:
+                with open(train_cache_file, 'rb') as f:
+                    train_cache_data = pickle.load(f)
+                    train_stats = train_cache_data.get('stats', {})
+                    combined_stats.update(train_stats)
+                    combined_stats['train_with_dogs'] = train_stats.get('with_dogs', 0)
+                    combined_stats['train_without_dogs'] = train_stats.get('without_dogs', 0)
+            except (pickle.PickleError, EOFError):
+                pass
+                
+        if os.path.exists(val_cache_file):
+            try:
+                with open(val_cache_file, 'rb') as f:
+                    val_cache_data = pickle.load(f)
+                    val_stats = val_cache_data.get('stats', {})
+                    combined_stats['val_with_dogs'] = val_stats.get('with_dogs', 0)
+                    combined_stats['val_without_dogs'] = val_stats.get('without_dogs', 0)
+                    
+                    # Use these values if not already present from train cache
+                    for key in ['total_available_dogs', 'total_available_persons', 'dog_usage_ratio', 'train_val_split']:
+                        if key not in combined_stats and key in val_stats:
+                            combined_stats[key] = val_stats[key]
+            except (pickle.PickleError, EOFError):
+                pass
+                
+        # Calculate totals
+        if 'train_with_dogs' in combined_stats and 'val_with_dogs' in combined_stats:
+            combined_stats['total_with_dogs'] = combined_stats['train_with_dogs'] + combined_stats['val_with_dogs']
+            
+        if 'train_without_dogs' in combined_stats and 'val_without_dogs' in combined_stats:
+            combined_stats['total_without_dogs'] = combined_stats['train_without_dogs'] + combined_stats['val_without_dogs']
+            
+        if 'total_with_dogs' in combined_stats and 'total_without_dogs' in combined_stats:
+            combined_stats['total_images'] = combined_stats['total_with_dogs'] + combined_stats['total_without_dogs']
+        
+        return combined_stats
 
     def _prepare_dataset(self):
         """
