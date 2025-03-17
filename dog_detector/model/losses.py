@@ -14,22 +14,13 @@ class DetectionLoss(nn.Module):
 
     def forward(self, predictions, targets):
         """Calculate detection loss with properly scaled regression targets"""
-        cls_output, reg_output, anchors = predictions  # Now receiving anchors from forward pass
+        cls_output, reg_output, anchors = predictions
         batch_size = cls_output.size(0)
         device = cls_output.device
         
         cls_losses = torch.zeros(batch_size, device=device)
         reg_losses = torch.zeros(batch_size, device=device)
         total_positive_samples = 0
-
-        # Debug info
-        total_images_with_dogs = 0
-        total_images_with_pos_matches = 0
-        pos_matches_per_image = []
-        gt_box_sizes = []
-        max_gt_iou_values = []
-
-        print("\n--- Starting batch processing ---")
         
         for i in range(batch_size):
             target_boxes = targets[i]['boxes']
@@ -46,27 +37,12 @@ class DetectionLoss(nn.Module):
                 cls_losses[i] = cls_loss
                 continue
 
-            # Count images with dogs
-            total_images_with_dogs += 1
-            
-            # Log GT box sizes for debugging
-            for box in target_boxes:
-                width = box[2] - box[0]
-                height = box[3] - box[1]
-                gt_box_sizes.append((width.item(), height.item()))
-
             # Decode regression outputs to get actual box coordinates
             decoded_boxes = self.model._decode_boxes(reg_output_i, anchors)
             
             # Compute IoU between decoded predictions and targets
-            ious = compute_iou(decoded_boxes, target_boxes)  # Shape: [num_anchors, num_gt]
+            ious = compute_iou(decoded_boxes, target_boxes)
             max_ious, max_idx = ious.max(dim=1)  # For each anchor, get best GT box
-            
-            # Store max IoU for debugging
-            if len(max_ious) > 0:
-                max_gt_iou = max_ious.max().item()
-                max_gt_iou_values.append(max_gt_iou)
-                print(f"Image {i}: Best anchor IoU: {max_gt_iou:.4f}")
 
             # Assign positive and negative samples
             pos_mask = max_ious >= 0.25  # Use same threshold as in model's post-processing
@@ -74,9 +50,6 @@ class DetectionLoss(nn.Module):
 
             # Ensure at least one positive match per GT box if available
             if pos_mask.sum() > 0:
-                total_images_with_pos_matches += 1
-                pos_matches_per_image.append(pos_mask.sum().item())
-
                 # Classification loss for positive samples
                 pos_pred_cls = cls_output_i[pos_mask]
                 pos_target_cls = target_labels[max_idx[pos_mask]]
@@ -100,7 +73,7 @@ class DetectionLoss(nn.Module):
                 gt_ctr_y = pos_gt_boxes[:, 1] + 0.5 * gt_heights
 
                 # Compute regression targets using inverse of _decode_boxes transformation
-                tx = (gt_ctr_x - anchor_ctr_x) * (4.0 / anchor_widths)  # Scale matches _decode_boxes
+                tx = (gt_ctr_x - anchor_ctr_x) * (4.0 / anchor_widths)
                 ty = (gt_ctr_y - anchor_ctr_y) * (4.0 / anchor_heights)
                 tw = torch.log(gt_widths / anchor_widths)
                 th = torch.log(gt_heights / anchor_heights)
@@ -125,17 +98,6 @@ class DetectionLoss(nn.Module):
         cls_loss_final = cls_losses.mean()
         reg_loss_final = reg_losses.sum() / (total_positive_samples if total_positive_samples > 0 else 1)
         total_loss = cls_loss_final + reg_loss_final
-
-        # Print debug information
-        print(f"Batch size: {batch_size}, Images with dogs: {total_images_with_dogs}, Images with pos matches: {total_images_with_pos_matches}")
-        if pos_matches_per_image:
-            print(f"Positive matches per image: {pos_matches_per_image}")
-        if gt_box_sizes:
-            print(f"GT box sizes (w,h): {gt_box_sizes}")
-        if max_gt_iou_values:
-            print(f"Max IoU values: {max_gt_iou_values}")
-        print(f"Total positive samples: {total_positive_samples}, Reg loss: {reg_loss_final.item():.6f}")
-        print("--- End batch processing ---\n")
 
         return {
             'total_loss': total_loss,

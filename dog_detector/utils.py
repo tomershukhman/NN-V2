@@ -38,27 +38,7 @@ def compute_iou(boxes1, boxes2):
     
     if N == 0 or M == 0:
         return torch.zeros((N, M), device=boxes1.device)
-    
-    # Debug shapes and values to catch potential issues
-    print(f"IoU calculation: boxes1 shape={boxes1.shape}, boxes2 shape={boxes2.shape}")
-    if N > 0 and M > 0:
-        # Print a sample box from each set for debugging
-        print(f"Sample box1: {boxes1[0].tolist()}")
-        print(f"Sample box2: {boxes2[0].tolist()}")
         
-        if torch.isnan(boxes1).any() or torch.isnan(boxes2).any():
-            print("WARNING: NaN values detected in boxes!")
-        if torch.isinf(boxes1).any() or torch.isinf(boxes2).any():
-            print("WARNING: Inf values detected in boxes!")
-            
-        # Additional validation
-        invalid1 = (boxes1[:, 2] <= boxes1[:, 0]) | (boxes1[:, 3] <= boxes1[:, 1])
-        invalid2 = (boxes2[:, 2] <= boxes2[:, 0]) | (boxes2[:, 3] <= boxes2[:, 1])
-        if invalid1.any():
-            print(f"WARNING: Found {invalid1.sum().item()} invalid boxes in boxes1!")
-        if invalid2.any():
-            print(f"WARNING: Found {invalid2.sum().item()} invalid boxes in boxes2!")
-    
     # Expand boxes for broadcasting: boxes1 to (N,1,4) and boxes2 to (1,M,4)
     boxes1_exp = boxes1.unsqueeze(1)  # (N,1,4)
     boxes2_exp = boxes2.unsqueeze(0)  # (1,M,4)
@@ -82,39 +62,7 @@ def compute_iou(boxes1, boxes2):
     valid_mask = union > 0
     iou = torch.zeros_like(union)
     iou[valid_mask] = intersection[valid_mask] / union[valid_mask]
-    
-    # Debug IoU values and the best match
-    if N > 0 and M > 0:
-        max_iou_per_pred, max_gt_idx = iou.max(dim=1)
-        max_iou = max_iou_per_pred.max().item()
-        max_pred_idx = max_iou_per_pred.argmax().item()
-        max_gt_idx = max_gt_idx[max_pred_idx].item()
-        
-        print(f"Max IoU: {max_iou:.6f}")
-        if max_iou > 0:
-            print(f"Best match details:")
-            print(f"  Predicted box: {boxes1[max_pred_idx].tolist()}")
-            print(f"  Ground truth box: {boxes2[max_gt_idx].tolist()}")
-            
-            # Calculate and verify components for best match
-            pred_box = boxes1[max_pred_idx]
-            gt_box = boxes2[max_gt_idx]
-            pred_area = (pred_box[2] - pred_box[0]) * (pred_box[3] - pred_box[1])
-            gt_area = (gt_box[2] - gt_box[0]) * (gt_box[3] - gt_box[1])
-            
-            inter_x1 = torch.max(pred_box[0], gt_box[0])
-            inter_y1 = torch.max(pred_box[1], gt_box[1])
-            inter_x2 = torch.min(pred_box[2], gt_box[2])
-            inter_y2 = torch.min(pred_box[3], gt_box[3])
-            
-            inter_w = (inter_x2 - inter_x1).clamp(min=0)
-            inter_h = (inter_y2 - inter_y1).clamp(min=0)
-            inter_area = inter_w * inter_h
-            union_area = pred_area + gt_area - inter_area
-            
-            print(f"  Areas (pred, gt, intersection, union): {pred_area.item():.1f}, {gt_area.item():.1f}, {inter_area.item():.1f}, {union_area.item():.1f}")
-            print(f"  Intersection dimensions (w,h): {inter_w.item():.1f}, {inter_h.item():.1f}")
-            
+
     return iou
 
 

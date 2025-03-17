@@ -74,9 +74,6 @@ class DogDetector(nn.Module):
         stride_x = self.input_size[0] / fm_width
         stride_y = self.input_size[1] / fm_height
         
-        # Debug original stride calculation
-        print(f"Input size: {self.input_size}, Feature map: {feature_map_size}, Stride: ({stride_x}, {stride_y})")
-        
         # Generate grid centers properly scaled to image coordinates
         shifts_x = torch.arange(0, fm_width, device=device, dtype=torch.float32) * stride_x + stride_x / 2
         shifts_y = torch.arange(0, fm_height, device=device, dtype=torch.float32) * stride_y + stride_y / 2
@@ -101,13 +98,6 @@ class DogDetector(nn.Module):
         # Stack all base anchors
         base_anchors = torch.stack(anchors, dim=0)
         
-        # Debug anchors sizes
-        print(f"Generated {len(base_anchors)} unique anchor shapes:")
-        for i, anchor in enumerate(base_anchors):
-            w = anchor[2] - anchor[0]
-            h = anchor[3] - anchor[1]
-            print(f"  Anchor {i}: size = ({w.item():.1f}, {h.item():.1f})")
-        
         # Add anchors at each grid cell by broadcasting
         num_anchors = base_anchors.size(0)
         num_centers = centers.size(0)
@@ -127,25 +117,6 @@ class DogDetector(nn.Module):
         
         # Reshape to [num_centers * num_anchors, 4]
         all_anchors = all_anchors.view(-1, 4)
-
-        # Double-check that all anchors have x1<x2 and y1<y2
-        invalid_anchors = (all_anchors[:, 0] >= all_anchors[:, 2]) | (all_anchors[:, 1] >= all_anchors[:, 3])
-        if invalid_anchors.any():
-            print(f"WARNING: {invalid_anchors.sum().item()} invalid anchors detected!")
-            print("Sample invalid anchors:")
-            for i in range(min(5, invalid_anchors.sum().item())):
-                idx = torch.where(invalid_anchors)[0][i]
-                print(f"  Invalid anchor {idx}: {all_anchors[idx].tolist()}")
-
-        # Debug a sample of final anchors
-        print(f"Total anchors: {len(all_anchors)}, sample (first 3):")
-        for i in range(min(3, len(all_anchors))):
-            x1, y1, x2, y2 = all_anchors[i].tolist()
-            w = x2 - x1
-            h = y2 - y1
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            print(f"  Anchor at ({cx:.1f}, {cy:.1f}), size = ({w:.1f}, {h:.1f})")
 
         # Clip anchors to stay within image bounds
         all_anchors[:, 0].clamp_(min=0, max=self.input_size[0])
