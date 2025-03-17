@@ -263,30 +263,35 @@ class CocoDogsDataset(Dataset):
         
         print(f"\nProcessing {split_name} - {coco.loadCats([category_id])[0]['name']}: Found {total_count} images in annotations")
         
-        # Create list of download tasks for missing images
+        # Batch process image verification for better performance
+        batch_size = 1000
         download_tasks = []
-        for img_id in img_ids:
-            img_info = coco.loadImgs(img_id)[0]
-            file_name = img_info["file_name"]
-            img_path = os.path.join(self.data_root, split_name, file_name)
+        
+        for i in range(0, len(img_ids), batch_size):
+            batch_ids = img_ids[i:i + batch_size]
+            batch_infos = coco.loadImgs(batch_ids)
             
-            if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
-                url = f"http://images.cocodataset.org/{split_name}/{file_name}"
-                download_tasks.append((url, img_path, img_id))
-            else:
-                verified_imgs.add(img_id)
+            for img_info in batch_infos:
+                file_name = img_info["file_name"]
+                img_path = os.path.join(self.data_root, split_name, file_name)
+                
+                if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
+                    url = f"http://images.cocodataset.org/{split_name}/{file_name}"
+                    download_tasks.append((url, img_path, img_info["id"]))
+                else:
+                    verified_imgs.add(img_info["id"])
         
         if download_tasks:
             # Create directory if it doesn't exist
             os.makedirs(os.path.dirname(download_tasks[0][1]), exist_ok=True)
             
-            # System-adaptive parameters
+            # Adaptive system parameters
             cpu_count = psutil.cpu_count(logical=True)
             total_memory_gb = psutil.virtual_memory().total / (1024 * 1024 * 1024)
             
             # Use adaptive parameters based on system capabilities
-            max_workers = min(cpu_count * 2, int(total_memory_gb * 2), 32)  # Higher worker count with cap
-            initial_batch_size = min(int(total_memory_gb * 15), 120)  # Aggressive batching with cap
+            max_workers = min(cpu_count * 2, int(total_memory_gb * 2), 32)
+            initial_batch_size = min(int(total_memory_gb * 15), 120)
             
             print(f"Downloading {len(download_tasks)} missing images using {max_workers} workers")
             print(f"Initial batch size: {initial_batch_size}, adapts based on memory usage")
@@ -299,23 +304,15 @@ class CocoDogsDataset(Dataset):
                 batch = download_tasks[batch_idx:batch_idx + batch_size]
                 current_batch_num = batch_idx // batch_size + 1
                 
-                # Check memory before each batch and adjust settings
+                # Monitor and adjust memory usage
                 current_memory = psutil.virtual_memory()
                 if current_memory.percent > 85:
-                    old_batch_size = batch_size
                     batch_size = max(30, int(batch_size * 0.7))
                     max_workers = max(8, int(max_workers * 0.8))
                     print(f"\nMemory usage high ({current_memory.percent}%), reducing batch size to {batch_size}")
                 elif current_memory.percent < 60 and batch_size < initial_batch_size:
-                    old_batch_size = batch_size
                     batch_size = min(initial_batch_size, batch_size + 20)
                     print(f"\nMemory usage low ({current_memory.percent}%), increasing batch size to {batch_size}")
-                
-                # Recalculate total batches if batch size changed
-                if batch_size != old_batch_size:
-                    remaining_tasks = len(download_tasks) - batch_idx
-                    remaining_batches = (remaining_tasks + batch_size - 1) // batch_size
-                    total_batches = current_batch_num + remaining_batches - 1
                 
                 print(f"\rProcessing batch {current_batch_num}/{total_batches}", end="", flush=True)
                 
@@ -326,7 +323,6 @@ class CocoDogsDataset(Dataset):
                         future = executor.submit(download_file_torch, url, path)
                         futures[future] = img_id
                     
-                    # Collect results
                     for future in as_completed(futures):
                         img_id = futures[future]
                         try:
@@ -337,15 +333,14 @@ class CocoDogsDataset(Dataset):
                         except Exception:
                             missing_count += 1
                 
-                # Memory management
+                # Memory management between batches
                 gc.collect()
                 if psutil.virtual_memory().percent > 85:
-                    import time
                     time.sleep(0.3)
-                    
+        
         print(f"\n{split_name} - {coco.loadCats([category_id])[0]['name']}: {missing_count} images failed to download")
         print(f"Total images available: {len(verified_imgs)}")
-                
+        
         return verified_imgs
     
     def _process_selected_images(self, selected_images):

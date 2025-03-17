@@ -17,13 +17,13 @@ from config import DOG_USAGE_RATIO
 
 # Create a global connection pool with optimal settings
 http = urllib3.PoolManager(
-    maxsize=150,
+    maxsize=150,  # Set a fixed maxsize that can handle our concurrent requests
     retries=Retry(
         total=3,
-        backoff_factor=0.1,
+        backoff_factor=0.5,
         status_forcelist=[429, 500, 502, 503, 504]
     ),
-    timeout=urllib3.Timeout(connect=3, read=15),
+    timeout=urllib3.Timeout(connect=5, read=20),
     block=False
 )
 
@@ -144,33 +144,58 @@ def download_file_torch(url, dest_path, max_retries=3):
     
     for attempt in range(max_retries):
         try:
-            # Request streaming response with better error handling
-            response = http.request('GET', url, preload_content=False, timeout=urllib3.Timeout(connect=3, read=10))
+            # Request streaming response with optimized timeout settings
+            response = http.request(
+                'GET', 
+                url, 
+                preload_content=False,
+                timeout=urllib3.Timeout(connect=5, read=20),
+                retries=urllib3.util.Retry(
+                    total=3,
+                    backoff_factor=0.5,
+                    status_forcelist=[429, 500, 502, 503, 504]
+                )
+            )
             
             if response.status != 200:
                 if response.status in (429, 503):  # Rate limiting or service unavailable
                     time.sleep((attempt + 1) * 2)  # Exponential backoff
-                raise Exception(f"HTTP error {response.status}")
+                response.release_conn()
+                continue
                 
-            # Stream to file in larger chunks
-            with open(dest_path, 'wb') as out_file:
-                while True:
-                    data = response.read(131072)  # 128KB chunks for better throughput
-                    if not data:
-                        break
-                    out_file.write(data)
-            
-            response.release_conn()
-            return True
-            
-        except (urllib3.exceptions.HTTPError, urllib3.exceptions.TimeoutError, socket.error) as e:
+            # Stream to file with larger chunks and proper cleanup
+            try:
+                with open(dest_path, 'wb') as out_file:
+                    chunk_size = 262144  # 256KB chunks for better throughput
+                    while True:
+                        data = response.read(chunk_size)
+                        if not data:
+                            break
+                        out_file.write(data)
+                        out_file.flush()  # Ensure data is written to disk
+                
+                # Verify file size
+                if os.path.getsize(dest_path) > 0:
+                    return True
+                else:
+                    os.remove(dest_path)
+                    
+            except Exception as e:
+                if os.path.exists(dest_path):
+                    os.remove(dest_path)
+                raise e
+            finally:
+                response.release_conn()
+                
+        except (urllib3.exceptions.HTTPError, urllib3.exceptions.TimeoutError, socket.error):
             if attempt == max_retries - 1:
                 if os.path.exists(dest_path):
                     os.remove(dest_path)
                 return False
             
-            time.sleep(0.2 * (attempt + 1))  # Increasing backoff
+            time.sleep(1 * (attempt + 1))  # Linear backoff
             continue
+            
     return False
 
 def extract_zip(zip_path, extract_to):
@@ -256,9 +281,6 @@ def download_coco_dataset(data_root):
     total = len(all_tasks)
     batch_size = initial_batch_size
     
-    # Use pool size proportional to batch size but respecting max connections
-    http.pool.maxsize = max(150, batch_size + 50)
-    
     for i in range(0, len(all_tasks), batch_size):
         batch = all_tasks[i:i + batch_size]
         
@@ -316,20 +338,43 @@ def quick_verify_downloads(img_ids, coco, target_dir):
     return missing
 
 def retry_downloads(missing_files, subset, target_dir):
-    """Retry missing downloads with increased timeouts"""
+    """Retry missing downloads with increased timeouts and better error handling"""
     if not missing_files:
         return
         
     print(f"\nRetrying {len(missing_files)} files from {subset}...")
-    with ThreadPoolExecutor(max_workers=10) as executor:  # Lower concurrency for retries
-        futures = []
+    completed = 0
+    failed = []
+    
+    # Use a lower concurrency and higher timeouts for retries
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = {}
         for file_name in missing_files:
             url = f"http://images.cocodataset.org/{subset}/{file_name}"
             target_path = os.path.join(target_dir, file_name)
-            futures.append(executor.submit(download_file_torch, url, target_path, max_retries=4))
-        
-        for future in tqdm(as_completed(futures), total=len(futures), desc="Retrying"):
-            future.result()
+            future = executor.submit(download_file_torch, url, target_path, max_retries=5)
+            futures[future] = file_name
+            
+        for future in as_completed(futures):
+            file_name = futures[future]
+            try:
+                if future.result():
+                    completed += 1
+                else:
+                    failed.append(file_name)
+                    
+                print(f"\rRetrying progress: {completed}/{len(missing_files)} completed", end="", flush=True)
+                
+            except Exception as e:
+                failed.append(file_name)
+                print(f"\nError retrying {file_name}: {str(e)}")
+                
+            # Small pause between retries to avoid overwhelming the server
+            time.sleep(0.1)
+    
+    print(f"\nRetry completed. Successfully downloaded {completed} files.")
+    if failed:
+        print(f"Failed to download {len(failed)} files after retries.")
 
 def verify_dataset_integrity(data_root):
     """Verify dataset exists and contains necessary files"""
