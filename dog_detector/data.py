@@ -117,7 +117,6 @@ class CocoDogsDataset(Dataset):
         total_dog_images = len(all_dog_imgs)
         total_person_images = len(all_person_imgs)
         
-        print(f"Found {total_dog_images} images with dogs and {total_person_images} images with only people")
         
         # Apply DOG_USAGE_RATIO to select subset of dog images
         num_dogs_to_use = int(total_dog_images * config.DOG_USAGE_RATIO)
@@ -128,9 +127,7 @@ class CocoDogsDataset(Dataset):
         # If we have fewer person images than dogs, adjust dog count to match
         if num_persons_to_use < num_dogs_to_use:
             num_dogs_to_use = num_persons_to_use
-            
-        print(f"Using {num_dogs_to_use} dog images and {num_persons_to_use} person-only images")
-        
+                    
         # Randomly select images
         random.seed(42)  # For reproducibility
         selected_dog_imgs = random.sample(all_dog_imgs, num_dogs_to_use)
@@ -181,24 +178,59 @@ class CocoDogsDataset(Dataset):
               f"{len(dog_subset)} dog images and {len(person_subset)} person-only images")
             
     def _get_verified_images(self, coco, split_name, category_id):
-        """Get set of image IDs for a category that exist on disk"""
+        """Get set of image IDs for a category that exist on disk with parallel downloads"""
+        from dog_detector.utils import download_file_torch
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        
         # First get all image IDs for this category
         img_ids = coco.getImgIds(catIds=[category_id])
         total_count = len(img_ids)
         verified_imgs = set()
         missing_count = 0
         
+        print(f"\nProcessing {split_name} - {coco.loadCats([category_id])[0]['name']}: Found {total_count} images in annotations")
+        
+        # Create list of download tasks for missing images
+        download_tasks = []
         for img_id in img_ids:
             img_info = coco.loadImgs(img_id)[0]
-            img_path = os.path.join(self.data_root, split_name, img_info["file_name"])
+            file_name = img_info["file_name"]
+            img_path = os.path.join(self.data_root, split_name, file_name)
             
-            if os.path.exists(img_path) and os.path.getsize(img_path) > 0:
-                verified_imgs.add(img_id)
+            if not os.path.exists(img_path) or os.path.getsize(img_path) == 0:
+                url = f"http://images.cocodataset.org/{split_name}/{file_name}"
+                download_tasks.append((url, img_path, img_id))
             else:
-                missing_count += 1
+                verified_imgs.add(img_id)
+        
+        if download_tasks:
+            # Create directory if it doesn't exist
+            os.makedirs(os.path.dirname(download_tasks[0][1]), exist_ok=True)
+            
+            # Use ThreadPoolExecutor for parallel downloads
+            max_workers = min(32, len(download_tasks))  # Limit max workers
+            print(f"Downloading {len(download_tasks)} missing images in parallel with {max_workers} workers...")
+            
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_task = {
+                    executor.submit(download_file_torch, url, path): (img_id, path)
+                    for url, path, img_id in download_tasks
+                }
                 
+                for future in as_completed(future_to_task):
+                    img_id, path = future_to_task[future]
+                    try:
+                        if future.result():
+                            verified_imgs.add(img_id)
+                        else:
+                            missing_count += 1
+                            print(f"Failed to download {path}")
+                    except Exception as e:
+                        missing_count += 1
+                        print(f"Failed to download {path}: {e}")
+        
         if missing_count > 0:
-            print(f"{split_name} - {coco.loadCats([category_id])[0]['name']}: Found {total_count} images in annotations, {missing_count} missing from disk")
+            print(f"{split_name} - {coco.loadCats([category_id])[0]['name']}: {missing_count} images failed to download")
                 
         return verified_imgs
     
@@ -343,19 +375,27 @@ class CocoDogsDataset(Dataset):
                 }
                 
                 # Print dataset stats
-                print("\nDataset Statistics:")
-                print(f"Total available images with dogs: {stats['total_available_dogs']}")
-                print(f"Total available images with only persons: {stats['total_available_persons']}")
-                print(f"Dog Usage Ratio: {config.DOG_USAGE_RATIO * 100:.1f}%")
-                print(f"Train/Val Split: {config.TRAIN_VAL_SPLIT * 100:.1f}%/{(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%\n")
+                print("\nDataset Configuration:")
+                print("--------------------")
+                print(f"DOG_USAGE_RATIO: {config.DOG_USAGE_RATIO * 100:.1f}%")
+                print(f"TRAIN_VAL_SPLIT: {config.TRAIN_VAL_SPLIT * 100:.1f}%/{(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%")
                 
-                print("Training set:")
-                print(f"  Images with dogs: {stats['train_with_dogs']}")
-                print(f"  Images without dogs: {stats['train_without_dogs']}")
+                print("\nTotal Available Images:")
+                print("--------------------")
+                print(f"Images with dogs: {stats['total_available_dogs']}")
+                print(f"Images without dogs (person only): {stats['total_available_persons']}")
                 
-                print("Validation set:")
-                print(f"  Images with dogs: {stats['val_with_dogs']}")
-                print(f"  Images without dogs: {stats['val_without_dogs']}\n")
+                print("\nTraining Set ({config.TRAIN_VAL_SPLIT * 100:.1f}%):")
+                print("--------------------")
+                print(f"Images with dogs: {stats['train_with_dogs']}")
+                print(f"Images without dogs: {stats['train_without_dogs']}")
+                print(f"Total training images: {stats['train_with_dogs'] + stats['train_without_dogs']}")
+                
+                print("\nValidation Set ({(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%):")
+                print("--------------------")
+                print(f"Images with dogs: {stats['val_with_dogs']}")
+                print(f"Images without dogs: {stats['val_without_dogs']}")
+                print(f"Total validation images: {stats['val_with_dogs'] + stats['val_without_dogs']}\n")
                 
                 return stats
             
@@ -384,19 +424,27 @@ class CocoDogsDataset(Dataset):
         }
         
         # Print dataset stats
-        print("\nDataset Statistics:")
-        print(f"Total available images with dogs: {stats['total_available_dogs']}")
-        print(f"Total available images with only persons: {stats['total_available_persons']}")
-        print(f"Dog Usage Ratio: {config.DOG_USAGE_RATIO * 100:.1f}%")
-        print(f"Train/Val Split: {config.TRAIN_VAL_SPLIT * 100:.1f}%/{(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%\n")
+        print("\nDataset Configuration:")
+        print("--------------------")
+        print(f"DOG_USAGE_RATIO: {config.DOG_USAGE_RATIO * 100:.1f}%")
+        print(f"TRAIN_VAL_SPLIT: {config.TRAIN_VAL_SPLIT * 100:.1f}%/{(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%")
         
-        print("Training set:")
-        print(f"  Images with dogs: {stats['train_with_dogs']}")
-        print(f"  Images without dogs: {stats['train_without_dogs']}")
+        print("\nTotal Available Images:")
+        print("--------------------")
+        print(f"Images with dogs: {stats['total_available_dogs']}")
+        print(f"Images without dogs (person only): {stats['total_available_persons']}")
         
-        print("Validation set:")
-        print(f"  Images with dogs: {stats['val_with_dogs']}")
-        print(f"  Images without dogs: {stats['val_without_dogs']}\n")
+        print("\nTraining Set ({config.TRAIN_VAL_SPLIT * 100:.1f}%):")
+        print("--------------------")
+        print(f"Images with dogs: {stats['train_with_dogs']}")
+        print(f"Images without dogs: {stats['train_without_dogs']}")
+        print(f"Total training images: {stats['train_with_dogs'] + stats['train_without_dogs']}")
+        
+        print("\nValidation Set ({(1-config.TRAIN_VAL_SPLIT) * 100:.1f}%):")
+        print("--------------------")
+        print(f"Images with dogs: {stats['val_with_dogs']}")
+        print(f"Images without dogs: {stats['val_without_dogs']}")
+        print(f"Total validation images: {stats['val_with_dogs'] + stats['val_without_dogs']}\n")
         
         return stats
 
