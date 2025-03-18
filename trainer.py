@@ -75,10 +75,57 @@ class Trainer:
     def train(self):
         best_val_loss = float('inf')
         epochs_without_improvement = 0
+        
+        # Track loss history for analysis
+        train_losses = []
+        val_losses = []
+        train_conf_losses = []
+        train_bbox_losses = []
+        val_conf_losses = []
+        val_bbox_losses = []
 
         for epoch in range(self.num_epochs):
             # Train for one epoch
-            train_loss, val_loss = self.train_epoch(epoch)
+            train_metrics, val_metrics = self.train_epoch(epoch)
+            train_loss = train_metrics['total_loss']
+            val_loss = val_metrics['total_loss'] if val_metrics else 0
+            
+            # Store loss values for tracking
+            train_losses.append(train_loss)
+            val_losses.append(val_loss)
+            train_conf_losses.append(train_metrics['conf_loss'])
+            train_bbox_losses.append(train_metrics['bbox_loss'])
+            val_conf_losses.append(val_metrics['conf_loss'])
+            val_bbox_losses.append(val_metrics['bbox_loss'])
+            
+            # Print detailed loss information
+            print(f"\n{'='*80}")
+            print(f"Epoch {epoch+1}/{self.num_epochs} Results:")
+            print(f"Training   - Total Loss: {train_loss:.6f}, Conf Loss: {train_metrics['conf_loss']:.6f}, Bbox Loss: {train_metrics['bbox_loss']:.6f}")
+            print(f"Validation - Total Loss: {val_loss:.6f}, Conf Loss: {val_metrics['conf_loss']:.6f}, Bbox Loss: {val_metrics['bbox_loss']:.6f}")
+            
+            # Print validation metrics
+            print(f"Validation Metrics - Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
+            print(f"                  - Mean IoU: {val_metrics['mean_iou']:.4f}, Mean Confidence: {val_metrics['mean_confidence']:.4f}")
+            
+            # Print loss changes from previous epoch
+            if epoch > 0:
+                train_loss_change = train_losses[-1] - train_losses[-2]
+                val_loss_change = val_losses[-1] - val_losses[-2]
+                print(f"Loss Changes - Training: {train_loss_change:.6f} ({'↓' if train_loss_change < 0 else '↑'}), "
+                      f"Validation: {val_loss_change:.6f} ({'↓' if val_loss_change < 0 else '↑'})")
+                
+                # Analyze loss components changes
+                train_conf_change = train_conf_losses[-1] - train_conf_losses[-2]
+                train_bbox_change = train_bbox_losses[-1] - train_bbox_losses[-2]
+                val_conf_change = val_conf_losses[-1] - val_conf_losses[-2]
+                val_bbox_change = val_bbox_losses[-1] - val_bbox_losses[-2]
+                
+                print(f"Training Components - Conf: {train_conf_change:.6f} ({'↓' if train_conf_change < 0 else '↑'}), "
+                      f"Bbox: {train_bbox_change:.6f} ({'↓' if train_bbox_change < 0 else '↑'})")
+                print(f"Validation Components - Conf: {val_conf_change:.6f} ({'↓' if val_conf_change < 0 else '↑'}), "
+                      f"Bbox: {val_bbox_change:.6f} ({'↓' if val_bbox_change < 0 else '↑'})")
+            print(f"{'='*80}\n")
             
             # Update learning rate based on validation loss
             self.scheduler.step(val_loss)
@@ -219,6 +266,10 @@ class Trainer:
         all_predictions = []
         all_targets = []
         
+        # Track component losses
+        total_conf_loss = 0
+        total_bbox_loss = 0
+        
         train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
         
         for step, (images, _, boxes) in enumerate(train_loader_bar):
@@ -243,6 +294,8 @@ class Trainer:
             
             # Update progress
             total_loss += loss.item()
+            total_conf_loss += loss_dict['conf_loss']
+            total_bbox_loss += loss_dict['bbox_loss']
             train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
             
             # Collect predictions and targets for epoch-level metrics
@@ -257,13 +310,15 @@ class Trainer:
 
         # Calculate average loss and metrics
         avg_loss = total_loss / len(self.train_loader)
+        avg_conf_loss = total_conf_loss / len(self.train_loader)
+        avg_bbox_loss = total_bbox_loss / len(self.train_loader)
         
         # Calculate epoch-level metrics
         metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
         metrics.update({
             'total_loss': avg_loss,
-            'conf_loss': loss_dict['conf_loss'],
-            'bbox_loss': loss_dict['bbox_loss']
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
         })
         
         # Log epoch metrics
@@ -274,7 +329,7 @@ class Trainer:
         if self.val_loader:
             val_metrics = self.validate(epoch)
         
-        return avg_loss, val_metrics['total_loss'] if val_metrics else 0
+        return metrics, val_metrics
 
     
     def validate(self, epoch):
@@ -282,6 +337,10 @@ class Trainer:
         total_loss = 0
         all_predictions = []
         all_targets = []
+        
+        # Initialize component loss tracking
+        total_conf_loss = 0
+        total_bbox_loss = 0
         
         with torch.no_grad():
             for images, _, boxes in tqdm(self.val_loader, desc='Validating'):
@@ -294,23 +353,35 @@ class Trainer:
                     }
                     targets.append(target)
                 
-                # Get predictions
-                predictions = self.model(images, targets)  # For loss calculation
+                # IMPORTANT: Force the model to return predictions in training format for loss calculation
+                # This ensures consistency between training and validation loss calculation
+                self.model.train()  # Temporarily set to train mode
+                predictions = self.model(images, targets)  # Get predictions in training format 
+                self.model.eval()   # Set back to eval mode
+                
+                # Calculate loss using the same format as training
                 loss_dict = self.criterion(predictions, targets)
                 total_loss += loss_dict['total_loss'].item()
                 
-                # Get inference predictions for metrics
+                # Track component losses properly
+                total_conf_loss += loss_dict['conf_loss']
+                total_bbox_loss += loss_dict['bbox_loss']
+                
+                # Get inference predictions for metrics (now in eval mode)
                 inference_preds = self.model(images, None)
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
         
         # Calculate metrics
         avg_loss = total_loss / len(self.val_loader)
+        avg_conf_loss = total_conf_loss / len(self.val_loader)
+        avg_bbox_loss = total_bbox_loss / len(self.val_loader)
+        
         metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
         metrics.update({
             'total_loss': avg_loss,
-            'conf_loss': loss_dict['conf_loss'],
-            'bbox_loss': loss_dict['bbox_loss']
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
         })
         
         # Log validation metrics
