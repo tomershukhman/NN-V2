@@ -17,11 +17,14 @@ class DogDetector(nn.Module):
         resnet = torchvision.models.resnet18(pretrained=pretrained)
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
         
-        # Enable gradient checkpointing for memory efficiency
-        self.backbone.train()
-        for module in self.backbone.modules():
-            if isinstance(module, nn.Sequential):
-                module.gradient_checkpointing_enable()
+        # Enable gradient checkpointing for memory efficiency using torch.utils.checkpoint directly
+        def create_custom_forward(module):
+            def custom_forward(*inputs):
+                return module(*inputs)
+            return custom_forward
+        
+        self.use_checkpointing = True
+        self.custom_forward = create_custom_forward(self.backbone)
         
         # Detection head layers
         self.conv1 = nn.Conv2d(512, 256, kernel_size=3, padding=1)
@@ -55,9 +58,9 @@ class DogDetector(nn.Module):
         self._feature_map_size = None
 
     def forward(self, x):
-        if self.training:
-            # Use gradient checkpointing in training mode
-            features = torch.utils.checkpoint.checkpoint(self.backbone, x)
+        # Apply gradient checkpointing in training mode
+        if self.training and self.use_checkpointing:
+            features = torch.utils.checkpoint.checkpoint(self.custom_forward, x)
         else:
             features = self.backbone(x)
             
