@@ -9,7 +9,7 @@ class DetectionLoss(nn.Module):
         self.bce_loss = nn.BCELoss(reduction='none')
         self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
 
-    def forward(self, predictions, targets):
+    def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs
         if isinstance(predictions, list):
             # Convert validation format to training format
@@ -140,7 +140,11 @@ class DetectionLoss(nn.Module):
         total_loc_loss = total_loc_loss / num_pos
         total_conf_loss = total_conf_loss / num_pos
         
-        total_loss = total_loc_loss + total_conf_loss
+        # Apply weights to loss components
+        weighted_loc_loss = bbox_weight * total_loc_loss
+        weighted_conf_loss = conf_weight * total_conf_loss
+        
+        total_loss = weighted_loc_loss + weighted_conf_loss
         
         return {
             'total_loss': total_loss,

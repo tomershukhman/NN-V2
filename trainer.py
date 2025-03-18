@@ -13,6 +13,7 @@ from visualization import VisualizationLogger
 import math
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
+import random
 
 class LRWarmupCosineAnnealing:
     """Custom learning rate scheduler with warmup followed by cosine annealing"""
@@ -79,7 +80,7 @@ def train():
 
     # Add learning rate scheduler with more gradual decay
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=6, verbose=True, min_lr=5e-7
+        optimizer, mode='min', factor=0.6, patience=8, verbose=True, min_lr=5e-7
     )
 
     # Get data loaders
@@ -157,6 +158,23 @@ class Trainer:
         # Create validation mini-batching for more stable evaluation
         self.val_batch_size = 16
         
+        # Gradient accumulation to stabilize training
+        self.gradient_accumulation_steps = 4
+        
+        # Validation cycle strategy to reduce zigzag pattern
+        self.validation_cycle = 3  # How many validation batches to average
+        
+        # Add loss weights scheduler
+        self.loss_conf_weight_start = 1.0
+        self.loss_conf_weight_end = 0.8
+        self.loss_bbox_weight_start = 1.0
+        self.loss_bbox_weight_end = 1.2
+        
+        # Set random seed for reproducibility
+        torch.manual_seed(42)
+        np.random.seed(42)
+        random.seed(42)
+        
     def train(self):
         # Initialize tracking variables
         best_val_loss = float('inf')
@@ -190,8 +208,11 @@ class Trainer:
             # Apply scheduled dropout
             self._update_dropout(epoch)
             
+            # Update loss weights
+            conf_weight, bbox_weight = self._update_loss_weights(epoch)
+            
             # Train for one epoch
-            train_metrics, val_metrics = self.train_epoch(epoch)
+            train_metrics, val_metrics = self.train_epoch(epoch, conf_weight, bbox_weight)
             train_loss = train_metrics['total_loss']
             val_loss = val_metrics['total_loss'] if val_metrics else 0
             
@@ -244,6 +265,7 @@ class Trainer:
             print(f"\n{'='*80}")
             print(f"Epoch {epoch+1}/{self.num_epochs} Results:")
             print(f"Learning Rate: {current_lr:.6f}, Weight Decay: {current_wd:.6f}")
+            print(f"Loss Weights - Confidence: {conf_weight:.2f}, BBox: {bbox_weight:.2f}")
             print(f"Training   - Total Loss: {train_loss:.6f}")
             print(f"Validation - Total Loss: {val_loss:.6f}")
             print(f"Smoothed Val Loss: {smoothed_val_loss:.6f}, EMA Val Loss: {ema_val_loss:.6f}")
@@ -265,8 +287,8 @@ class Trainer:
                       f"EMA Val: {ema_val_loss_change:.6f} ({'↓' if ema_val_loss_change < 0 else '↑'})")
             print(f"{'='*80}\n")
             
-            # Update learning rate based on EMA validation loss
-            self.scheduler.step(ema_val_loss)
+            # Update learning rate based on smoothed validation loss to avoid zigzag pattern triggering LR changes
+            self.scheduler.step(smoothed_val_loss)
             
             # Save best model logic
             improved = False
@@ -336,6 +358,13 @@ class Trainer:
         
         self.visualization_logger.close()
     
+    def _update_loss_weights(self, epoch):
+        """Update loss component weights according to schedule"""
+        progress = min(1.0, epoch / self.num_epochs)
+        conf_weight = self.loss_conf_weight_start + progress * (self.loss_conf_weight_end - self.loss_conf_weight_start)
+        bbox_weight = self.loss_bbox_weight_start + progress * (self.loss_bbox_weight_end - self.loss_bbox_weight_start)
+        return conf_weight, bbox_weight
+        
     def _update_dropout(self, epoch):
         """Update dropout rate according to schedule"""
         progress = min(1.0, epoch / self.num_epochs)
@@ -377,7 +406,7 @@ class Trainer:
             self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * val_loss
         return self.ema_val_loss
 
-    def train_epoch(self, epoch):
+    def train_epoch(self, epoch, conf_weight, bbox_weight):
         self.model.train()
         total_loss = 0
         all_predictions = []
@@ -388,6 +417,10 @@ class Trainer:
         total_bbox_loss = 0
         
         train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
+        
+        # Implement gradient accumulation
+        self.optimizer.zero_grad()
+        accumulated_steps = 0
         
         for step, (images, _, boxes) in enumerate(train_loader_bar):
             images = torch.stack([image.to(self.device) for image in images])
@@ -400,22 +433,33 @@ class Trainer:
                 targets.append(target)
             
             # Forward pass and loss calculation
-            self.optimizer.zero_grad()
             predictions = self.model(images, targets)
-            loss_dict = self.criterion(predictions, targets)
+            loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
             loss = loss_dict['total_loss']
+            
+            # Scale loss for gradient accumulation
+            loss = loss / self.gradient_accumulation_steps
             
             # Backward pass with gradient clipping
             loss.backward()
-            # Use a higher max norm for potentially faster convergence while still preventing exploding gradients
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=3.0)
-            self.optimizer.step()
             
-            # Update EMA model
-            self._update_ema_model()
+            accumulated_steps += 1
+            
+            # Only perform optimization step after accumulating gradients
+            if accumulated_steps == self.gradient_accumulation_steps or step == len(self.train_loader) - 1:
+                # Gradient clipping
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=3.0)
+                
+                # Optimizer step
+                self.optimizer.step()
+                self.optimizer.zero_grad()
+                accumulated_steps = 0
+                
+                # Update EMA model after optimizer step
+                self._update_ema_model()
             
             # Update progress
-            total_loss += loss.item()
+            total_loss += loss.item() * self.gradient_accumulation_steps  # Scale back for tracking
             total_conf_loss += loss_dict['conf_loss']
             total_bbox_loss += loss_dict['bbox_loss']
             train_loader_bar.set_postfix({
@@ -452,18 +496,53 @@ class Trainer:
         # Run validation
         val_metrics = None
         if self.val_loader:
-            # Run validation on regular model and EMA model
-            val_metrics = self.validate(epoch)
+            # Run validation using cycle strategy to reduce zigzag pattern
+            val_metrics_list = []
+            for _ in range(self.validation_cycle):
+                # Run validation with different random seeds
+                seed = random.randint(0, 10000) 
+                torch.manual_seed(seed)
+                np.random.seed(seed)
+                random.seed(seed)
+                
+                curr_val_metrics = self.validate(epoch, conf_weight, bbox_weight)
+                val_metrics_list.append(curr_val_metrics)
+            
+            # Average the validation metrics to reduce variance
+            val_metrics = self._average_validation_metrics(val_metrics_list)
+            
+            # Log the averaged validation metrics
+            self.visualization_logger.log_epoch_metrics('val_avg', val_metrics, epoch)
         
         return metrics, val_metrics
     
-    def validate(self, epoch):
+    def _average_validation_metrics(self, metrics_list):
+        """Average multiple validation runs to reduce variance"""
+        if not metrics_list:
+            return None
+            
+        avg_metrics = {}
+        for key in metrics_list[0].keys():
+            if key in ['iou_distribution', 'confidence_distribution', 'detections_per_image']:
+                # For tensor metrics, concatenate them
+                tensors = [metrics[key] for metrics in metrics_list]
+                if all(tensor.numel() > 0 for tensor in tensors):
+                    avg_metrics[key] = torch.cat(tensors)
+                else:
+                    avg_metrics[key] = torch.zeros(0)
+            else:
+                # For scalar metrics, average them
+                avg_metrics[key] = sum(metrics[key] for metrics in metrics_list) / len(metrics_list)
+                
+        return avg_metrics
+    
+    def validate(self, epoch, conf_weight, bbox_weight):
         """Validate the regular model and EMA model"""
         # Validate regular model
-        val_metrics = self.validate_model(self.model, epoch, prefix="val")
+        val_metrics = self.validate_model(self.model, epoch, prefix="val", conf_weight=conf_weight, bbox_weight=bbox_weight)
         
         # Validate EMA model
-        ema_val_metrics = self.validate_model(self.model_ema, epoch, prefix="val_ema")
+        ema_val_metrics = self.validate_model(self.model_ema, epoch, prefix="val_ema", conf_weight=conf_weight, bbox_weight=bbox_weight)
         
         # Print EMA model metrics
         print(f"EMA Model Metrics - Precision: {ema_val_metrics['precision']:.4f}, "
@@ -472,8 +551,8 @@ class Trainer:
         
         return val_metrics
 
-    def validate_model(self, model, epoch, prefix="val"):
-        """Run validation on a specific model instance"""
+    def validate_model(self, model, epoch, prefix="val", conf_weight=1.0, bbox_weight=1.0):
+        """Run validation on a specific model instance using consistent batches"""
         model.eval()
         total_loss = 0
         all_predictions = []
@@ -483,7 +562,7 @@ class Trainer:
         total_conf_loss = 0
         total_bbox_loss = 0
         
-        # Create mini-batches for more stable validation
+        # Create shuffle-consistent mini-batches for validation
         all_images = []
         all_boxes = []
         
@@ -491,6 +570,15 @@ class Trainer:
         for images, _, boxes in self.val_loader:
             all_images.extend(images)
             all_boxes.extend(boxes)
+        
+        # Create a reproducible shuffling for this validation run
+        indices = list(range(len(all_images)))
+        # Shuffling with a fixed seed to ensure consistency while still getting variety
+        random.Random(epoch).shuffle(indices)
+        
+        # Apply shuffling
+        all_images = [all_images[i] for i in indices]
+        all_boxes = [all_boxes[i] for i in indices]
         
         # Process in mini-batches
         num_samples = len(all_images)
@@ -521,8 +609,8 @@ class Trainer:
                     predictions = model(images, targets)
                     model.eval()  # Set back to eval mode
                     
-                    # Calculate loss using training format
-                    loss_dict = self.criterion(predictions, targets)
+                    # Calculate loss using training format with the same weights as training
+                    loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
                     total_loss += loss_dict['total_loss'].item() * len(targets)
                     total_conf_loss += loss_dict['conf_loss'] * len(targets)
                     total_bbox_loss += loss_dict['bbox_loss'] * len(targets)
