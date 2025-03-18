@@ -155,37 +155,50 @@ class DogDetector(nn.Module):
         return 32
 
     def post_process(self, cls_output, reg_output, anchors, conf_threshold=None, nms_threshold=None):
-        """Post-process outputs to get final detections"""
-        # Use a lower confidence threshold during early training
+        """Post-process outputs to get final detections with improved confidence handling"""
+        # Use a more conservative confidence threshold for inference
         if self.training:
-            conf_threshold = conf_threshold or 0.3  # Lower threshold during training
+            conf_threshold = conf_threshold or 0.3
         else:
             conf_threshold = conf_threshold or CONFIDENCE_THRESHOLD
             
-        nms_threshold = nms_threshold or 0.4  # Relaxed NMS threshold
+        nms_threshold = nms_threshold or NMS_THRESHOLD
         
         batch_size = cls_output.size(0)
         num_classes = cls_output.size(1)
-
-        # Reshape outputs
+        
+        # Reshape outputs to [batch_size, num_anchors, num_classes/4]
         cls_output = cls_output.permute(0, 2, 3, 4, 1).reshape(batch_size, -1, num_classes)
         reg_output = reg_output.permute(0, 2, 3, 4, 1).reshape(batch_size, -1, 4)
-        
-        # Apply softmax to get proper probabilities
-        cls_probs = F.softmax(cls_output, dim=-1)
-        scores = cls_probs[..., 1]  # Dog class probability (class index 1)
         
         processed_boxes = []
         processed_scores = []
         
         for i in range(batch_size):
-            # Decode box coordinates
+            # Get predictions for this image
             boxes = self._decode_boxes(reg_output[i], anchors)
             
-            # Filter by confidence threshold
-            mask = scores[i] > conf_threshold
+            # Apply softmax to get proper probabilities
+            cls_probs = F.softmax(cls_output[i], dim=-1)
+            scores = cls_probs[:, 1]  # Dog class probability
+            
+            # Initial confidence filtering with anchor-based penalties
+            anchor_widths = anchors[:, 2] - anchors[:, 0]
+            anchor_heights = anchors[:, 3] - anchors[:, 1]
+            anchor_areas = anchor_widths * anchor_heights
+            
+            # Penalize extremely small/large anchors
+            area_mean = anchor_areas.mean()
+            area_std = anchor_areas.std()
+            area_scores = torch.exp(-0.5 * ((anchor_areas - area_mean) / (area_std + 1e-6))**2)
+            
+            # Combine confidence with anchor penalties
+            adjusted_scores = scores * area_scores
+            
+            # Filter by confidence
+            mask = adjusted_scores > conf_threshold
             filtered_boxes = boxes[mask]
-            filtered_scores = scores[i][mask]
+            filtered_scores = adjusted_scores[mask]
             
             if filtered_boxes.size(0) > 0:
                 # Sort by confidence
@@ -193,19 +206,31 @@ class DogDetector(nn.Module):
                 filtered_boxes = filtered_boxes[sorted_indices]
                 filtered_scores = filtered_scores[sorted_indices]
                 
-                # Apply NMS
-                keep_indices = nms(filtered_boxes, filtered_scores, nms_threshold)
+                # Apply NMS with softer threshold during training
+                keep_indices = nms(
+                    filtered_boxes,
+                    filtered_scores,
+                    nms_threshold if not self.training else nms_threshold + 0.1
+                )
                 
-                # Take top MAX_DETECTIONS only if we have more valid detections than the limit
+                # Limit detections based on confidence distribution
                 if len(keep_indices) > MAX_DETECTIONS:
-                    keep_indices = keep_indices[:MAX_DETECTIONS]
-
+                    # Find elbow point in confidence scores
+                    scores_sorted = filtered_scores[keep_indices]
+                    score_diffs = scores_sorted[:-1] - scores_sorted[1:]
+                    elbow_idx = min(
+                        MAX_DETECTIONS,
+                        torch.where(score_diffs > score_diffs.mean() + score_diffs.std())[0][0].item() + 1
+                        if len(score_diffs) > 0 else MAX_DETECTIONS
+                    )
+                    keep_indices = keep_indices[:elbow_idx]
+                
                 processed_boxes.append(filtered_boxes[keep_indices])
                 processed_scores.append(filtered_scores[keep_indices])
             else:
                 processed_boxes.append(torch.zeros((0, 4), device=boxes.device))
                 processed_scores.append(torch.zeros(0, device=scores.device))
-
+        
         return processed_boxes, processed_scores
 
     def _decode_boxes(self, reg_output, anchors):
