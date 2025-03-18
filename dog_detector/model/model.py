@@ -204,7 +204,6 @@ class DogDetector(nn.Module):
         th = reg_output[:, 3]
 
         # Apply transformations with scale factor from config
-        scale = BOX_REG_SCALE
         cx = anchor_cx + tx * anchor_w / scale
         cy = anchor_cy + ty * anchor_h / scale
         
