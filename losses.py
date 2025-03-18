@@ -3,12 +3,13 @@ import torch.nn as nn
 from utils import box_iou
 
 class DetectionLoss(nn.Module):
-    def __init__(self, iou_threshold=0.5, neg_pos_ratio=3, conf_weight=1.0, loc_weight=1.0):
+    def __init__(self, iou_threshold=0.5, neg_pos_ratio=3, conf_weight=1.0, loc_weight=1.0, empty_image_weight=2.0):
         super().__init__()
         self.iou_threshold = iou_threshold
         self.neg_pos_ratio = neg_pos_ratio
         self.conf_weight = conf_weight
         self.loc_weight = loc_weight
+        self.empty_image_weight = empty_image_weight  # Higher weight for empty images
         self.bce_loss = nn.BCELoss(reduction='none')
         self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
 
@@ -72,8 +73,12 @@ class DetectionLoss(nn.Module):
             num_gt = len(gt_boxes)
             
             if num_gt == 0:
-                # If no ground truth boxes, all predictions should have low confidence
+                # If no ground truth boxes, all predictions should have very low confidence
+                # Apply stronger penalty for false positives in empty images
                 conf_loss = self.bce_loss(conf_pred[i], torch.zeros_like(conf_pred[i]))
+                # Add extra penalty for high confidence predictions in empty images
+                high_conf_penalty = torch.pow(conf_pred[i], 2)  # Quadratic penalty for high confidence
+                conf_loss = (conf_loss + high_conf_penalty) * self.empty_image_weight
                 total_conf_loss += conf_loss.mean()
                 continue
             

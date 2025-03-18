@@ -40,8 +40,9 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         print(f"Error creating validation dataset: {e}")
         raise RuntimeError(f"Failed to create validation dataset: {e}")
     
-    print(f"Train set: {len(train_dataset)} images with dogs")
-    print(f"Val set: {len(val_dataset)} images with dogs")
+    # Update the reporting to show both total images and images with dogs
+    print(f"Train set: {len(train_dataset)} total images")
+    print(f"Val set: {len(val_dataset)} total images")
     
     num_workers = min(8, NUM_WORKERS)
     
