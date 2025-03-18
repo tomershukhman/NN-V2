@@ -336,7 +336,7 @@ class CocoDogsDataset(Dataset):
                 # Memory management between batches
                 gc.collect()
                 if psutil.virtual_memory().percent > 85:
-                    time.sleep(0.3)
+                    pass
         
         print(f"\n{split_name} - {coco.loadCats([category_id])[0]['name']}: {missing_count} images failed to download")
         print(f"Total images available: {len(verified_imgs)}")

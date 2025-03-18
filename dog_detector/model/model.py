@@ -203,9 +203,9 @@ class DogDetector(nn.Module):
         tw = reg_output[:, 2]
         th = reg_output[:, 3]
 
-        # Apply transformations with scale factor from config
-        cx = anchor_cx + tx * anchor_w / scale
-        cy = anchor_cy + ty * anchor_h / scale
+        # Apply transformations directly without scale factor
+        cx = anchor_cx + tx * anchor_w  # Removed division by undefined scale
+        cy = anchor_cy + ty * anchor_h  # Removed division by undefined scale
         
         # More conservative clamping for width/height to prevent collapse
         w = torch.exp(torch.clamp(tw, -2, 2)) * anchor_w

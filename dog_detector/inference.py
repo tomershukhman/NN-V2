@@ -9,7 +9,7 @@ from PIL import Image
 import torchvision.transforms as transforms
 import matplotlib.pyplot as plt
 
-from dog_detector.model import DogDetector
+from dog_detector.model.model import DogDetector
 from dog_detector.visualization.image_utils import visualize_predictions
 from config import (
     NUM_CLASSES, MEAN, STD, IMAGE_SIZE, CONFIDENCE_THRESHOLD, OUTPUT_DIR, DEVICE, IMAGE_EXTENSIONS
