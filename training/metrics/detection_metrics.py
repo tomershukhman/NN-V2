@@ -1,5 +1,6 @@
 import torch
 import numpy as np
+from utils import box_iou
 
 class DetectionMetricsCalculator:
     @staticmethod
@@ -43,7 +44,7 @@ class DetectionMetricsCalculator:
             
             # Calculate IoUs for matched predictions
             if num_pred > 0 and num_gt > 0:
-                ious = DetectionMetricsCalculator._calculate_box_iou(pred_boxes, gt_boxes)
+                ious = box_iou(pred_boxes, gt_boxes)  # Using common implementation
                 if len(ious) > 0:
                     max_ious, _ = ious.max(dim=0)
                     all_ious.extend(max_ious.cpu().tolist())
@@ -99,21 +100,3 @@ class DetectionMetricsCalculator:
         metrics['performance']['f1_score'] = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         
         return metrics
-
-    @staticmethod
-    def _calculate_box_iou(boxes1, boxes2):
-        """Calculate IoU between two sets of boxes"""
-        # Calculate intersection areas
-        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
-        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
-        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
-        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
-        
-        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-        
-        # Calculate union areas
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-        union = area1[:, None] + area2 - intersection
-        
-        return intersection / (union + 1e-6)
