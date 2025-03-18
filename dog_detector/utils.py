@@ -85,13 +85,13 @@ def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thres
     # Initialize targets
     cls_targets = -torch.ones((num_anchors,), dtype=torch.int64, device=device)
     reg_targets = torch.zeros((num_anchors, 4), dtype=torch.float32, device=device)
-
+    
     if gt_boxes.numel() == 0:
         # No ground truth boxes, all anchors are negative
         cls_targets[:] = 0
         pos_mask = torch.zeros_like(cls_targets, dtype=torch.bool)
         return cls_targets, reg_targets, pos_mask
-
+    
     # Compute IoU between anchors and GT boxes
     ious = compute_iou(anchors, gt_boxes)  # Shape: (num_anchors, num_gt)
     
@@ -126,12 +126,12 @@ def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thres
         gt_cx = matched_gt_boxes[:, 0] + 0.5 * gt_w
         gt_cy = matched_gt_boxes[:, 1] + 0.5 * gt_h
         
-        # Compute regression targets
-        reg_targets[pos_mask, 0] = (gt_cx - pos_anchor_cx) / pos_anchor_w
-        reg_targets[pos_mask, 1] = (gt_cy - pos_anchor_cy) / pos_anchor_h
-        reg_targets[pos_mask, 2] = torch.log(gt_w / pos_anchor_w)
-        reg_targets[pos_mask, 3] = torch.log(gt_h / pos_anchor_h)
-
+        # Compute regression targets without scale factor
+        reg_targets[pos_mask, 0] = (gt_cx - pos_anchor_cx) / pos_anchor_w  # tx without scale
+        reg_targets[pos_mask, 1] = (gt_cy - pos_anchor_cy) / pos_anchor_h  # ty without scale
+        reg_targets[pos_mask, 2] = torch.log(gt_w / pos_anchor_w)  # tw
+        reg_targets[pos_mask, 3] = torch.log(gt_h / pos_anchor_h)  # th
+    
     return cls_targets, reg_targets, pos_mask
 
 

@@ -30,9 +30,6 @@ REG_LOSS_WEIGHT = 1.0  # Reduced since we now have proper normalization
 # Loss function parameters
 POS_IOU_THRESHOLD = 0.5   # Stricter threshold for positive matches
 NEG_IOU_THRESHOLD = 0.3   # Better separation between positive and negative samples
-BOX_REG_SCALE = 4.0      # Original scale maintained
-
-
 
 # Model parameters
 IMAGE_SIZE = (512, 512)  # Fixed input size as width,height tuple

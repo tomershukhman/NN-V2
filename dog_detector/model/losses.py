@@ -106,10 +106,10 @@ class DetectionLoss(nn.Module):
                 gt_cx = pos_gt_boxes[:, 0] + 0.5 * gt_w
                 gt_cy = pos_gt_boxes[:, 1] + 0.5 * gt_h
                 
-                # Compute regression targets
+                # Compute regression targets - Apply the same scale factor used in decoding
                 reg_targets = torch.zeros_like(reg_output_i[pos_mask])
-                reg_targets[:, 0] = (gt_cx - pos_anchor_cx) / pos_anchor_w  # tx
-                reg_targets[:, 1] = (gt_cy - pos_anchor_cy) / pos_anchor_h  # ty
+                reg_targets[:, 0] = (gt_cx - pos_anchor_cx) / pos_anchor_w  # tx without scale
+                reg_targets[:, 1] = (gt_cy - pos_anchor_cy) / pos_anchor_h  # ty without scale
                 reg_targets[:, 2] = torch.log(gt_w / pos_anchor_w)  # tw
                 reg_targets[:, 3] = torch.log(gt_h / pos_anchor_h)  # th
                 

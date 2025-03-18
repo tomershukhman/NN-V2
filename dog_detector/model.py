@@ -6,7 +6,8 @@ import torchvision
 from torchvision.ops import nms
 from dog_detector.utils import compute_iou
 from config import (
-    PRETRAINED  , NUM_CLASSES,ANCHOR_SCALES,ANCHOR_RATIOS, IMAGE_SIZE,CONFIDENCE_THRESHOLD, NMS_THRESHOLD,MAX_DETECTIONS
+    PRETRAINED, NUM_CLASSES, ANCHOR_SCALES, ANCHOR_RATIOS, IMAGE_SIZE, 
+    CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS
 )
 
 class DogDetector(nn.Module):
@@ -216,11 +217,18 @@ class DogDetector(nn.Module):
         tw = reg_output[:, 2]  # width scale factor (log space)
         th = reg_output[:, 3]  # height scale factor (log space)
         
-        # Apply transformations matching target encoding
+        # Apply transformations without scale factor
         cx = anchor_cx + tx * anchor_w  # Decode x center
         cy = anchor_cy + ty * anchor_h  # Decode y center
-        w = torch.exp(tw) * anchor_w    # Decode width
-        h = torch.exp(th) * anchor_h    # Decode height
+        
+        # More conservative clamping for width/height to prevent collapse
+        w = torch.exp(torch.clamp(tw, -2, 2)) * anchor_w
+        h = torch.exp(torch.clamp(th, -2, 2)) * anchor_h
+        
+        # Add size constraints to prevent degenerate boxes
+        min_size = 4.0  # Minimum 4 pixels
+        w = torch.clamp(w, min=min_size)
+        h = torch.clamp(h, min=min_size)
         
         # Convert to x1,y1,x2,y2 format
         x1 = cx - w/2
@@ -237,7 +245,6 @@ class DogDetector(nn.Module):
         ], dim=1)
         
         # Ensure minimum size and proper ordering
-        min_size = 1.0  # Minimum 1 pixel
         boxes = torch.stack([
             boxes[:, 0],
             boxes[:, 1],
