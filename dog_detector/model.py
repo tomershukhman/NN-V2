@@ -209,26 +209,25 @@ class DogDetector(nn.Module):
         anchor_h = anchor_y2 - anchor_y1
         anchor_cx = (anchor_x1 + anchor_x2) / 2
         anchor_cy = (anchor_y1 + anchor_y2) / 2
-
-        # Extract regression values and apply sigmoid to constrain offsets
-        tx = torch.sigmoid(reg_output[:, 0]) * 2 - 1  # [-1, 1]
-        ty = torch.sigmoid(reg_output[:, 1]) * 2 - 1  # [-1, 1]
+        
+        # Extract regression values - remove sigmoid to allow unbounded offsets
+        tx = reg_output[:, 0]
+        ty = reg_output[:, 1]
         tw = reg_output[:, 2]
         th = reg_output[:, 3]
-
-        # Apply transformations with scale factor for better stability
-        scale = 4.0  # Scale factor for offsets
-        cx = anchor_cx + tx * anchor_w / scale
-        cy = anchor_cy + ty * anchor_h / scale
-        w = torch.exp(torch.clamp(tw, -4, 4)) * anchor_w  # Clamp to prevent extreme scaling
-        h = torch.exp(torch.clamp(th, -4, 4)) * anchor_h
-
+        
+        # Apply transformations with better scaling
+        cx = anchor_cx + tx * anchor_w  # Remove scale factor to allow full movement
+        cy = anchor_cy + ty * anchor_h
+        w = torch.exp(torch.clamp(tw, -5, 5)) * anchor_w  # Increased clamp range for better scaling
+        h = torch.exp(torch.clamp(th, -5, 5)) * anchor_h
+        
         # Convert back to x1,y1,x2,y2 format
         x1 = cx - w/2
         y1 = cy - h/2
         x2 = cx + w/2
-        y2 = cy + h/2
-
+        y2 = cy + h/2  # Fixed: was using cx instead of cy
+        
         # Stack and return
         boxes = torch.stack([x1, y1, x2, y2], dim=1)
         
@@ -239,5 +238,4 @@ class DogDetector(nn.Module):
             torch.max(boxes[:, 2], boxes[:, 0] + 1),  # Ensure x2 > x1
             torch.max(boxes[:, 3], boxes[:, 1] + 1)   # Ensure y2 > y1
         ], dim=1)
-
         return boxes

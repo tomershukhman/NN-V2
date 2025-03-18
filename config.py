@@ -1,6 +1,13 @@
 import os
 import torch
 
+# Device configuration
+DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+if DEVICE == "cuda":
+    DOG_USAGE_RATIO = 1.0
+else:
+    DOG_USAGE_RATIO = 0.1    
+
 # Basic paths
 DATA_ROOT = 'data'
 OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
@@ -19,22 +26,21 @@ NUM_WORKERS = 4
 LEARNING_RATE = 1e-4
 NUM_EPOCHS = 50
 WEIGHT_DECAY = 1e-4
-REG_LOSS_WEIGHT = 5.0  # Reduced to prevent overfitting to few positive samples
+REG_LOSS_WEIGHT = 1.0  # Reduced since we now have proper normalization
 
 # Loss function parameters
-POS_IOU_THRESHOLD = 0.4   # More balanced threshold for positive matches
-NEG_IOU_THRESHOLD = 0.2   # Maintains good separation while allowing more training signal
-BOX_REG_SCALE = 4.0      # Back to original scale
+POS_IOU_THRESHOLD = 0.5   # Stricter threshold for positive matches
+NEG_IOU_THRESHOLD = 0.3   # Better separation between positive and negative samples
+BOX_REG_SCALE = 4.0      # Original scale maintained
 
-# Device configuration
-DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+
 
 # Model parameters
 IMAGE_SIZE = (512, 512)  # Fixed input size as width,height tuple
-CONFIDENCE_THRESHOLD = 0.35  # Slightly higher than original but not too strict
-NMS_THRESHOLD = 0.45       
+CONFIDENCE_THRESHOLD = 0.5  # Stricter confidence threshold to reduce false positives
+NMS_THRESHOLD = 0.3       # Lower NMS threshold to remove more overlapping boxes
 MAX_DETECTIONS = 100
-IOU_THRESHOLD = 0.4        # More balanced evaluation threshold
+IOU_THRESHOLD = 0.5        # Stricter IoU threshold for evaluation
 PRETRAINED = True  # Use pretrained backbone
 
 # Visualization parameters

@@ -66,14 +66,14 @@ def compute_iou(boxes1, boxes2):
     return iou
 
 
-def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.25, neg_iou_thresh=0.1):
+def assign_anchors_to_image(anchors, gt_boxes, pos_iou_thresh=0.5, neg_iou_thresh=0.3):
     """
     Assign each anchor a classification target and a regression target.
     Args:
         anchors: (N, 4) tensor of anchor boxes
         gt_boxes: (M, 4) tensor of ground truth boxes
-        pos_iou_thresh: IoU threshold for positive samples
-        neg_iou_thresh: IoU threshold for negative samples
+        pos_iou_thresh: IoU threshold for positive samples (increased from 0.25 to 0.5)
+        neg_iou_thresh: IoU threshold for negative samples (increased from 0.1 to 0.3)
     Returns:
         cls_targets: (N,) tensor with values {1: positive, 0: negative, -1: ignore}
         reg_targets: (N, 4) tensor of regression targets

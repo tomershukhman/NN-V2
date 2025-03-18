@@ -29,15 +29,13 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
         # Generate anchors once per batch
         anchors = model.generate_anchors((feat_h, feat_w), device)
         
-        # Forward pass - outputs are already in the correct shape:
-        # cls_out: [B, num_classes+1, num_anchors, H, W]
-        # reg_out: [B, 4, num_anchors, H, W]
+        # Forward pass
         cls_out, reg_out = model(images)
         
         # Reshape outputs for loss computation
         num_classes = cls_out.size(1)
-        cls_out_flat = cls_out.permute(0, 3, 4, 2, 1).reshape(-1, num_classes)  # [B*H*W*A, num_classes]
-        reg_out_flat = reg_out.permute(0, 3, 4, 2, 1).reshape(-1, 4)  # [B*H*W*A, 4]
+        cls_out_flat = cls_out.permute(0, 3, 4, 2, 1).reshape(-1, num_classes)
+        reg_out_flat = reg_out.permute(0, 3, 4, 2, 1).reshape(-1, 4)
         
         optimizer.zero_grad()
         
@@ -58,16 +56,21 @@ def train_one_epoch(model, dataloader, optimizer, device, epoch, writer):
         batch_reg_targets = torch.cat(batch_reg_targets).to(device)
         batch_reg_masks = torch.cat(batch_reg_masks).to(device)
         
-        # Calculate classification loss
-        cls_loss = cls_loss_fn(cls_out_flat, batch_cls_labels) / (batch_cls_labels.size(0) or 1)
+        # Calculate classification loss - normalize by total number of samples
+        total_samples = batch_cls_labels.size(0)
+        cls_loss = cls_loss_fn(cls_out_flat, batch_cls_labels) / total_samples
         
-        # Only compute regression loss if there are positive anchors
-        if batch_reg_masks.any():
-            reg_loss = reg_loss_fn(reg_out_flat[batch_reg_masks], batch_reg_targets[batch_reg_masks]) / (batch_reg_masks.sum().item() or 1)
+        # Calculate regression loss - normalize by number of positive samples
+        num_pos = batch_reg_masks.sum().item()
+        if num_pos > 0:
+            reg_loss = reg_loss_fn(
+                reg_out_flat[batch_reg_masks],
+                batch_reg_targets[batch_reg_masks]
+            ) / num_pos
         else:
             reg_loss = torch.tensor(0.0, device=device)
         
-        # Calculate total loss with weighted regression component
+        # Total loss with proper normalization
         loss = cls_loss + REG_LOSS_WEIGHT * reg_loss
         total_loss += loss.item()
         
