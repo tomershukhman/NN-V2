@@ -16,6 +16,13 @@ class DogDetector(nn.Module):
         # Load pretrained ResNet18 backbone (excluding final classification layers)
         resnet = torchvision.models.resnet18(pretrained=pretrained)
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
+        
+        # Enable gradient checkpointing for memory efficiency
+        self.backbone.train()
+        for module in self.backbone.modules():
+            if isinstance(module, nn.Sequential):
+                module.gradient_checkpointing_enable()
+        
         # Detection head layers
         self.conv1 = nn.Conv2d(512, 256, kernel_size=3, padding=1)
         self.bn1 = nn.BatchNorm2d(256)
@@ -48,7 +55,12 @@ class DogDetector(nn.Module):
         self._feature_map_size = None
 
     def forward(self, x):
-        features = self.backbone(x)
+        if self.training:
+            # Use gradient checkpointing in training mode
+            features = torch.utils.checkpoint.checkpoint(self.backbone, x)
+        else:
+            features = self.backbone(x)
+            
         x = F.relu(self.bn1(self.conv1(features)))
         x = F.relu(self.bn2(self.conv2(x)))
         
@@ -60,15 +72,13 @@ class DogDetector(nn.Module):
             self._feature_map_size = (feat_h, feat_w)
             self._anchors = self.generate_anchors((feat_h, feat_w), x.device)
 
-        # Classification head: [B, (num_classes+1)*num_anchors, H, W]
+        # Classification head
         cls_output = self.cls_head(x)
-        # Reshape to [B, num_classes+1, num_anchors, H, W]
         cls_output = cls_output.reshape(batch_size, self.num_anchors, -1, feat_h, feat_w)
         cls_output = cls_output.permute(0, 2, 1, 3, 4).contiguous()
         
-        # Regression head: [B, 4*num_anchors, H, W]
+        # Regression head
         reg_output = self.reg_head(x)
-        # Reshape to [B, 4, num_anchors, H, W]
         reg_output = reg_output.reshape(batch_size, self.num_anchors, 4, feat_h, feat_w)
         reg_output = reg_output.permute(0, 2, 1, 3, 4).contiguous()
 

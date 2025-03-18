@@ -20,7 +20,7 @@ VISUALZIE_TOP_K = 5
 IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png']
 
 # Training parameters
-BATCH_SIZE = 16
+BATCH_SIZE = 8  # Reduced from 16 to reduce memory usage
 NUM_WORKERS = 4
 LEARNING_RATE = 5e-5  # Reduced learning rate for better stability
 NUM_EPOCHS = 50
@@ -32,7 +32,7 @@ POS_IOU_THRESHOLD = 0.5   # Threshold for positive matches
 NEG_IOU_THRESHOLD = 0.3   # Threshold for negative samples
 
 # Model parameters
-IMAGE_SIZE = (512, 512)  # Fixed input size as width,height tuple
+IMAGE_SIZE = (384, 384)  # Reduced from 512x512 to reduce memory usage
 CONFIDENCE_THRESHOLD = 0.6  # Increased to reduce false positives
 NMS_THRESHOLD = 0.3       # Helps remove overlapping boxes
 MAX_DETECTIONS = 100
@@ -53,9 +53,9 @@ DOG_CATEGORY_ID = 18
 MEAN = [0.485, 0.456, 0.406]  # ImageNet normalization
 STD = [0.229, 0.224, 0.225]
 
-# Model architecture settings - Updated based on anchor analysis
+# Model architecture settings - Optimized based on anchor analysis
 # GT box sizes range from ~30px to ~500px, with median width around 139px and height 96px
 # GT aspect ratios range from 0.3 to 4.0
-ANCHOR_SCALES = [32, 64, 96, 128, 192, 256, 384]  # More scales to better match observed sizes
-ANCHOR_RATIOS = [0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]  # Extended to cover the wide range of observed aspect ratios
+ANCHOR_SCALES = [32, 64, 128, 256, 384]  # Key scales targeting median and extremes
+ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5, 2.0]  # Focused ratio coverage
 BACKBONE_FROZEN_LAYERS = 2
