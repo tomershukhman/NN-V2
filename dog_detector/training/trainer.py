@@ -80,32 +80,66 @@ def train(data_root=None, download=True, batch_size=None):
 
     # Get model and criterion
     model = get_model(DEVICE)
-    # Pass model instance to DetectionLoss
     criterion = DetectionLoss(model).to(DEVICE)
-    optimizer = torch.optim.Adam(
-        model.parameters(), lr=LEARNING_RATE, weight_decay=WEIGHT_DECAY)
+    
+    # Improved optimizer with momentum
+    optimizer = torch.optim.SGD(
+        [
+            {'params': model.backbone.parameters(), 'lr': LEARNING_RATE * 0.1},  # Lower LR for pretrained backbone
+            {'params': model.conv1.parameters()},
+            {'params': model.conv2.parameters()},
+            {'params': model.cls_head.parameters(), 'lr': LEARNING_RATE * 2.0},  # Higher LR for classification head
+            {'params': model.reg_head.parameters(), 'lr': LEARNING_RATE * 2.0}   # Higher LR for regression head
+        ],
+        lr=LEARNING_RATE,
+        momentum=0.9,
+        weight_decay=WEIGHT_DECAY
+    )
+    
+    # Learning rate scheduler - reduce LR when validation loss plateaus
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=0.5,
+        patience=5,
+        verbose=True
+    )
 
     # Training loop
     best_val_loss = float('inf')
     best_f1_score = 0.0
+    plateau_count = 0
+    prev_val_loss = float('inf')
 
     for epoch in range(NUM_EPOCHS):
         epoch_start_time = time.time()
 
         # Train
-        train_metrics = train_epoch(
-            model, train_loader, criterion, optimizer, epoch)
+        train_metrics = train_epoch(model, train_loader, criterion, optimizer, epoch)
 
         # Validate with detailed metrics
-        val_metrics = validate_epoch(
-            model, val_loader, criterion, epoch, vis_logger, log_images=(epoch % 5 == 0))
+        val_metrics = validate_epoch(model, val_loader, criterion, epoch, vis_logger, log_images=(epoch % 5 == 0))
+
+        # Update learning rate based on validation loss
+        scheduler.step(val_metrics['total_loss'])
+
+        # Early stopping check
+        if val_metrics['total_loss'] >= prev_val_loss:
+            plateau_count += 1
+        else:
+            plateau_count = 0
+            
+        if plateau_count >= 15:  # Stop if no improvement for 15 epochs
+            print("\n⚠️ Early stopping triggered - no improvement in validation loss for 15 epochs")
+            break
+            
+        prev_val_loss = val_metrics['total_loss']
 
         # Calculate epoch duration
         epoch_duration = time.time() - epoch_start_time
 
         # Display metrics summary
-        vis_logger.display_metrics_summary(
-            train_metrics, val_metrics, epoch, epoch_duration)
+        vis_logger.display_metrics_summary(train_metrics, val_metrics, epoch, epoch_duration)
 
         # Log metrics to CSV with epoch number
         train_metrics['epoch'] = epoch

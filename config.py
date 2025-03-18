@@ -14,7 +14,6 @@ OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs"
 OUTPUT_DIR = os.path.join(OUTPUT_ROOT, "predictions")
 
 # Dataset parameters
-DOG_USAGE_RATIO = 0.25
 TRAIN_VAL_SPLIT = 0.8
 COCO_DOG_CATEGORY_ID = 18
 VISUALZIE_TOP_K = 5
