@@ -1,5 +1,9 @@
 import os
 import torch
+from device import get_device
+
+DEVICE = get_device()
+
 
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
@@ -38,3 +42,7 @@ MAX_DETECTIONS = 20  # Reduced maximum detections per image
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20  # Number of training images to show in tensorboard
 TENSORBOARD_VAL_IMAGES = 20    # Number of validation images to show in tensorboard
+
+if DEVICE == "cuda":
+    DATA_SET_TO_USE = 1.0  # Use full dataset when training on GPU
+    BATCH_SIZE = 64  # Increase batch size for GPU training
