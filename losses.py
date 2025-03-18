@@ -143,9 +143,14 @@ class DetectionLoss(nn.Module):
         total_loss = total_loc_loss + total_conf_loss
         
         return {
-            'total_loss': total_loss,
+            'total_loss': total_loss,  # Keep tensor for backward()
             'conf_loss': total_conf_loss.item(),
-            'bbox_loss': total_loc_loss.item()
+            'bbox_loss': total_loc_loss.item(),
+            'loss_values': {  # Add float values for logging
+                'total_loss': total_loss.item(),
+                'conf_loss': total_conf_loss.item(),
+                'bbox_loss': total_loc_loss.item()
+            }
         }
 
     @staticmethod

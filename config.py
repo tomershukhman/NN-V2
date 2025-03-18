@@ -8,15 +8,21 @@ DEVICE = get_device()
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
 OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
-DATA_SET_TO_USE = 0.1  # Use 1% of available data for faster iteration
+DATA_SET_TO_USE = 0.25  # Use 1% of available data for faster iteration
 TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
 
 # Training parameters
-BATCH_SIZE = 16  # Reduced batch size due to more complex model
+BATCH_SIZE = 64  # Increased batch size for better gradient estimates
 NUM_WORKERS = min(8, os.cpu_count() or 1)
-LEARNING_RATE = 5e-5  # Reduced learning rate for stability
+LEARNING_RATE = 1e-3  # Increased from 5e-5 for faster initial learning
 NUM_EPOCHS = 100  # Increased epochs since we have a more complex model
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+
+# Learning rate scheduler parameters
+LR_SCHEDULER_FACTOR = 0.1  # Reduce LR by factor of 10
+LR_SCHEDULER_PATIENCE = 5  # Number of epochs to wait before reducing LR
+LR_SCHEDULER_MIN_LR = 1e-6  # Minimum learning rate
+GRAD_CLIP_VALUE = 1.0  # Maximum gradient norm for gradient clipping
 
 # Model parameters
 NUM_CLASSES = 2  # Background and Dog

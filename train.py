@@ -31,11 +31,6 @@ def main():
         weight_decay=0.01
     )
 
-    # Add learning rate scheduler
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
-
     # Get data loaders
     train_loader, val_loader = get_data_loaders()
     
@@ -44,7 +39,6 @@ def main():
         model=model,
         criterion=criterion,
         optimizer=optimizer,
-        scheduler=scheduler,
         train_loader=train_loader,
         val_loader=val_loader,
         device=DEVICE,

@@ -72,9 +72,13 @@ class MetricsLogger:
             return None
 
     def _flatten_metrics_dict(self, metrics_dict, parent_key='', sep='.'):
-        """Flatten nested dictionary into single level with dot notation keys"""
+        """Flatten nested dictionary into single level with dot notation keys, excluding distribution metrics"""
         items = []
         for k, v in metrics_dict.items():
+            # Skip any keys containing 'distribution'
+            if 'distribution' in k.lower():
+                continue
+                
             new_key = f"{parent_key}{sep}{k}" if parent_key else k
             
             if isinstance(v, dict):

@@ -30,38 +30,63 @@ class VisualizationLogger:
         """Log comprehensive epoch-level metrics"""
         prefix = 'Train' if phase == 'train' else 'Val'
         
-        # Loss metrics
-        self.writer.add_scalar(f'{prefix}/Loss/Total', metrics['total_loss'], epoch)
-        self.writer.add_scalar(f'{prefix}/Loss/Confidence', metrics['conf_loss'], epoch)
-        self.writer.add_scalar(f'{prefix}/Loss/BBox', metrics['bbox_loss'], epoch)
+        # Log basic metrics
+        if 'total_loss' in metrics:
+            self.writer.add_scalar(f'{prefix}/Loss/Total', metrics['total_loss'], epoch)
+        if 'conf_loss' in metrics:
+            self.writer.add_scalar(f'{prefix}/Loss/Confidence', metrics['conf_loss'], epoch)
+        if 'bbox_loss' in metrics:
+            self.writer.add_scalar(f'{prefix}/Loss/BBox', metrics['bbox_loss'], epoch)
 
-        # Detection quality metrics
-        self.writer.add_scalar(f'{prefix}/Detection/CorrectCountPercent', metrics['correct_count_percent'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/OverDetections', metrics['over_detections'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/UnderDetections', metrics['under_detections'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/MeanIoU', metrics['mean_iou'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/MedianIoU', metrics['median_iou'], epoch)
-        
-        # Confidence score distribution
-        self.writer.add_scalar(f'{prefix}/Confidence/MeanScore', metrics['mean_confidence'], epoch)
-        self.writer.add_scalar(f'{prefix}/Confidence/MedianScore', metrics['median_confidence'], epoch)
-        
-        # Per-image statistics
-        self.writer.add_scalar(f'{prefix}/Statistics/AvgDetectionsPerImage', metrics['avg_detections'], epoch)
-        self.writer.add_scalar(f'{prefix}/Statistics/AvgGroundTruthPerImage', metrics['avg_ground_truth'], epoch)
-        
-        # Performance metrics
-        self.writer.add_scalar(f'{prefix}/Performance/Precision', metrics['precision'], epoch)
-        self.writer.add_scalar(f'{prefix}/Performance/Recall', metrics['recall'], epoch)
-        self.writer.add_scalar(f'{prefix}/Performance/F1Score', metrics['f1_score'], epoch)
+        # Log detection statistics
+        if 'detection_stats' in metrics:
+            det_stats = metrics['detection_stats']
+            self.writer.add_scalar(f'{prefix}/Detection/CorrectCountPercent', det_stats['correct_count_percent'], epoch)
+            self.writer.add_scalar(f'{prefix}/Detection/OverDetections', det_stats['over_detections'], epoch)
+            self.writer.add_scalar(f'{prefix}/Detection/UnderDetections', det_stats['under_detections'], epoch)
+            self.writer.add_scalar(f'{prefix}/Statistics/AvgDetectionsPerImage', det_stats['avg_detections'], epoch)
+            self.writer.add_scalar(f'{prefix}/Statistics/AvgGroundTruthPerImage', det_stats['avg_ground_truth'], epoch)
 
-        # Log detection count distribution
-        self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', 
-                                metrics['detections_per_image'], epoch)
-        self.writer.add_histogram(f'{prefix}/Distributions/IoUScores',
-                                metrics['iou_distribution'], epoch)
-        self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores',
-                                metrics['confidence_distribution'], epoch)
+        # Log IoU statistics
+        if 'iou_stats' in metrics:
+            iou_stats = metrics['iou_stats']
+            self.writer.add_scalar(f'{prefix}/Detection/MeanIoU', iou_stats['mean'], epoch)
+            self.writer.add_scalar(f'{prefix}/Detection/MedianIoU', iou_stats['median'], epoch)
+        
+        # Log confidence score statistics
+        if 'confidence_stats' in metrics:
+            conf_stats = metrics['confidence_stats']
+            self.writer.add_scalar(f'{prefix}/Confidence/MeanScore', conf_stats['mean'], epoch)
+            self.writer.add_scalar(f'{prefix}/Confidence/MedianScore', conf_stats['median'], epoch)
+        
+        # Log performance metrics
+        if 'performance' in metrics:
+            perf = metrics['performance']
+            self.writer.add_scalar(f'{prefix}/Performance/Precision', perf['precision'], epoch)
+            self.writer.add_scalar(f'{prefix}/Performance/Recall', perf['recall'], epoch)
+            self.writer.add_scalar(f'{prefix}/Performance/F1Score', perf['f1_score'], epoch)
+
+        # Log distributions with empty tensor checks
+        if 'distributions' in metrics:
+            dist = metrics['distributions']
+            
+            # Detections per image histogram
+            if 'detections_per_image' in dist:
+                dets = dist['detections_per_image']
+                if isinstance(dets, torch.Tensor) and dets.numel() > 0:
+                    self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', dets, epoch)
+            
+            # IoU scores histogram
+            if 'iou_scores' in dist:
+                ious = dist['iou_scores']
+                if isinstance(ious, torch.Tensor) and ious.numel() > 0:
+                    self.writer.add_histogram(f'{prefix}/Distributions/IoUScores', ious, epoch)
+            
+            # Confidence scores histogram
+            if 'confidence_scores' in dist:
+                confs = dist['confidence_scores']
+                if isinstance(confs, torch.Tensor) and confs.numel() > 0:
+                    self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores', confs, epoch)
 
     def draw_boxes(self, image, boxes, scores=None, gt_boxes=None):
         # Denormalize the image first
