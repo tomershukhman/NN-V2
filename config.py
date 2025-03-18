@@ -22,21 +22,21 @@ IMAGE_EXTENSIONS = ['.jpg', '.jpeg', '.png']
 # Training parameters
 BATCH_SIZE = 16
 NUM_WORKERS = 4
-LEARNING_RATE = 1e-4
+LEARNING_RATE = 5e-5  # Reduced learning rate for better stability
 NUM_EPOCHS = 50
 WEIGHT_DECAY = 1e-4
-REG_LOSS_WEIGHT = 1.0  # Reduced since we now have proper normalization
+REG_LOSS_WEIGHT = 1.0  # Balanced weight for regression loss
 
 # Loss function parameters
-POS_IOU_THRESHOLD = 0.5   # Stricter threshold for positive matches
-NEG_IOU_THRESHOLD = 0.3   # Better separation between positive and negative samples
+POS_IOU_THRESHOLD = 0.5   # Threshold for positive matches
+NEG_IOU_THRESHOLD = 0.3   # Threshold for negative samples
 
 # Model parameters
 IMAGE_SIZE = (512, 512)  # Fixed input size as width,height tuple
-CONFIDENCE_THRESHOLD = 0.5  # Stricter confidence threshold to reduce false positives
-NMS_THRESHOLD = 0.3       # Lower NMS threshold to remove more overlapping boxes
+CONFIDENCE_THRESHOLD = 0.6  # Increased to reduce false positives
+NMS_THRESHOLD = 0.3       # Helps remove overlapping boxes
 MAX_DETECTIONS = 100
-IOU_THRESHOLD = 0.5        # Stricter IoU threshold for evaluation
+IOU_THRESHOLD = 0.5        # For evaluation
 PRETRAINED = True  # Use pretrained backbone
 
 # Visualization parameters
@@ -53,8 +53,9 @@ DOG_CATEGORY_ID = 18
 MEAN = [0.485, 0.456, 0.406]  # ImageNet normalization
 STD = [0.229, 0.224, 0.225]
 
-# Model architecture settings - Better anchor scales based on dataset analysis
-# GT box sizes range from ~5px to ~400px, with median around 86px
-ANCHOR_SCALES = [16, 32, 64, 128, 256]  # Better distribution across observed sizes
-ANCHOR_RATIOS = [0.3, 0.7, 1.0, 1.5]    # Better coverage of observed aspect ratios
+# Model architecture settings - Updated based on anchor analysis
+# GT box sizes range from ~30px to ~500px, with median width around 139px and height 96px
+# GT aspect ratios range from 0.3 to 4.0
+ANCHOR_SCALES = [32, 64, 96, 128, 192, 256, 384]  # More scales to better match observed sizes
+ANCHOR_RATIOS = [0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0]  # Extended to cover the wide range of observed aspect ratios
 BACKBONE_FROZEN_LAYERS = 2
