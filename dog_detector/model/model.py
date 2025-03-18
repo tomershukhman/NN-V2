@@ -21,19 +21,29 @@ class DogDetector(nn.Module):
         self.bn1 = nn.BatchNorm2d(256)
         self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         self.bn2 = nn.BatchNorm2d(256)
+        
         # Output heads:
         self.num_anchors = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
         # Classification: (num_classes + 1) channels per anchor (background + classes)
         self.cls_head = nn.Conv2d(256, (num_classes + 1) * self.num_anchors, kernel_size=3, padding=1)
         # Regression: 4 values per anchor
         self.reg_head = nn.Conv2d(256, 4 * self.num_anchors, kernel_size=3, padding=1)
+        
+        # Initialize weights for classification and regression heads
+        nn.init.normal_(self.cls_head.weight, std=0.01)
+        nn.init.normal_(self.reg_head.weight, std=0.01)
+        nn.init.constant_(self.cls_head.bias, 0)
+        nn.init.constant_(self.reg_head.bias, 0)
+        
         self.anchor_scales = ANCHOR_SCALES
         self.anchor_ratios = ANCHOR_RATIOS
+        
         # Store the input image size for proper coordinate mapping
         if isinstance(IMAGE_SIZE, (list, tuple)):
             self.input_size = (IMAGE_SIZE[0], IMAGE_SIZE[1])  # width, height
         else:
             self.input_size = (IMAGE_SIZE, IMAGE_SIZE)  # square image
+            
         self._anchors = None
         self._feature_map_size = None
 
@@ -41,7 +51,7 @@ class DogDetector(nn.Module):
         features = self.backbone(x)
         x = F.relu(self.bn1(self.conv1(features)))
         x = F.relu(self.bn2(self.conv2(x)))
-
+        
         # Get current feature map size
         batch_size, _, feat_h, feat_w = x.shape
         
@@ -55,7 +65,7 @@ class DogDetector(nn.Module):
         # Reshape to [B, num_classes+1, num_anchors, H, W]
         cls_output = cls_output.reshape(batch_size, self.num_anchors, -1, feat_h, feat_w)
         cls_output = cls_output.permute(0, 2, 1, 3, 4).contiguous()
-
+        
         # Regression head: [B, 4*num_anchors, H, W]
         reg_output = self.reg_head(x)
         # Reshape to [B, 4, num_anchors, H, W]
@@ -104,8 +114,6 @@ class DogDetector(nn.Module):
         num_centers = centers.size(0)
         
         # Reshape for broadcasting
-        # centers: [num_centers, 2] -> [num_centers, 1, 2] -> broadcast to [num_centers, num_anchors, 2]
-        # base_anchors: [num_anchors, 4] -> [1, num_anchors, 4] -> broadcast to [num_centers, num_anchors, 4]
         expanded_centers = centers.unsqueeze(1).expand(num_centers, num_anchors, 2)
         expanded_anchors = base_anchors.unsqueeze(0).expand(num_centers, num_anchors, 4)
         
@@ -129,6 +137,8 @@ class DogDetector(nn.Module):
 
     @property
     def stride(self):
+        """Return effective stride of the feature map relative to input image"""
+        # For ResNet18, the effective stride is 32
         return 32
 
     def post_process(self, cls_output, reg_output, anchors, conf_threshold=None, nms_threshold=None):
@@ -140,36 +150,31 @@ class DogDetector(nn.Module):
         num_classes = cls_output.size(1)
 
         # Reshape classification output to [batch_size, H*W*num_anchors, num_classes]
-        # Original shape: [B, num_classes, num_anchors, H, W]
-        cls_output = cls_output.permute(
-            0, 2, 3, 4, 1).reshape(batch_size, -1, num_classes)
-
+        cls_output = cls_output.permute(0, 2, 3, 4, 1).reshape(batch_size, -1, num_classes)
+        
         # Reshape regression output to [batch_size, H*W*num_anchors, 4]
-        # Original shape: [B, 4, num_anchors, H, W]
-        reg_output = reg_output.permute(
-            0, 2, 3, 4, 1).reshape(batch_size, -1, 4)
-
+        reg_output = reg_output.permute(0, 2, 3, 4, 1).reshape(batch_size, -1, 4)
+        
         # Apply softmax to get proper probabilities
         cls_probs = F.softmax(cls_output, dim=-1)
-        scores = cls_probs[..., 1]  # Dog class probability
-
+        scores = cls_probs[..., 1]  # Dog class probability (class index 1)
+        
         processed_boxes = []
         processed_scores = []
-
+        
         for i in range(batch_size):
             # Decode box coordinates
             boxes = self._decode_boxes(reg_output[i], anchors)
-
+            
             # Filter by confidence threshold
             mask = scores[i] > conf_threshold
             filtered_boxes = boxes[mask]
             filtered_scores = scores[i][mask]
-
+            
             if filtered_boxes.size(0) > 0:
                 # Apply standard NMS
-                keep_indices = nms(
-                    filtered_boxes, filtered_scores, nms_threshold)
-
+                keep_indices = nms(filtered_boxes, filtered_scores, nms_threshold)
+                
                 # Limit maximum detections according to config
                 if len(keep_indices) > MAX_DETECTIONS:
                     keep_indices = keep_indices[:MAX_DETECTIONS]
@@ -177,8 +182,7 @@ class DogDetector(nn.Module):
                 processed_boxes.append(filtered_boxes[keep_indices])
                 processed_scores.append(filtered_scores[keep_indices])
             else:
-                processed_boxes.append(
-                    torch.zeros((0, 4), device=boxes.device))
+                processed_boxes.append(torch.zeros((0, 4), device=boxes.device))
                 processed_scores.append(torch.zeros(0, device=scores.device))
 
         return processed_boxes, processed_scores
@@ -186,9 +190,13 @@ class DogDetector(nn.Module):
     def _decode_boxes(self, reg_output, anchors):
         """
         Decode regression output into box coordinates using anchor boxes.
-        reg_output format: (tx, ty, tw, th) where:
-        - tx, ty: center offset relative to anchor
-        - tw, th: width and height scaling factors
+        
+        Args:
+            reg_output (Tensor): Regression output, shape [num_anchors, 4]
+            anchors (Tensor): Anchor boxes, shape [num_anchors, 4]
+            
+        Returns:
+            Tensor: Decoded boxes in (x1, y1, x2, y2) format
         """
         # Extract anchor coordinates
         anchor_x1, anchor_y1, anchor_x2, anchor_y2 = anchors.unbind(1)
@@ -196,26 +204,27 @@ class DogDetector(nn.Module):
         anchor_h = anchor_y2 - anchor_y1
         anchor_cx = (anchor_x1 + anchor_x2) / 2
         anchor_cy = (anchor_y1 + anchor_y2) / 2
-
-        # Extract regression values and apply sigmoid to constrain offsets
-        tx = torch.sigmoid(reg_output[:, 0]) * 2 - 1  # [-1, 1]
-        ty = torch.sigmoid(reg_output[:, 1]) * 2 - 1  # [-1, 1]
-        tw = reg_output[:, 2]
-        th = reg_output[:, 3]
-
-        # Apply transformations directly without scale factor
-        cx = anchor_cx + tx * anchor_w  # Removed division by undefined scale
-        cy = anchor_cy + ty * anchor_h  # Removed division by undefined scale
         
-        # More conservative clamping for width/height to prevent collapse
+        # CRITICAL: Keep decoding consistent with the target encoding in utils.py
+        # Extract regression values
+        tx = reg_output[:, 0]  # x center offset relative to anchor width
+        ty = reg_output[:, 1]  # y center offset relative to anchor height
+        tw = reg_output[:, 2]  # width scale factor (log space)
+        th = reg_output[:, 3]  # height scale factor (log space)
+        
+        # Apply transformations directly to match the encoding in utils.py
+        cx = anchor_cx + tx * anchor_w
+        cy = anchor_cy + ty * anchor_h
+        
+        # Apply exponential to width and height with clamping to prevent extreme values
         w = torch.exp(torch.clamp(tw, -2, 2)) * anchor_w
         h = torch.exp(torch.clamp(th, -2, 2)) * anchor_h
-
+        
         # Add size constraints to prevent degenerate boxes
         min_size = 4.0  # Minimum 4 pixels
         w = torch.clamp(w, min=min_size)
         h = torch.clamp(h, min=min_size)
-
+        
         # Convert to x1,y1,x2,y2 format
         x1 = cx - w/2
         y1 = cy - h/2
