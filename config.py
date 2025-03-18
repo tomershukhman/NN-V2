@@ -33,10 +33,10 @@ NEG_IOU_THRESHOLD = 0.3   # Threshold for negative samples
 
 # Model parameters
 IMAGE_SIZE = (384, 384)  # Reduced from 512x512 to reduce memory usage
-CONFIDENCE_THRESHOLD = 0.6  # Increased to reduce false positives
-NMS_THRESHOLD = 0.3       # Helps remove overlapping boxes
-MAX_DETECTIONS = 100
-IOU_THRESHOLD = 0.5        # For evaluation
+CONFIDENCE_THRESHOLD = 0.5  # Adjusted for inference (training now uses 0.3)
+NMS_THRESHOLD = 0.4     # Relaxed to allow more overlapping boxes
+MAX_DETECTIONS = 100    # Allow up to 100 detections per image
+IOU_THRESHOLD = 0.5     # For evaluation
 PRETRAINED = True  # Use pretrained backbone
 
 # Visualization parameters

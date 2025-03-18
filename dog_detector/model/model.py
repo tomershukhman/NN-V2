@@ -156,16 +156,19 @@ class DogDetector(nn.Module):
 
     def post_process(self, cls_output, reg_output, anchors, conf_threshold=None, nms_threshold=None):
         """Post-process outputs to get final detections"""
-        conf_threshold = conf_threshold or CONFIDENCE_THRESHOLD
-        nms_threshold = nms_threshold or NMS_THRESHOLD
-
+        # Use a lower confidence threshold during early training
+        if self.training:
+            conf_threshold = conf_threshold or 0.3  # Lower threshold during training
+        else:
+            conf_threshold = conf_threshold or CONFIDENCE_THRESHOLD
+            
+        nms_threshold = nms_threshold or 0.4  # Relaxed NMS threshold
+        
         batch_size = cls_output.size(0)
         num_classes = cls_output.size(1)
 
-        # Reshape classification output to [batch_size, H*W*num_anchors, num_classes]
+        # Reshape outputs
         cls_output = cls_output.permute(0, 2, 3, 4, 1).reshape(batch_size, -1, num_classes)
-        
-        # Reshape regression output to [batch_size, H*W*num_anchors, 4]
         reg_output = reg_output.permute(0, 2, 3, 4, 1).reshape(batch_size, -1, 4)
         
         # Apply softmax to get proper probabilities
@@ -185,10 +188,15 @@ class DogDetector(nn.Module):
             filtered_scores = scores[i][mask]
             
             if filtered_boxes.size(0) > 0:
-                # Apply standard NMS
+                # Sort by confidence
+                sorted_indices = torch.argsort(filtered_scores, descending=True)
+                filtered_boxes = filtered_boxes[sorted_indices]
+                filtered_scores = filtered_scores[sorted_indices]
+                
+                # Apply NMS
                 keep_indices = nms(filtered_boxes, filtered_scores, nms_threshold)
                 
-                # Limit maximum detections according to config
+                # Take top MAX_DETECTIONS only if we have more valid detections than the limit
                 if len(keep_indices) > MAX_DETECTIONS:
                     keep_indices = keep_indices[:MAX_DETECTIONS]
 
