@@ -10,7 +10,31 @@ from dataset import get_data_loaders
 from model import get_model
 from losses import DetectionLoss
 from visualization import VisualizationLogger
+import math
+from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 
+class LRWarmupCosineAnnealing:
+    """Custom learning rate scheduler with warmup followed by cosine annealing"""
+    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr=1e-6):
+        self.optimizer = optimizer
+        self.warmup_epochs = warmup_epochs
+        self.total_epochs = total_epochs
+        self.min_lr = min_lr
+        self.base_lr = optimizer.param_groups[0]['lr']
+        
+    def step(self, epoch):
+        if epoch < self.warmup_epochs:
+            # Linear warmup
+            lr = self.base_lr * (epoch + 1) / self.warmup_epochs
+        else:
+            # Cosine annealing
+            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
+            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
+        
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = lr
+        
+        return lr
 
 def train():
     # Create save directories
@@ -72,19 +96,42 @@ class Trainer:
         self.visualization_logger = visualization_logger
         self.checkpoints_dir = checkpoints_dir
         
+        # Add cosine annealing LR scheduler with warmup
+        self.lr_scheduler = LRWarmupCosineAnnealing(
+            optimizer=optimizer,
+            warmup_epochs=3,
+            total_epochs=num_epochs,
+            min_lr=LEARNING_RATE * 0.01
+        )
+        
+        # For validation loss smoothing
+        self.val_loss_history = []
+        self.smoothing_window = 3
+        
+        # For exponential moving average (EMA) loss tracking
+        self.ema_val_loss = None
+        self.ema_alpha = 0.9  # Higher alpha means slower adaptation (more smoothing)
+        
     def train(self):
         best_val_loss = float('inf')
+        best_ema_val_loss = float('inf')
         epochs_without_improvement = 0
         
         # Track loss history for analysis
         train_losses = []
         val_losses = []
+        ema_val_losses = []
         train_conf_losses = []
         train_bbox_losses = []
         val_conf_losses = []
         val_bbox_losses = []
+        learning_rates = []
 
         for epoch in range(self.num_epochs):
+            # Update learning rate according to schedule
+            current_lr = self.lr_scheduler.step(epoch)
+            learning_rates.append(current_lr)
+            
             # Train for one epoch
             train_metrics, val_metrics = self.train_epoch(epoch)
             train_loss = train_metrics['total_loss']
@@ -98,11 +145,21 @@ class Trainer:
             val_conf_losses.append(val_metrics['conf_loss'])
             val_bbox_losses.append(val_metrics['bbox_loss'])
             
+            # Calculate smoothed validation loss for more stable early stopping
+            self.val_loss_history.append(val_loss)
+            smoothed_val_loss = self._get_smoothed_val_loss()
+            
+            # Update EMA validation loss
+            ema_val_loss = self._update_ema_val_loss(val_loss)
+            ema_val_losses.append(ema_val_loss)
+            
             # Print detailed loss information
             print(f"\n{'='*80}")
             print(f"Epoch {epoch+1}/{self.num_epochs} Results:")
+            print(f"Learning Rate: {current_lr:.6f}")
             print(f"Training   - Total Loss: {train_loss:.6f}, Conf Loss: {train_metrics['conf_loss']:.6f}, Bbox Loss: {train_metrics['bbox_loss']:.6f}")
             print(f"Validation - Total Loss: {val_loss:.6f}, Conf Loss: {val_metrics['conf_loss']:.6f}, Bbox Loss: {val_metrics['bbox_loss']:.6f}")
+            print(f"Smoothed Validation Loss: {smoothed_val_loss:.6f}, EMA Validation Loss: {ema_val_loss:.6f}")
             
             # Print validation metrics
             print(f"Validation Metrics - Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
@@ -112,8 +169,10 @@ class Trainer:
             if epoch > 0:
                 train_loss_change = train_losses[-1] - train_losses[-2]
                 val_loss_change = val_losses[-1] - val_losses[-2]
+                ema_val_loss_change = ema_val_losses[-1] - ema_val_losses[-2]
                 print(f"Loss Changes - Training: {train_loss_change:.6f} ({'↓' if train_loss_change < 0 else '↑'}), "
-                      f"Validation: {val_loss_change:.6f} ({'↓' if val_loss_change < 0 else '↑'})")
+                      f"Validation: {val_loss_change:.6f} ({'↓' if val_loss_change < 0 else '↑'}), "
+                      f"EMA Val: {ema_val_loss_change:.6f} ({'↓' if ema_val_loss_change < 0 else '↑'})")
                 
                 # Analyze loss components changes
                 train_conf_change = train_conf_losses[-1] - train_conf_losses[-2]
@@ -127,13 +186,16 @@ class Trainer:
                       f"Bbox: {val_bbox_change:.6f} ({'↓' if val_bbox_change < 0 else '↑'})")
             print(f"{'='*80}\n")
             
-            # Update learning rate based on validation loss
-            self.scheduler.step(val_loss)
+            # Update learning rate based on EMA validation loss
+            self.scheduler.step(ema_val_loss)
             
             # Save best model and implement early stopping
-            if val_loss < best_val_loss:
+            if ema_val_loss < best_ema_val_loss:
                 epochs_without_improvement = 0
-                best_val_loss = val_loss
+                best_ema_val_loss = ema_val_loss
+                if val_loss < best_val_loss:  # Still track the absolute best for saving
+                    best_val_loss = val_loss
+                
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
@@ -141,15 +203,30 @@ class Trainer:
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'train_loss': train_loss,
                     'val_loss': val_loss,
+                    'ema_val_loss': ema_val_loss
                 }, os.path.join(self.checkpoints_dir, 'best_model.pth'))
-                print(f"Saved new best model with val_loss: {val_loss:.4f}")
+                print(f"Saved new best model with val_loss: {val_loss:.4f} (EMA: {ema_val_loss:.4f})")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 10:
+                if epochs_without_improvement >= 15:  # Increased patience
                     print("Early stopping triggered")
                     break
         
         self.visualization_logger.close()
+    
+    def _get_smoothed_val_loss(self):
+        """Calculate smoothed validation loss for more stable early stopping"""
+        if len(self.val_loss_history) < self.smoothing_window:
+            return self.val_loss_history[-1]  # Not enough data points for smoothing
+        return sum(self.val_loss_history[-self.smoothing_window:]) / self.smoothing_window
+    
+    def _update_ema_val_loss(self, val_loss):
+        """Update and return exponential moving average of validation loss"""
+        if self.ema_val_loss is None:
+            self.ema_val_loss = val_loss
+        else:
+            self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * val_loss
+        return self.ema_val_loss
 
     def calculate_epoch_metrics(self, predictions, targets):
         """Calculate comprehensive epoch-level metrics"""
@@ -288,15 +365,19 @@ class Trainer:
             loss_dict = self.criterion(predictions, targets)
             loss = loss_dict['total_loss']
             
-            # Backward pass
+            # Backward pass with gradient clipping
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
             
             # Update progress
             total_loss += loss.item()
             total_conf_loss += loss_dict['conf_loss']
             total_bbox_loss += loss_dict['bbox_loss']
-            train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
+            train_loader_bar.set_postfix({
+                'train_loss': total_loss / (step + 1),
+                'lr': self.optimizer.param_groups[0]['lr']
+            })
             
             # Collect predictions and targets for epoch-level metrics
             with torch.no_grad():

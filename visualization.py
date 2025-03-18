@@ -55,13 +55,21 @@ class VisualizationLogger:
         self.writer.add_scalar(f'{prefix}/Performance/Recall', metrics['recall'], epoch)
         self.writer.add_scalar(f'{prefix}/Performance/F1Score', metrics['f1_score'], epoch)
 
+        # Safely log histograms only if there's data to log
         # Log detection count distribution
-        self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', 
-                                metrics['detections_per_image'], epoch)
-        self.writer.add_histogram(f'{prefix}/Distributions/IoUScores',
-                                metrics['iou_distribution'], epoch)
-        self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores',
-                                metrics['confidence_distribution'], epoch)
+        if len(metrics['detections_per_image']) > 0:
+            self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', 
+                                    metrics['detections_per_image'], epoch)
+        
+        # Log IoU scores distribution
+        if metrics['iou_distribution'].nelement() > 0:
+            self.writer.add_histogram(f'{prefix}/Distributions/IoUScores',
+                                    metrics['iou_distribution'], epoch)
+        
+        # Log confidence scores distribution
+        if metrics['confidence_distribution'].nelement() > 0:
+            self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores',
+                                    metrics['confidence_distribution'], epoch)
 
     def draw_boxes(self, image, boxes, scores=None, gt_boxes=None):
         # Denormalize the image first
