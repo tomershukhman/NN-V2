@@ -5,7 +5,7 @@ import torch.nn.functional as F
 import torchvision
 from config import (
     NUM_CLASSES, CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS, 
-    ANCHOR_SCALES, ANCHOR_RATIOS, IMAGE_SIZE, BOX_REG_SCALE, PRETRAINED
+    ANCHOR_SCALES, ANCHOR_RATIOS, IMAGE_SIZE, PRETRAINED
 )
 from torchvision.ops import nms
 
