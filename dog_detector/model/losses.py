@@ -29,9 +29,10 @@ class DetectionLoss(nn.Module):
     def __init__(self, model):
         super(DetectionLoss, self).__init__()
         self.model = model.module if hasattr(model, 'module') else model
+        self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
         
     def forward(self, predictions, targets):
-        """Calculate detection loss using GIoU loss for regression and focal loss for classification"""
+        """Calculate detection loss using smooth L1 loss for regression and focal loss for classification"""
         cls_output, reg_output, anchors = predictions
         batch_size = cls_output.size(0)
         device = cls_output.device
@@ -55,10 +56,8 @@ class DetectionLoss(nn.Module):
                 cls_losses[i] = cls_loss
                 continue
 
-            # Decode regression outputs to get actual box coordinates
+            # Compute IoU between decoded predictions and targets using current predictions
             decoded_boxes = self.model._decode_boxes(reg_output_i, anchors)
-            
-            # Compute IoU between decoded predictions and targets
             ious = compute_iou(decoded_boxes, target_boxes)
             max_ious, max_idx = ious.max(dim=1)
 
@@ -77,7 +76,6 @@ class DetectionLoss(nn.Module):
             # Balance negative samples to be 3x positive samples
             num_pos = pos_mask.sum()
             if num_pos > 0 and neg_mask.sum() > 3 * num_pos:
-                # Randomly sample negative examples
                 neg_indices = torch.where(neg_mask)[0]
                 perm = torch.randperm(len(neg_indices), device=device)
                 sampled_neg = neg_indices[perm[:3 * num_pos]]
@@ -92,14 +90,36 @@ class DetectionLoss(nn.Module):
                 pos_target_cls = target_labels[max_idx[pos_mask]]
                 cls_loss_pos = focal_loss(pos_pred_cls, pos_target_cls, reduction='sum')
                 
-                # Regression loss using GIoU
-                pos_pred_boxes = decoded_boxes[pos_mask]
+                # Compute regression targets dynamically based on best matching ground truth
+                pos_anchors = anchors[pos_mask]
                 pos_gt_boxes = target_boxes[max_idx[pos_mask]]
-                giou = generalized_box_iou(pos_pred_boxes, pos_gt_boxes)
-                giou_diag = torch.diag(giou)
-                reg_loss = (1 - giou_diag).sum()  # Sum instead of mean for proper normalization
                 
-                reg_losses[i] = reg_loss / (pos_mask.sum() or 1)
+                # Convert anchors to center format
+                pos_anchor_w = pos_anchors[:, 2] - pos_anchors[:, 0]
+                pos_anchor_h = pos_anchors[:, 3] - pos_anchors[:, 1]
+                pos_anchor_cx = pos_anchors[:, 0] + 0.5 * pos_anchor_w
+                pos_anchor_cy = pos_anchors[:, 1] + 0.5 * pos_anchor_h
+                
+                # Convert ground truth to center format
+                gt_w = pos_gt_boxes[:, 2] - pos_gt_boxes[:, 0]
+                gt_h = pos_gt_boxes[:, 3] - pos_gt_boxes[:, 1]
+                gt_cx = pos_gt_boxes[:, 0] + 0.5 * gt_w
+                gt_cy = pos_gt_boxes[:, 1] + 0.5 * gt_h
+                
+                # Compute regression targets
+                reg_targets = torch.zeros_like(reg_output_i[pos_mask])
+                reg_targets[:, 0] = (gt_cx - pos_anchor_cx) / pos_anchor_w  # tx
+                reg_targets[:, 1] = (gt_cy - pos_anchor_cy) / pos_anchor_h  # ty
+                reg_targets[:, 2] = torch.log(gt_w / pos_anchor_w)  # tw
+                reg_targets[:, 3] = torch.log(gt_h / pos_anchor_h)  # th
+                
+                # Compute regression loss using smooth L1
+                reg_pred = reg_output_i[pos_mask]
+                reg_loss = self.smooth_l1(reg_pred, reg_targets)
+                
+                # Sum losses and normalize by positive samples
+                reg_loss = reg_loss.sum() / (pos_mask.sum() * 4)  # Divide by 4 for x,y,w,h components
+                reg_losses[i] = reg_loss
                 total_positive_samples += pos_mask.sum()
             else:
                 cls_loss_pos = torch.tensor(0.0, device=device)

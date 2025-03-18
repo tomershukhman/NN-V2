@@ -200,8 +200,8 @@ class DogDetector(nn.Module):
         """
         Decode regression output into box coordinates using anchor boxes.
         reg_output format: (tx, ty, tw, th) where:
-        - tx, ty: center offset relative to anchor
-        - tw, th: width and height scaling factors
+        - tx, ty: center offset relative to anchor width/height
+        - tw, th: log scale factors for width/height
         """
         # Extract anchor coordinates
         anchor_x1, anchor_y1, anchor_x2, anchor_y2 = anchors.unbind(1)
@@ -210,32 +210,39 @@ class DogDetector(nn.Module):
         anchor_cx = (anchor_x1 + anchor_x2) / 2
         anchor_cy = (anchor_y1 + anchor_y2) / 2
         
-        # Extract regression values - remove sigmoid to allow unbounded offsets
-        tx = reg_output[:, 0]
-        ty = reg_output[:, 1]
-        tw = reg_output[:, 2]
-        th = reg_output[:, 3]
+        # Extract regression values directly (no sigmoid needed)
+        tx = reg_output[:, 0]  # x center offset normalized by anchor width
+        ty = reg_output[:, 1]  # y center offset normalized by anchor height
+        tw = reg_output[:, 2]  # width scale factor (log space)
+        th = reg_output[:, 3]  # height scale factor (log space)
         
-        # Apply transformations with better scaling
-        cx = anchor_cx + tx * anchor_w  # Remove scale factor to allow full movement
-        cy = anchor_cy + ty * anchor_h
-        w = torch.exp(torch.clamp(tw, -5, 5)) * anchor_w  # Increased clamp range for better scaling
-        h = torch.exp(torch.clamp(th, -5, 5)) * anchor_h
+        # Apply transformations matching target encoding
+        cx = anchor_cx + tx * anchor_w  # Decode x center
+        cy = anchor_cy + ty * anchor_h  # Decode y center
+        w = torch.exp(tw) * anchor_w    # Decode width
+        h = torch.exp(th) * anchor_h    # Decode height
         
-        # Convert back to x1,y1,x2,y2 format
+        # Convert to x1,y1,x2,y2 format
         x1 = cx - w/2
         y1 = cy - h/2
         x2 = cx + w/2
-        y2 = cy + h/2  # Fixed: was using cx instead of cy
+        y2 = cy + h/2
         
-        # Stack and return
-        boxes = torch.stack([x1, y1, x2, y2], dim=1)
+        # Ensure valid boxes
+        boxes = torch.stack([
+            x1.clamp(min=0, max=self.input_size[0]),
+            y1.clamp(min=0, max=self.input_size[1]), 
+            x2.clamp(min=0, max=self.input_size[0]),
+            y2.clamp(min=0, max=self.input_size[1])
+        ], dim=1)
         
-        # Ensure valid boxes (no negative dimensions)
+        # Ensure minimum size and proper ordering
+        min_size = 1.0  # Minimum 1 pixel
         boxes = torch.stack([
             boxes[:, 0],
             boxes[:, 1],
-            torch.max(boxes[:, 2], boxes[:, 0] + 1),  # Ensure x2 > x1
-            torch.max(boxes[:, 3], boxes[:, 1] + 1)   # Ensure y2 > y1
+            torch.max(boxes[:, 2], boxes[:, 0] + min_size),
+            torch.max(boxes[:, 3], boxes[:, 1] + min_size)
         ], dim=1)
+        
         return boxes
