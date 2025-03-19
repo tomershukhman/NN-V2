@@ -72,13 +72,13 @@ class DetectionLoss(nn.Module):
         batch_size = bbox_pred.size(0)
 
         for i in range(batch_size):
-            gt_boxes = targets[i]['boxes']
-            num_gt = len(gt_boxes)
-
-            # Apply heavy penalty if no detections when we know there should be at least one
-            if len(pred_boxes[i]) == 0:
+            # Apply heavy penalty if no predictions when we know there should be at least one
+            if bbox_pred[i].sum() == 0 or conf_pred[i].max() < 0.01:
                 total_conf_loss += 5.0  # Significant penalty for missing guaranteed detection
                 continue
+
+            gt_boxes = targets[i]['boxes']
+            num_gt = len(gt_boxes)
 
             if num_gt == 0:
                 conf_loss = self.bce_loss(conf_pred[i], torch.zeros_like(conf_pred[i]))
