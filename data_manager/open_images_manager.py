@@ -7,7 +7,7 @@ import pickle
 from .dataset import DogDataset
 
 from config import (
-    DATA_SET_TO_USE, TRAIN_VAL_SPLIT, DATA_ROOT,MAX_DATA_SET_SIZE)
+    DATA_SET_TO_USE, TRAIN_VAL_SPLIT, DATA_ROOT,REQUIRED_IMAGES,MAX_DATA_SET_SIZE)
 
 class OpenImagesV7Manager:
     """
@@ -27,7 +27,6 @@ class OpenImagesV7Manager:
         """
         self.data_dir = DATA_ROOT
         self.force_download = force_download
-        self.required_number_of_data = int(MAX_DATA_SET_SIZE * DATA_SET_TO_USE)
 
         
         # Cache paths
@@ -53,7 +52,8 @@ class OpenImagesV7Manager:
         
         # List of classes to use for non-dog images
         self.non_dog_labels = ["House", "Car", "Cat", "Person", "Tree", "Bird", "Horse"]
-        print(f"Target download size: {self.required_number_of_data} images")
+        print(f"MAX_DATA_SET_SIZE:{MAX_DATA_SET_SIZE} -> DATA_SET_TO_USE: {DATA_SET_TO_USE}" )
+        print(f"Target download size: {REQUIRED_IMAGES} images (dog {REQUIRED_IMAGES//2}  and non-dog {REQUIRED_IMAGES//2})")
 
     def download_dataset(self):
         """
@@ -102,14 +102,14 @@ class OpenImagesV7Manager:
 
             print("Downloading dog images...")
             # Download dog images for both train and validation
+            # Fix: Use only name parameter without dataset_dir
             dog_dataset = foz.load_zoo_dataset(
                 "open-images-v7",
                 splits=["train", "validation"],
                 label_types=["detections"],
                 classes=[self.dog_label],
-                max_samples=self.required_number_of_data // 2,  # Convert to integer
-                dataset_name="dogs_openimages_v7",
-                dataset_dir=fiftyone_dir
+                max_samples= REQUIRED_IMAGES // 2,
+                name="dogs_openimages_v7"
             )
             print(f"Downloaded {len(dog_dataset)} dog images")
             
@@ -120,9 +120,8 @@ class OpenImagesV7Manager:
                 splits=["train", "validation"],
                 label_types=["detections"],
                 classes=self.non_dog_labels,
-                max_samples=len(dog_dataset),  # Convert to integer
-                dataset_name="non_dogs_openimages_v7",
-                dataset_dir=fiftyone_dir
+                max_samples=len(dog_dataset),
+                name="non_dogs_openimages_v7"
             )
             print(f"Downloaded {len(non_dog_dataset)} non-dog images")
             
@@ -217,8 +216,8 @@ class OpenImagesV7Manager:
         random.shuffle(non_dog_indices)
         
         # Select subset of indices
-        selected_dog_indices = dog_indices[:self.required_number_of_data // 2]
-        selected_non_dog_indices = non_dog_indices[:self.required_number_of_data // 2]
+        selected_dog_indices = dog_indices[:REQUIRED_IMAGES // 2]
+        selected_non_dog_indices = non_dog_indices[:REQUIRED_IMAGES // 2]
         
         # Get the actual samples
         selected_dog_samples = [dog_samples[i] for i in selected_dog_indices]
