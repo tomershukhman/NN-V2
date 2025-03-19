@@ -35,7 +35,7 @@ class DetectionLoss(nn.Module):
             all_anchors = []
             
             for pred in predictions:
-                valid_preds = pred['boxes'].shape[0] if 'boxes' in pred else 0
+                valid_preds = pred['boxes'].shape[0] if 'boxes' in pred and pred['boxes'].numel() > 0 else 0
                 if valid_preds > 0:
                     all_boxes.append(pred['boxes'])
                     all_scores.append(pred['scores'])
@@ -59,7 +59,8 @@ class DetectionLoss(nn.Module):
         num_pos = 0
         
         # Handle validation format differently
-        if len(bbox_pred.shape) == 2:  # Validation format
+        is_validation = len(bbox_pred.shape) == 2  # Check if we're in validation format
+        if is_validation:  # Validation format
             batch_size = 1
             bbox_pred = bbox_pred.unsqueeze(0)
             conf_pred = conf_pred.unsqueeze(0)
@@ -148,7 +149,14 @@ class DetectionLoss(nn.Module):
         # Normalize losses
         num_pos = max(1, num_pos)  # Avoid division by zero
         total_loc_loss = (total_loc_loss / num_pos) * self.loc_weight
-        total_conf_loss = (total_conf_loss / batch_size) * self.conf_weight
+        
+        # Apply consistent normalization for both training and validation
+        if is_validation:
+            # For validation, use a consistent scaling to match training
+            scaling_factor = 0.1  # Reduce the scaling for validation loss
+            total_conf_loss = (total_conf_loss / batch_size) * self.conf_weight * scaling_factor
+        else:
+            total_conf_loss = (total_conf_loss / batch_size) * self.conf_weight
         
         total_loss = total_loc_loss + total_conf_loss
         

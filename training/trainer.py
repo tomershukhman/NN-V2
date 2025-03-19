@@ -35,16 +35,31 @@ class Trainer:
 
     def train(self):
         best_val_loss = float('inf')
+        best_f1_score = 0
         epochs_without_improvement = 0
 
         for epoch in range(self.num_epochs):
             # Train for one epoch
-            train_loss, val_loss = self.train_epoch(epoch)
+            train_loss, val_metrics = self.train_epoch(epoch)
             
-            # Save best model and implement early stopping
+            val_loss = val_metrics['total_loss']
+            val_f1 = val_metrics['performance']['f1_score']
+            
+            # Save best model based on F1 score instead of just validation loss
+            improved = False
+            if val_f1 > best_f1_score:
+                best_f1_score = val_f1
+                improved = True
+                print(f"New best F1 score: {val_f1:.4f}")
+            
             if val_loss < best_val_loss:
-                epochs_without_improvement = 0
                 best_val_loss = val_loss
+                if not improved:
+                    improved = True
+                    print(f"New best validation loss: {val_loss:.4f}")
+                
+            if improved:
+                epochs_without_improvement = 0
                 torch.save({
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
@@ -52,8 +67,9 @@ class Trainer:
                     'scheduler_state_dict': self.scheduler.state_dict(),
                     'train_loss': train_loss,
                     'val_loss': val_loss,
+                    'val_f1': val_f1,
                 }, os.path.join(self.checkpoints_dir, 'best_model.pth'))
-                print(f"Saved new best model with val_loss: {val_loss:.4f}")
+                print(f"Saved new best model - val_loss: {val_loss:.4f}, val_f1: {val_f1:.4f}")
             else:
                 epochs_without_improvement += 1
                 if epochs_without_improvement >= 10:
@@ -96,40 +112,46 @@ class Trainer:
             total_loss += loss_dict['loss_values']['total_loss']
             train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
             
-            # Get inference predictions for metrics
-            with torch.no_grad():
-                inference_preds = self.model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
+            # Get inference predictions for metrics - limit the frequency to reduce memory usage
+            if step % 5 == 0:  # Only collect metrics every 5 steps
+                with torch.no_grad():
+                    inference_preds = self.model(images, None)
+                    all_predictions.extend(inference_preds)
+                    all_targets.extend(targets)
             
-            # Log sample images periodically
+            # Log sample images periodically 
             if step % 50 == 0:
-                vis_images = images[-16:]
-                vis_preds = inference_preds[-16:]
-                vis_targets = targets[-16:]
-                self.visualization_logger.log_images('Train', vis_images, vis_preds, vis_targets, epoch)
+                with torch.no_grad():
+                    inference_preds = self.model(images, None)
+                    vis_images = images[-min(16, len(images)):]
+                    vis_preds = inference_preds[-min(16, len(inference_preds)):]
+                    vis_targets = targets[-min(16, len(targets)):]
+                    self.visualization_logger.log_images('Train', vis_images, vis_preds, vis_targets, epoch)
 
         # Calculate average loss
         avg_loss = total_loss / len(self.train_loader)
         
-        # Calculate comprehensive metrics
-        metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
-        metrics.update(loss_dict['loss_values'])  # Use float values for logging
-        
-        # Log metrics
-        self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
-        self.metrics_logger.log_epoch_metrics(epoch, 'train', metrics)
+        # Calculate comprehensive metrics if we have predictions collected
+        if all_predictions:
+            metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
+            metrics.update(loss_dict['loss_values'])  # Use float values for logging
+            
+            # Log metrics
+            self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
+            self.metrics_logger.log_epoch_metrics(epoch, 'train', metrics)
         
         # Run validation
         val_metrics = None
         if self.val_loader:
             val_metrics = self.validate(epoch)
             
-            # Update learning rate scheduler
-            if val_metrics and 'total_loss' in val_metrics:
-                self.scheduler.step(val_metrics['total_loss'])
+            # Update learning rate scheduler using F1 score (higher is better, so negate)
+            # This helps balance both precision and recall in model optimization
+            if val_metrics and 'performance' in val_metrics:
+                f1_score = val_metrics['performance']['f1_score']
+                self.scheduler.step(-f1_score)  # Negate since scheduler is in 'min' mode
         
-        return avg_loss, val_metrics['total_loss'] if val_metrics else 0
+        return avg_loss, val_metrics
 
     def validate(self, epoch):
         self.model.eval()
@@ -169,11 +191,12 @@ class Trainer:
         self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
         self.metrics_logger.log_epoch_metrics(epoch, 'val', metrics)
         
-        # Log last batch of validation images
-        vis_images = images[-16:]
-        vis_preds = inference_preds[-16:]
-        vis_targets = targets[-16:]
-        self.visualization_logger.log_images('Val', vis_images, vis_preds, vis_targets, epoch)
+        # Log sample validation images
+        if images.size(0) > 0:
+            vis_images = images[-min(16, len(images)):]
+            vis_preds = inference_preds[-min(16, len(inference_preds)):]
+            vis_targets = targets[-min(16, len(targets)):]
+            self.visualization_logger.log_images('Val', vis_images, vis_preds, vis_targets, epoch)
         
         return metrics
 
