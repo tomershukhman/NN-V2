@@ -41,26 +41,33 @@ class DetectionMetricsCalculator:
                 else:
                     under_detections += 1
                 
-                # Calculate IoUs and true positives with better matching
-                ious = box_iou(pred_boxes, gt_boxes)
+                # Ensure pred_boxes and gt_boxes are properly shaped tensors
+                if len(pred_boxes.shape) == 1:
+                    pred_boxes = pred_boxes.unsqueeze(0)  # Add batch dimension if needed
+                if len(gt_boxes.shape) == 1:
+                    gt_boxes = gt_boxes.unsqueeze(0)  # Add batch dimension if needed
                 
-                # For each ground truth, find best matching prediction
-                max_ious, _ = ious.max(dim=0)
-                all_ious.extend(max_ious.cpu().tolist())
+                # Calculate IoUs with proper dimensions
+                ious = box_iou(pred_boxes, gt_boxes)  # Now boxes are [N,4] and [M,4]
                 
-                # Count true positives with confidence-aware matching
-                matched_gt = set()
-                sorted_preds = torch.argsort(pred_scores, descending=True)
-                
-                for pred_idx in sorted_preds:
-                    gt_ious = ious[pred_idx]
-                    best_gt_idx = torch.argmax(gt_ious)
-                    max_iou = gt_ious[best_gt_idx]
+                if ious.numel() > 0:
+                    # For each ground truth, find best matching prediction
+                    max_ious, _ = ious.max(dim=0)
+                    all_ious.extend(max_ious.cpu().tolist())
                     
-                    # Only count high-confidence predictions
-                    if max_iou >= 0.5 and best_gt_idx.item() not in matched_gt and pred_scores[pred_idx] >= 0.4:
-                        true_positives += 1
-                        matched_gt.add(best_gt_idx.item())
+                    # Count true positives with confidence-aware matching
+                    matched_gt = set()
+                    sorted_preds = torch.argsort(pred_scores, descending=True)
+                    
+                    for pred_idx in sorted_preds:
+                        gt_ious = ious[pred_idx]
+                        best_gt_idx = torch.argmax(gt_ious)
+                        max_iou = gt_ious[best_gt_idx]
+                        
+                        # Only count high-confidence predictions
+                        if max_iou >= 0.5 and best_gt_idx.item() not in matched_gt and pred_scores[pred_idx] >= 0.4:
+                            true_positives += 1
+                            matched_gt.add(best_gt_idx.item())
             
             # Collect confidence scores for valid predictions
             if len(pred_scores) > 0:
