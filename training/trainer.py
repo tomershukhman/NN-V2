@@ -12,11 +12,12 @@ from .metrics.detection_metrics import DetectionMetricsCalculator
 
 class Trainer:
     def __init__(self, model, criterion, optimizer, train_loader, val_loader, 
-                 device, num_epochs, visualization_logger, checkpoints_dir):
+                 device, num_epochs, visualization_logger, checkpoints_dir, scheduler=None):
         self.model = model
         self.criterion = criterion
         self.optimizer = optimizer
-        self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        # Use provided scheduler or create default one
+        self.scheduler = scheduler if scheduler is not None else torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode='min',
             factor=LR_SCHEDULER_FACTOR,

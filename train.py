@@ -2,7 +2,8 @@ import os
 import torch
 from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
-    OUTPUT_ROOT
+    OUTPUT_ROOT, LR_SCHEDULER_FACTOR,
+    LR_SCHEDULER_PATIENCE, LR_SCHEDULER_MIN_LR
 )
 from data_manager import get_data_loaders
 from model import get_model
@@ -24,21 +25,32 @@ def main():
     model = get_model(DEVICE)
     criterion = DetectionLoss().to(DEVICE)
 
-    # Setup optimizer with weight decay
+    # Setup optimizer with increased weight decay for better regularization
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
         lr=LEARNING_RATE,
-        weight_decay=0.01
+        weight_decay=0.05  # Increased from 0.01
+    )
+
+    # Add learning rate scheduler
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode='min',
+        factor=LR_SCHEDULER_FACTOR,
+        patience=LR_SCHEDULER_PATIENCE,
+        min_lr=LR_SCHEDULER_MIN_LR,
+        verbose=True
     )
 
     # Get data loaders
     train_loader, val_loader = get_data_loaders()
     
-    # Create trainer instance
+    # Create trainer instance with additional parameters
     trainer = Trainer(
         model=model,
         criterion=criterion,
         optimizer=optimizer,
+        scheduler=scheduler,
         train_loader=train_loader,
         val_loader=val_loader,
         device=DEVICE,

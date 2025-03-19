@@ -23,26 +23,38 @@ class DogDetector(nn.Module):
         # Store feature map size
         self.feature_map_size = feature_map_size
         
-        # Freeze the first few layers of ResNet18
-        for param in list(self.backbone.parameters())[:-6]:
+        # Freeze more layers of ResNet18 to prevent overfitting
+        for param in list(self.backbone.parameters())[:-3]:  # Freeze all but last ResNet block
             param.requires_grad = False
         
         # FPN-like feature pyramid with fixed pooling to ensure MPS compatibility
         self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
         self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         
-        # Replace adaptive pooling with fixed pooling
+        # Add batch norm and dropout to improve regularization
         self.pool = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
+            nn.Dropout2d(0.2),
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         
-        # Detection head
-        self.conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        # Detection head with added regularization
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.2)
+        )
         
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout2d(0.2)
+        )
+
         # Generate anchor boxes with different scales and aspect ratios
         self.anchor_scales = [0.5, 1.0, 2.0]
         self.anchor_ratios = [0.5, 1.0, 2.0]
@@ -52,10 +64,10 @@ class DogDetector(nn.Module):
         self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
         self.cls_head = nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
         
-        # Initialize weights
-        for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head, self.cls_head]:
+        # Initialize weights with smaller variance
+        for m in [self.lateral_conv, self.smooth_conv, self.bbox_head, self.cls_head]:
             if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, std=0.01)
+                nn.init.normal_(m.weight, std=0.005)  # Reduced standard deviation
                 nn.init.constant_(m.bias, 0)
         
         # Generate and register anchor boxes
@@ -102,8 +114,8 @@ class DogDetector(nn.Module):
             )
         
         # Detection head
-        x = F.relu(self.conv1(features))
-        x = F.relu(self.conv2(x))
+        x = self.conv1(features)
+        x = self.conv2(x)
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(x)
