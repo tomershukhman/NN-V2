@@ -65,6 +65,8 @@ class Trainer:
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0
+        total_conf_loss = 0
+        total_bbox_loss = 0
         all_predictions = []
         all_targets = []
         
@@ -94,6 +96,9 @@ class Trainer:
             
             # Update progress with float value
             total_loss += loss_dict['loss_values']['total_loss']
+            total_conf_loss += loss_dict['loss_values']['conf_loss']
+            total_bbox_loss += loss_dict['loss_values']['bbox_loss']
+            
             train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
             
             # Get inference predictions for metrics
@@ -109,12 +114,21 @@ class Trainer:
                 vis_targets = targets[-16:]
                 self.visualization_logger.log_images('Train', vis_images, vis_preds, vis_targets, epoch)
 
-        # Calculate average loss
-        avg_loss = total_loss / len(self.train_loader)
+        # Calculate average losses
+        steps = len(self.train_loader)
+        avg_loss = total_loss / steps
+        avg_conf_loss = total_conf_loss / steps
+        avg_bbox_loss = total_bbox_loss / steps
         
         # Calculate comprehensive metrics
         metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
-        metrics.update(loss_dict['loss_values'])  # Use float values for logging
+        
+        # Update with average loss values, not just last batch
+        metrics.update({
+            'total_loss': avg_loss,
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
+        })
         
         # Log metrics
         self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
@@ -134,11 +148,13 @@ class Trainer:
     def validate(self, epoch):
         self.model.eval()
         total_loss = 0
+        total_conf_loss = 0
+        total_bbox_loss = 0
         all_predictions = []
         all_targets = []
         
         with torch.no_grad():
-            for images, _, boxes in tqdm(self.val_loader, desc='Validating'):
+            for step, (images, _, boxes) in enumerate(tqdm(self.val_loader, desc='Validating')):
                 # Prepare data
                 images = torch.stack([image.to(self.device) for image in images])
                 targets = []
@@ -152,18 +168,32 @@ class Trainer:
                 # Get predictions
                 predictions = self.model(images, targets)
                 loss_dict = self.criterion(predictions, targets)
-                total_loss += loss_dict['loss_values']['total_loss']  # Use float value
+                
+                # Accumulate all loss components
+                total_loss += loss_dict['loss_values']['total_loss']
+                total_conf_loss += loss_dict['loss_values']['conf_loss']
+                total_bbox_loss += loss_dict['loss_values']['bbox_loss']
                 
                 # Get inference predictions for metrics
                 inference_preds = self.model(images, None)
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
         
+        # Calculate average losses
+        steps = len(self.val_loader)
+        avg_loss = total_loss / steps
+        avg_conf_loss = total_conf_loss / steps
+        avg_bbox_loss = total_bbox_loss / steps
+        
         # Calculate metrics
-        avg_loss = total_loss / len(self.val_loader)
         metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
-        metrics.update(loss_dict['loss_values'])  # Use float values for logging
-        metrics['total_loss'] = avg_loss  # Include the average loss in metrics
+        
+        # Update with average loss values
+        metrics.update({
+            'total_loss': avg_loss,
+            'conf_loss': avg_conf_loss,
+            'bbox_loss': avg_bbox_loss
+        })
         
         # Log metrics and sample images
         self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
