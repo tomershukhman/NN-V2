@@ -8,8 +8,9 @@ DEVICE = get_device()
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
 OUTPUT_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "outputs")
-DATA_SET_TO_USE = 0.2  # Use 1% of available data for faster iteration
+DATA_SET_TO_USE = 0.5  # Use 1% of available data for faster iteration
 TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
+MAX_DATA_SET_SIZE = 7_000
 
 # Training parameters
 BATCH_SIZE = 64  # Increased batch size for better gradient estimates

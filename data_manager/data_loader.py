@@ -1,96 +1,94 @@
 import os
-import torch
-from torch.utils.data import DataLoader
 
 from config import (
-    BATCH_SIZE,
-    NUM_WORKERS,
-    DATA_ROOT
+    DATA_ROOT, BATCH_SIZE, NUM_WORKERS
 )
-from .dataset import DogDetectionDataset
-from .transforms import get_train_transform, get_val_transform
-from .utils.utils import collate_fn
+from .open_images_manager import OpenImagesV7Manager
+from torch.utils.data import Dataset, DataLoader
 
-def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
-    """Create data loaders for Open Images dog detection dataset"""
-    os.makedirs(root, exist_ok=True)
-    print(f"Using data root directory: {os.path.abspath(root)}")
+
+def create_dataloaders():
+    """
+    Create PyTorch DataLoaders for dog/non-dog classification.
     
-    print("Creating training dataset...")
-    try:
-        train_dataset = DogDetectionDataset(
-            root=root,
-            split='train',
-            transform=get_train_transform(),
-            download=download
-        )
-    except Exception as e:
-        print(f"Error creating training dataset: {e}")
-        raise RuntimeError(f"Failed to create training dataset: {e}")
+    Args:
+        data_dir (str): Directory to store the dataset
+        batch_size (int): Batch size for DataLoader
+        num_workers (int): Number of worker processes for data loading
+        data_set_to_use (float, optional): Override DATASET_TO_USE constant
+        train_val_split (float, optional): Override TRAIN_VAL_SPLIT constant
+    """
+    # Use module constants if not overridden
     
-    print("Creating validation dataset...")
-    try:
-        val_dataset = DogDetectionDataset(
-            root=root,
-            split='validation',
-            transform=get_val_transform(),
-            download=download
-        )
-    except Exception as e:
-        print(f"Error creating validation dataset: {e}")
-        raise RuntimeError(f"Failed to create validation dataset: {e}")
+    # Create cache directory if it doesn't exist
+    cache_dir = os.path.join(DATA_ROOT, "cache")
+    os.makedirs(cache_dir, exist_ok=True)
     
-    # Update the reporting to show both total images and images with dogs
-    print(f"Train set: {len(train_dataset)} total images")
-    print(f"Val set: {len(val_dataset)} total images")
+    # Get dataset manager and datasets
+    print("\n" + "="*50)
+    print("Dataset Statistics Summary")
+    print("="*50)
     
-    num_workers = min(8, NUM_WORKERS)
+    manager = OpenImagesV7Manager()
     
+    # Get total counts first
+    # total_counts = manager.get_downloaded_images_totals()
+    # total_available = total_counts['total_dogs'] + total_counts['total_non_dogs']
+    # print("\nTotal Downloaded Images in Dataset:")
+    # print(f"Total Downloaded Dogs: {total_counts['total_dogs']:,}")
+    # print(f"Total Downloaded Non-Dogs: {total_counts['total_non_dogs']:,}")
+    # print(f"Total Downloaded Images: {total_available:,}")
+        
+    # Get datasets with splits info
+    train_dataset, val_dataset = manager.get_datasets()
+    
+    # Count dogs and non-dogs in train dataset
+    train_dogs = sum(1 for sample in train_dataset.samples if sample['label'] == 1)
+    train_non_dogs = sum(1 for sample in train_dataset.samples if sample['label'] == 0)
+    train_total = len(train_dataset.samples)
+    
+    # Count dogs and non-dogs in val dataset
+    val_dogs = sum(1 for sample in val_dataset.samples if sample['label'] == 1)
+    val_non_dogs = sum(1 for sample in val_dataset.samples if sample['label'] == 0)
+    val_total = len(val_dataset.samples)
+    
+    print("\nCurrent Dataset Split Statistics:")
+    print("Training Set:")
+    print(f"  - Dogs: {train_dogs:,} ({train_dogs/train_total*100:.1f}% of training set)")
+    print(f"  - Non-Dogs: {train_non_dogs:,} ({train_non_dogs/train_total*100:.1f}% of training set)")
+    print(f"  - Total: {train_total:,}")
+    
+    print("\nValidation Set:")
+    print(f"  - Dogs: {val_dogs:,} ({val_dogs/val_total*100:.1f}% of validation set)")
+    print(f"  - Non-Dogs: {val_non_dogs:,} ({val_non_dogs/val_total*100:.1f}% of validation set)")
+    print(f"  - Total: {val_total:,}")
+    
+    total_dogs_used = train_dogs + val_dogs
+    total_non_dogs_used = train_non_dogs + val_non_dogs
+    total_used = total_dogs_used + total_non_dogs_used
+    
+    # print("\nTotal Used in Current Split:")
+    # print(f"  - Dogs Being Used: {total_dogs_used:,} ({total_dogs_used/total_counts['total_dogs']*100:.1f}% of available dogs)")
+    # print(f"  - Non-Dogs Being Used: {total_non_dogs_used:,} ({total_non_dogs_used/total_counts['total_non_dogs']*100:.1f}% of available non-dogs)")
+    # print(f"  - Total Images Being Used: {total_used:,} ({total_used/total_available*100:.1f}% of available images)")
+    print("="*50 + "\n")
+    
+    # Create data loaders
     train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size,
+        train_dataset,
+        batch_size=BATCH_SIZE,
         shuffle=True,
-        num_workers=num_workers,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2,
-        collate_fn=collate_fn,
-        drop_last=True
+        num_workers=NUM_WORKERS,
+        pin_memory=True
     )
     
     val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        num_workers=num_workers // 2,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2,
-        collate_fn=collate_fn
+        val_dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=False,
+        num_workers=NUM_WORKERS,
+        pin_memory=True
     )
     
     return train_loader, val_loader
 
-def get_total_samples():
-    """Get the total number of samples in the dataset"""
-    cache_file = os.path.join(DATA_ROOT, 'dog_detection_combined_cache.pt')
-    if os.path.exists(cache_file):
-        cache_data = torch.load(cache_file)
-        return len(cache_data['samples'])
-    return 0
-
-def create_datasets():
-    """Create training and validation datasets with the specified split ratio"""
-    print("Creating training dataset...")
-    train_dataset = DogDetectionDataset(
-        DATA_ROOT,
-        split='train'
-    )
-    
-    print("Creating validation dataset...")
-    val_dataset = DogDetectionDataset(
-        DATA_ROOT,
-        split='validation'
-    )
-    
-    return train_dataset, val_dataset

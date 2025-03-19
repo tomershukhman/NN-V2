@@ -4,7 +4,7 @@ from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
     OUTPUT_ROOT
 )
-from data_manager import get_data_loaders
+from data_manager.data_loader import create_dataloaders
 from model import get_model
 from losses import DetectionLoss
 from visualization import VisualizationLogger
@@ -32,7 +32,7 @@ def main():
     )
 
     # Get data loaders
-    train_loader, val_loader = get_data_loaders()
+    train_loader, val_loader = create_dataloaders()
     
     # Create trainer instance
     trainer = Trainer(
