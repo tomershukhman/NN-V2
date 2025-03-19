@@ -14,15 +14,15 @@ TRAIN_VAL_SPLIT = 0.8  # 80% training, 20% validation
 # Training parameters
 BATCH_SIZE = 64  # Increased batch size for better gradient estimates
 NUM_WORKERS = min(8, os.cpu_count() or 1)
-LEARNING_RATE = 1e-3  # Increased from 5e-5 for faster initial learning
+LEARNING_RATE = 5e-4  # Reduced for more stable training
 NUM_EPOCHS = 100  # Increased epochs since we have a more complex model
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
 # Learning rate scheduler parameters
-LR_SCHEDULER_FACTOR = 0.1  # Reduce LR by factor of 10
-LR_SCHEDULER_PATIENCE = 5  # Number of epochs to wait before reducing LR
+LR_SCHEDULER_FACTOR = 0.5  # More gradual LR reduction
+LR_SCHEDULER_PATIENCE = 3  # React faster to lack of improvement
 LR_SCHEDULER_MIN_LR = 1e-6  # Minimum learning rate
-GRAD_CLIP_VALUE = 1.0  # Maximum gradient norm for gradient clipping
+GRAD_CLIP_VALUE = 0.5  # More aggressive gradient clipping
 
 # Model parameters
 NUM_CLASSES = 2  # Background and Dog
