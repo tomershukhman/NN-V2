@@ -150,19 +150,26 @@ class Trainer:
                     }
                     targets.append(target)
                 
-                # Get predictions
+                # Get predictions and calculate loss
                 predictions = self.model(images, targets)
                 loss_dict = self.criterion(predictions, targets)
-                total_loss += loss_dict['loss_values']['total_loss']  # Use float value
+                batch_loss = loss_dict['loss_values']['total_loss']
                 
                 # Get inference predictions for metrics
                 inference_preds = self.model(images, None)
+                
+                # Penalize predictions with no detections since we know there must be a dog
+                for pred in inference_preds:
+                    if len(pred['boxes']) == 0:
+                        batch_loss += 2.0  # Add penalty for missing required detection
+                
+                total_loss += batch_loss
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
         
         # Calculate metrics
         avg_loss = total_loss / len(self.val_loader)
-        metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
+        metrics = self.metrics_calculator.calculate_metrics(all_predictions, all_targets)
         metrics.update(loss_dict['loss_values'])  # Use float values for logging
         metrics['total_loss'] = avg_loss  # Include the average loss in metrics
         
@@ -170,8 +177,8 @@ class Trainer:
         self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
         self.metrics_logger.log_epoch_metrics(epoch, 'val', metrics)
         
-        # Log last batch of validation images
-        vis_images = images[-16:]
+        # Log sample validation images
+        vis_images = images[-16:]  # Last batch
         vis_preds = inference_preds[-16:]
         vis_targets = targets[-16:]
         self.visualization_logger.log_images('Val', vis_images, vis_preds, vis_targets, epoch)

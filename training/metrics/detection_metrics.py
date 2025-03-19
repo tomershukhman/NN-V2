@@ -25,29 +25,30 @@ class DetectionMetricsCalculator:
             
             num_pred = len(pred_boxes)
             num_gt = len(gt_boxes)
-            detections_per_image.append(num_pred)
-            total_detections += num_pred
-            total_ground_truth += num_gt
             
-            # Only count over/under detections if ground truth exists
-            if num_gt > 0:
+            # Since we know there's at least 1 dog per image
+            if num_pred == 0:
+                under_detections += 1
+            else:
+                detections_per_image.append(num_pred)
+                total_detections += num_pred
+                total_ground_truth += num_gt
+                
                 if num_pred == num_gt:
                     correct_count += 1
                 elif num_pred > num_gt:
                     over_detections += 1
                 else:
                     under_detections += 1
-            
-            # Calculate IoUs and true positives with better matching
-            if num_pred > 0 and num_gt > 0:
-                # Calculate IoU matrix between all predictions and ground truths
+                
+                # Calculate IoUs and true positives with better matching
                 ious = box_iou(pred_boxes, gt_boxes)
                 
                 # For each ground truth, find best matching prediction
                 max_ious, _ = ious.max(dim=0)
                 all_ious.extend(max_ious.cpu().tolist())
                 
-                # Count true positives with stricter criteria
+                # Count true positives with confidence-aware matching
                 matched_gt = set()
                 sorted_preds = torch.argsort(pred_scores, descending=True)
                 
@@ -56,13 +57,18 @@ class DetectionMetricsCalculator:
                     best_gt_idx = torch.argmax(gt_ious)
                     max_iou = gt_ious[best_gt_idx]
                     
-                    if max_iou >= 0.5 and best_gt_idx.item() not in matched_gt:
+                    # Only count high-confidence predictions
+                    if max_iou >= 0.5 and best_gt_idx.item() not in matched_gt and pred_scores[pred_idx] >= 0.4:
                         true_positives += 1
                         matched_gt.add(best_gt_idx.item())
             
             # Collect confidence scores for valid predictions
             if len(pred_scores) > 0:
                 all_confidences.extend(pred_scores.cpu().tolist())
+
+        # Ensure we never divide by zero since we know total_ground_truth > 0
+        total_ground_truth = max(total_ground_truth, total_images)  # At least 1 per image
+        total_detections = max(total_detections, 1)  # Avoid division by zero
 
         return DetectionMetricsCalculator._compute_final_metrics(
             total_images, correct_count, over_detections, under_detections,

@@ -75,6 +75,11 @@ class DetectionLoss(nn.Module):
             gt_boxes = targets[i]['boxes']
             num_gt = len(gt_boxes)
 
+            # Apply heavy penalty if no detections when we know there should be at least one
+            if len(pred_boxes[i]) == 0:
+                total_conf_loss += 5.0  # Significant penalty for missing guaranteed detection
+                continue
+
             if num_gt == 0:
                 conf_loss = self.bce_loss(conf_pred[i], torch.zeros_like(conf_pred[i]))
                 total_conf_loss += conf_loss.mean()
@@ -132,7 +137,8 @@ class DetectionLoss(nn.Module):
             pos_conf_loss = pos_conf_loss / max(num_positive, 1)
             neg_conf_loss = neg_conf_loss / max(num_neg, 1)
 
-            total_conf_loss += pos_conf_loss + neg_conf_loss
+            # Add stronger weighting to positive examples since we know they must exist
+            total_conf_loss += (1.5 * pos_conf_loss + neg_conf_loss)
 
         num_pos = max(1, num_pos)
         total_loc_loss = (total_loc_loss / num_pos) * self.loc_weight
