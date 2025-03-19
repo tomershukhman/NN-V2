@@ -8,23 +8,27 @@ from torchvision import transforms
 from PIL import Image
 from tqdm import tqdm
 import pickle
+import numpy as np
+import torch
 
 
 class DogDataset(Dataset):
     """
-    PyTorch Dataset for dog/non-dog classification using cached metadata.
+    PyTorch Dataset for dog detection using cached metadata.
     """
     
-    def __init__(self, samples, transform=None):
+    def __init__(self, samples, transform=None, max_boxes=10):
         """
         Initialize the dataset.
         
         Args:
             samples (list): List of sample metadata dictionaries
             transform (callable, optional): Transform to apply to images
+            max_boxes (int): Maximum number of bounding boxes to return (padding will be added if fewer)
         """
         self.samples = samples
         self.transform = transform
+        self.max_boxes = max_boxes
         
         # Verify dataset integrity
         self._verify_dataset()
@@ -86,21 +90,57 @@ class DogDataset(Dataset):
             idx (int): Index
             
         Returns:
-            tuple: (image, label) where label is 1 for dog and 0 for non-dog
+            tuple: (image, num_dogs, boxes) where:
+                - image is the preprocessed image tensor
+                - num_dogs is the number of dogs in the image
+                - boxes is a tensor of bounding boxes in [x1, y1, x2, y2] format, padded to max_boxes
         """
         sample = self.samples[idx]
         filepath = sample['filepath']
-        label = sample['label']
         
         # Open and transform image
         try:
             image = Image.open(filepath).convert('RGB')
+            w, h = image.size
         except Exception as e:
             print(f"Error loading image {filepath}: {e}")
             # Return a black image in case of error
             image = Image.new('RGB', (224, 224), (0, 0, 0))
+            w, h = image.size
+
+        # Get bounding boxes if they exist
+        if 'detections' in sample and sample['label'] == 1:
+            # Convert detections to normalized coordinates
+            boxes = []
+            for det in sample['detections']:
+                if det['label'] == 'Dog':
+                    x1 = det['bounding_box'][0]
+                    y1 = det['bounding_box'][1]
+                    x2 = x1 + det['bounding_box'][2]
+                    y2 = y1 + det['bounding_box'][3]
+                    boxes.append([x1, y1, x2, y2])
+            boxes = torch.tensor(boxes, dtype=torch.float32)
+        else:
+            # For non-dog images or images without detection info
+            boxes = torch.zeros((0, 4), dtype=torch.float32)
         
         if self.transform:
-            image = self.transform(image)
-            
-        return image, label
+            # Apply transforms that handle both image and boxes
+            if isinstance(self.transform, dict):
+                transformed = self.transform(image=np.array(image), bboxes=boxes.numpy())
+                image = transformed['image']
+                boxes = torch.tensor(transformed['bboxes'], dtype=torch.float32)
+            else:
+                # Regular torchvision transforms
+                image = self.transform(image)
+        
+        num_dogs = len(boxes)
+        
+        # Pad boxes tensor to fixed size with zeros
+        if len(boxes) < self.max_boxes:
+            padding = torch.zeros((self.max_boxes - len(boxes), 4), dtype=torch.float32)
+            boxes = torch.cat([boxes, padding], dim=0)
+        else:
+            boxes = boxes[:self.max_boxes]  # Truncate if more boxes than max_boxes
+        
+        return image, num_dogs, boxes

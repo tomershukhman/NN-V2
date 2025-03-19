@@ -111,7 +111,6 @@ class OpenImagesV7Manager:
                 max_samples= REQUIRED_IMAGES // 2,
                 name="dogs_openimages_v7"
             )
-            print(f"Downloaded {len(dog_dataset)} dog images")
             
             print("Downloading non-dog images...")
             # Download non-dog images for both train and validation
@@ -141,12 +140,21 @@ class OpenImagesV7Manager:
             # Extract and store relevant metadata to avoid keeping the entire FiftyOne sample
             dog_metadata = []
             for sample in tqdm(dog_samples, desc="Processing dog samples"):
+                detections = []
+                for det in sample.ground_truth.detections:
+                    if det.label == "Dog":
+                        detections.append({
+                            'label': det.label,
+                            'bounding_box': det.bounding_box  # Already normalized [x,y,width,height]
+                        })
+                
                 metadata = {
                     'filepath': sample.filepath,
                     'filename': os.path.basename(sample.filepath),
                     'split': sample.tags[0] if sample.tags else 'train',  # Original split (train/validation)
                     'id': sample.id,
-                    'label': 1  # 1 for dog
+                    'label': 1,  # 1 for dog
+                    'detections': detections
                 }
                 dog_metadata.append(metadata)
             
@@ -157,7 +165,8 @@ class OpenImagesV7Manager:
                     'filename': os.path.basename(sample.filepath),
                     'split': sample.tags[0] if sample.tags else 'train',  # Original split (train/validation)
                     'id': sample.id,
-                    'label': 0  # 0 for non-dog
+                    'label': 0,  # 0 for non-dog
+                    'detections': []  # No dog detections
                 }
                 non_dog_metadata.append(metadata)
                 
@@ -358,26 +367,10 @@ class OpenImagesV7Manager:
         
         # Count dogs and non-dogs in each split
         
-        # Default transforms if none provided
-        if train_transform is None:
-            train_transform = transforms.Compose([
-                transforms.Resize((256, 256)),
-                transforms.RandomCrop(224),
-                transforms.RandomHorizontalFlip(),
-                transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
-        
-        if val_transform is None:
-            val_transform = transforms.Compose([
-                transforms.Resize((224, 224)),
-                transforms.ToTensor(),
-                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-            ])
+
         
         # Create datasets
-        train_dataset = DogDataset(splits['train'], transform=train_transform)
-        val_dataset = DogDataset(splits['val'], transform=val_transform)
+        train_dataset = DogDataset(splits['train'], transform=None)
+        val_dataset = DogDataset(splits['val'], transform=None)
         
         return train_dataset, val_dataset

@@ -65,117 +65,88 @@ class Trainer:
     def train_epoch(self, epoch):
         self.model.train()
         total_loss = 0
-        all_predictions = []
-        all_targets = []
+        epoch_predictions = []
+        epoch_targets = []
         
         train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
         
         for step, (images, _, boxes) in enumerate(train_loader_bar):
             # Prepare data
-            images = torch.stack([image.to(self.device) for image in images])
-            targets = []
-            for boxes_per_image in boxes:
-                target = {
-                    'boxes': boxes_per_image.to(self.device),
-                    'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
-                }
-                targets.append(target)
+            images = images.to(self.device)
+            targets = [{'boxes': box.to(self.device)} for box in boxes]
             
-            # Forward pass and loss calculation
+            # Forward pass
             self.optimizer.zero_grad()
-            predictions = self.model(images, targets)
+            predictions = self.model(images)
             loss_dict = self.criterion(predictions, targets)
-            loss = loss_dict['total_loss']  # This is now a tensor
+            loss = loss_dict['total_loss']
             
             # Backward pass
             loss.backward()
             torch.nn.utils.clip_grad_norm_(self.model.parameters(), GRAD_CLIP_VALUE)
             self.optimizer.step()
             
-            # Update progress with float value
-            total_loss += loss_dict['loss_values']['total_loss']
-            train_loader_bar.set_postfix({'train_loss': total_loss / (step + 1)})
+            # Update metrics
+            total_loss += loss.item()
+            epoch_predictions.extend(predictions)
+            epoch_targets.extend(targets)
             
-            # Get inference predictions for metrics
-            with torch.no_grad():
-                inference_preds = self.model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
-            
-            # Log sample images periodically
-            if step % 50 == 0:
-                vis_images = images[-16:]
-                vis_preds = inference_preds[-16:]
-                vis_targets = targets[-16:]
-                self.visualization_logger.log_images('Train', vis_images, vis_preds, vis_targets, epoch)
+            # Update progress bar
+            train_loader_bar.set_postfix({
+                'train_loss': total_loss / (step + 1)
+            })
 
-        # Calculate average loss
+        # Calculate average loss and metrics
         avg_loss = total_loss / len(self.train_loader)
+        metrics = self.metrics_calculator.calculate_metrics(epoch_predictions, epoch_targets)
+        metrics['loss'] = avg_loss
         
-        # Calculate comprehensive metrics
-        metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
-        metrics.update(loss_dict['loss_values'])  # Use float values for logging
-        
-        # Log metrics
+        # Log metrics and sample visualizations
         self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
+        self.visualization_logger.log_images('train', images[:8], epoch_predictions[:8], epoch_targets[:8], epoch)
         self.metrics_logger.log_epoch_metrics(epoch, 'train', metrics)
         
         # Run validation
-        val_metrics = None
-        if self.val_loader:
-            val_metrics = self.validate(epoch)
-            
-            # Update learning rate scheduler
-            if val_metrics and 'total_loss' in val_metrics:
-                self.scheduler.step(val_metrics['total_loss'])
+        val_loss, val_metrics = self.validate(epoch)
         
-        return avg_loss, val_metrics['total_loss'] if val_metrics else 0
+        # Update learning rate scheduler
+        self.scheduler.step(val_loss)
+        
+        return avg_loss, val_loss
 
     def validate(self, epoch):
         self.model.eval()
         total_loss = 0
-        all_predictions = []
-        all_targets = []
+        epoch_predictions = []
+        epoch_targets = []
         
         with torch.no_grad():
             for images, _, boxes in tqdm(self.val_loader, desc='Validating'):
                 # Prepare data
-                images = torch.stack([image.to(self.device) for image in images])
-                targets = []
-                for boxes_per_image in boxes:
-                    target = {
-                        'boxes': boxes_per_image.to(self.device),
-                        'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
-                    }
-                    targets.append(target)
+                images = images.to(self.device)
+                targets = [{'boxes': box.to(self.device)} for box in boxes]
                 
-                # Get predictions
-                predictions = self.model(images, targets)
+                # Forward pass
+                predictions = self.model(images)
                 loss_dict = self.criterion(predictions, targets)
-                total_loss += loss_dict['loss_values']['total_loss']  # Use float value
+                loss = loss_dict['total_loss']
                 
-                # Get inference predictions for metrics
-                inference_preds = self.model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
+                # Update metrics
+                total_loss += loss.item()
+                epoch_predictions.extend(predictions)
+                epoch_targets.extend(targets)
         
-        # Calculate metrics
+        # Calculate average loss and metrics
         avg_loss = total_loss / len(self.val_loader)
-        metrics = DetectionMetricsCalculator.calculate_metrics(all_predictions, all_targets)
-        metrics.update(loss_dict['loss_values'])  # Use float values for logging
-        metrics['total_loss'] = avg_loss  # Include the average loss in metrics
+        metrics = self.metrics_calculator.calculate_metrics(epoch_predictions, epoch_targets)
+        metrics['loss'] = avg_loss
         
-        # Log metrics and sample images
+        # Log metrics and sample visualizations
         self.visualization_logger.log_epoch_metrics('val', metrics, epoch)
+        self.visualization_logger.log_images('val', images[:8], epoch_predictions[:8], epoch_targets[:8], epoch)
         self.metrics_logger.log_epoch_metrics(epoch, 'val', metrics)
         
-        # Log last batch of validation images
-        vis_images = images[-16:]
-        vis_preds = inference_preds[-16:]
-        vis_targets = targets[-16:]
-        self.visualization_logger.log_images('Val', vis_images, vis_preds, vis_targets, epoch)
-        
-        return metrics
+        return avg_loss, metrics
 
     def _flatten_metrics(self, metrics, parent_key='', sep='.'):
         """Flatten nested dictionaries of metrics into a single level dictionary."""
