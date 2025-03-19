@@ -3,14 +3,14 @@ import torch.nn as nn
 from utils import box_iou
 
 class DetectionLoss(nn.Module):
-    def __init__(self, iou_threshold=0.5, neg_pos_ratio=2, conf_weight=1.0, loc_weight=5.0):
+    def __init__(self, iou_threshold=0.5, neg_pos_ratio=3, conf_weight=2.0, loc_weight=1.0):
         super().__init__()
         self.iou_threshold = iou_threshold
         self.neg_pos_ratio = neg_pos_ratio
         self.conf_weight = conf_weight
         self.loc_weight = loc_weight
         self.bce_loss = nn.BCELoss(reduction='none')
-        self.smooth_l1 = nn.SmoothL1Loss(reduction='none', beta=0.11)
+        self.smooth_l1 = nn.SmoothL1Loss(reduction='none', beta=0.05)
 
     def forward(self, predictions, targets):
         if isinstance(predictions, list):

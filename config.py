@@ -11,38 +11,40 @@ DATA_SET_TO_USE = 0.3
 TRAIN_VAL_SPLIT = 0.8
 
 # Training parameters
-BATCH_SIZE = 16  # Reduced for more stable gradients
+BATCH_SIZE = 8  # Further reduced for more stable gradients 
 NUM_WORKERS = min(8, os.cpu_count() or 1)
-LEARNING_RATE = 5e-5  # Further reduced learning rate
-NUM_EPOCHS = 50
+LEARNING_RATE = 1e-5  # Further reduced learning rate
+NUM_EPOCHS = 100  # Increased to allow proper convergence
 DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 
-# Learning rate scheduler parameters
-LR_SCHEDULER_FACTOR = 0.5
-LR_SCHEDULER_PATIENCE = 5
-LR_SCHEDULER_MIN_LR = 1e-6
-GRAD_CLIP_VALUE = 0.5  # Reduced for more stable training
+# Learning rate scheduler parameters  
+LR_SCHEDULER_FACTOR = 0.2  # More aggressive LR reduction
+LR_SCHEDULER_PATIENCE = 3  # Reduced patience for faster adaptation
+LR_SCHEDULER_MIN_LR = 1e-7
+GRAD_CLIP_VALUE = 0.25  # Further reduced for more stable training
 
 # Model parameters
 NUM_CLASSES = 2
 FEATURE_MAP_SIZE = 7
-ANCHOR_SCALES = [0.4, 0.8, 1.2]  # Updated to match model
-ANCHOR_RATIOS = [0.7, 1.0, 1.3]  # Updated to match model
+
+# Anchor configurations optimized for dog detection
+ANCHOR_SCALES = [0.3, 0.6, 0.9]  # Reduced scales to better match dog sizes
+ANCHOR_RATIOS = [0.8, 1.0, 1.2]  # Tightened ratios around 1.0 for dog shapes
 NUM_ANCHORS_PER_CELL = 9
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
-# Detection parameters
-IOU_THRESHOLD = 0.4  # Reduced to make positive matching easier
-NEG_POS_RATIO = 2
+# Detection parameters - stricter matching criteria
+IOU_THRESHOLD = 0.5  # Increased for more precise matching
+NEG_POS_RATIO = 3   # Increased to handle class imbalance better
 
-# Training thresholds (more permissive)
-TRAIN_CONFIDENCE_THRESHOLD = 0.3  # Reduced to allow more training signals
-TRAIN_NMS_THRESHOLD = 0.5  # More permissive during training
+# Training thresholds - less permissive to reduce false positives
+TRAIN_CONFIDENCE_THRESHOLD = 0.4  # Increased to reduce weak predictions
+TRAIN_NMS_THRESHOLD = 0.4  # Tightened NMS during training
 
-# Inference thresholds (more strict)
-CONFIDENCE_THRESHOLD = 0.5
-NMS_THRESHOLD = 0.3
-MAX_DETECTIONS = 3  # Further reduced since images average 1.3 dogs
+# Inference thresholds
+CONFIDENCE_THRESHOLD = 0.6  # Increased to reduce false positives
+NMS_THRESHOLD = 0.35  # Slightly increased but still strict
+MAX_DETECTIONS = 2  # Reduced since ground truth averages 1.3 dogs
 
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20  # Number of training images to show in tensorboard
