@@ -3,14 +3,14 @@ import torch.nn as nn
 from utils import box_iou
 
 class DetectionLoss(nn.Module):
-    def __init__(self, iou_threshold=0.5, neg_pos_ratio=3, conf_weight=1.0, loc_weight=1.0):
+    def __init__(self, iou_threshold=0.5, neg_pos_ratio=2, conf_weight=1.0, loc_weight=5.0):
         super().__init__()
         self.iou_threshold = iou_threshold
-        self.neg_pos_ratio = neg_pos_ratio
+        self.neg_pos_ratio = neg_pos_ratio  # Reduced from 3 to 2
         self.conf_weight = conf_weight
-        self.loc_weight = loc_weight
+        self.loc_weight = loc_weight  # Increased from 1.0 to 5.0
         self.bce_loss = nn.BCELoss(reduction='none')
-        self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
+        self.smooth_l1 = nn.SmoothL1Loss(reduction='none', beta=0.11)  # Reduced beta for stronger gradients
 
     def forward(self, predictions, targets):
         # Handle both training and validation outputs
@@ -19,7 +19,7 @@ class DetectionLoss(nn.Module):
             batch_size = len(predictions)
             device = predictions[0]['boxes'].device if predictions[0]['boxes'].numel() > 0 else predictions[0]['anchors'].device
             
-            # Get default anchors
+            # Get default anchors from the first prediction that has them
             default_anchors = None
             for pred in predictions:
                 if 'anchors' in pred and pred['anchors'] is not None:
@@ -29,22 +29,40 @@ class DetectionLoss(nn.Module):
             if default_anchors is None:
                 raise ValueError("No default anchors found in predictions")
 
-            # For validation, create tensors with only valid predictions
-            all_boxes = []
-            all_scores = []
-            all_anchors = []
+            # Initialize empty lists for batch processing
+            batch_boxes = []
+            batch_scores = []
+            batch_anchors = []
             
+            # Process each prediction in the batch
             for pred in predictions:
-                valid_preds = pred['boxes'].shape[0] if 'boxes' in pred else 0
-                if valid_preds > 0:
-                    all_boxes.append(pred['boxes'])
-                    all_scores.append(pred['scores'])
-                    all_anchors.append(pred['anchors'][:valid_preds])
+                boxes = pred['boxes'] if pred['boxes'].numel() > 0 else torch.zeros((0, 4), device=device)
+                scores = pred['scores'] if pred['scores'].numel() > 0 else torch.zeros(0, device=device)
+                anchors = default_anchors  # Use the same anchors for all predictions
                 
+                batch_boxes.append(boxes)
+                batch_scores.append(scores)
+                batch_anchors.append(anchors)
+            
+            # Stack into batched tensors
+            max_preds = max(boxes.size(0) for boxes in batch_boxes) if any(boxes.size(0) > 0 for boxes in batch_boxes) else 1
+            padded_boxes = []
+            padded_scores = []
+            
+            for boxes, scores in zip(batch_boxes, batch_scores):
+                if boxes.size(0) < max_preds:
+                    # Pad boxes with zeros
+                    pad_boxes = torch.zeros((max_preds - boxes.size(0), 4), device=device)
+                    pad_scores = torch.zeros(max_preds - scores.size(0), device=device)
+                    boxes = torch.cat([boxes, pad_boxes], dim=0)
+                    scores = torch.cat([scores, pad_scores], dim=0)
+                padded_boxes.append(boxes)
+                padded_scores.append(scores)
+            
             predictions = {
-                'bbox_pred': torch.cat(all_boxes) if all_boxes else torch.zeros((0, 4), device=device),
-                'conf_pred': torch.cat(all_scores) if all_scores else torch.zeros((0,), device=device),
-                'anchors': torch.cat(all_anchors) if all_anchors else default_anchors
+                'bbox_pred': torch.stack(padded_boxes),  # Shape: [batch_size, max_preds, 4]
+                'conf_pred': torch.stack(padded_scores),  # Shape: [batch_size, max_preds]
+                'anchors': torch.stack(batch_anchors)  # Shape: [batch_size, num_anchors, 4]
             }
 
         # Extract predictions
@@ -58,14 +76,8 @@ class DetectionLoss(nn.Module):
         total_conf_loss = torch.tensor(0., device=device)
         num_pos = 0
         
-        # Handle validation format differently
-        if len(bbox_pred.shape) == 2:  # Validation format
-            batch_size = 1
-            bbox_pred = bbox_pred.unsqueeze(0)
-            conf_pred = conf_pred.unsqueeze(0)
-            default_anchors = default_anchors.unsqueeze(0)
-        else:
-            batch_size = bbox_pred.size(0)
+        # No need to handle validation format differently anymore since we standardized the format above
+        batch_size = bbox_pred.size(0)
 
         for i in range(batch_size):
             gt_boxes = targets[i]['boxes']  # [num_gt, 4]

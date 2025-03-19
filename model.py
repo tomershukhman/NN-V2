@@ -15,7 +15,7 @@ class DogDetector(nn.Module):
         super(DogDetector, self).__init__()
         
         # Load pretrained ResNet18 backbone
-        backbone = torchvision.models.resnet18(weights=ResNet18_Weights)
+        backbone = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
         
         # Remove the last two layers (avg pool and fc)
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
@@ -54,20 +54,35 @@ class DogDetector(nn.Module):
             nn.ReLU(inplace=True),
             nn.Dropout2d(0.2)
         )
-
-        # Generate anchor boxes with different scales and aspect ratios
-        self.anchor_scales = [0.5, 1.0, 2.0]
-        self.anchor_ratios = [0.5, 1.0, 2.0]
+        
+        # Use more appropriate scales and ratios for dog detection
+        self.anchor_scales = [0.4, 0.8, 1.2]  # Smaller range of scales
+        self.anchor_ratios = [0.7, 1.0, 1.3]  # Less extreme ratios for dogs
         self.num_anchors_per_cell = num_anchors_per_cell
         
-        # Prediction heads
-        self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
-        self.cls_head = nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
+        # Prediction heads with proper initialization
+        self.bbox_head = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        )
         
-        # Initialize weights with smaller variance
-        for m in [self.lateral_conv, self.smooth_conv, self.bbox_head, self.cls_head]:
+        self.cls_head = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
+        )
+        
+        # Initialize weights with Xavier/Glorot initialization
+        for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, std=0.005)  # Reduced standard deviation
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
         
         # Generate and register anchor boxes
@@ -119,24 +134,24 @@ class DogDetector(nn.Module):
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(x)
-        conf_pred = torch.sigmoid(self.cls_head(x))
+        conf_pred = self.cls_head(x)
         
         # Get shapes
         batch_size = x.shape[0]
         feature_size = x.shape[2]  # Should be self.feature_map_size
         total_anchors = feature_size * feature_size * self.num_anchors_per_cell
         
-        # Reshape bbox predictions to [batch, total_anchors, 4]
+        # Reshape predictions
         bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
         bbox_pred = bbox_pred.view(batch_size, total_anchors, 4)
         
-        # Transform bbox predictions from offsets to actual coordinates
-        default_anchors = self.default_anchors.to(bbox_pred.device)
-        bbox_pred = self._decode_boxes(bbox_pred, default_anchors)
-        
-        # Reshape confidence predictions
         conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
         conf_pred = conf_pred.view(batch_size, total_anchors)
+        conf_pred = torch.sigmoid(conf_pred)  # Apply sigmoid after reshaping
+        
+        # Transform bbox predictions from offsets to actual coordinates with normalization
+        default_anchors = self.default_anchors.to(bbox_pred.device)
+        bbox_pred = self._decode_boxes(bbox_pred, default_anchors)
         
         if self.training and targets is not None:
             return {
@@ -148,8 +163,9 @@ class DogDetector(nn.Module):
             # Process each image in the batch
             results = []
             for boxes, scores in zip(bbox_pred, conf_pred):
-                # Filter by confidence threshold
-                mask = scores > (TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD)
+                # Use appropriate threshold based on actual training state
+                threshold = TRAIN_CONFIDENCE_THRESHOLD if targets is not None else CONFIDENCE_THRESHOLD
+                mask = scores > threshold
                 boxes = boxes[mask]
                 scores = scores[mask]
                 
@@ -157,9 +173,8 @@ class DogDetector(nn.Module):
                     # Clip boxes to image boundaries
                     boxes = torch.clamp(boxes, min=0, max=1)
                     
-                    # Apply NMS with appropriate threshold
-                    keep_idx = nms(boxes, scores, 
-                                 TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD)
+                    # Apply NMS
+                    keep_idx = nms(boxes, scores, NMS_THRESHOLD)
                     
                     # Limit maximum detections
                     if len(keep_idx) > MAX_DETECTIONS:
@@ -176,20 +191,24 @@ class DogDetector(nn.Module):
                 results.append({
                     'boxes': boxes,
                     'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
+                    'anchors': default_anchors
                 })
             
             return results
 
     def _decode_boxes(self, box_pred, anchors):
-        """Convert predicted box offsets back to absolute coordinates"""
+        """Convert predicted box offsets back to absolute coordinates with normalization"""
         # Center form
         anchor_centers = (anchors[:, :2] + anchors[:, 2:]) / 2
         anchor_sizes = anchors[:, 2:] - anchors[:, :2]
         
-        # Decode predictions
-        pred_centers = box_pred[:, :, :2] * anchor_sizes + anchor_centers
-        pred_sizes = torch.exp(box_pred[:, :, 2:]) * anchor_sizes
+        # Scale factors for more stable gradients
+        scale_factor = torch.tensor([0.1, 0.1, 0.2, 0.2], device=box_pred.device)
+        box_pred = box_pred * scale_factor
+        
+        # Decode predictions with gradient-friendly computations
+        pred_centers = box_pred[:, :, :2].tanh() * 0.5 + anchor_centers
+        pred_sizes = torch.exp(box_pred[:, :, 2:].clamp(-4, 4)) * anchor_sizes
         
         # Convert back to [x1, y1, x2, y2] format
         boxes = torch.cat([
