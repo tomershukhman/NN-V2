@@ -127,14 +127,16 @@ class DetectionLoss(nn.Module):
 
             # Create confidence targets
             conf_target = torch.zeros_like(conf_pred[i])
-            conf_target[positive_indices] = 1
+            if num_positive > 0:
+                conf_target[positive_indices] = 1
             
             # Hard Negative Mining
-            num_neg = min(num_positive * self.neg_pos_ratio, len(conf_pred[i]) - num_positive)
+            num_neg = min(num_positive * self.neg_pos_ratio if num_positive > 0 else len(conf_pred[i]), len(conf_pred[i]) - num_positive)
             neg_conf_loss = self.bce_loss(conf_pred[i], conf_target)
             
             # Remove positive examples from negative mining
-            neg_conf_loss[positive_indices] = 0
+            if num_positive > 0:
+                neg_conf_loss[positive_indices] = 0
             
             # Sort and select hard negatives
             _, neg_indices = neg_conf_loss.sort(descending=True)

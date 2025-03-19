@@ -30,9 +30,27 @@ class VisualizationLogger:
         """Log comprehensive epoch-level metrics"""
         prefix = 'Train' if phase == 'train' else 'Val'
         
-        # Log loss and accuracy
+        # Log loss
         self.writer.add_scalar(f'{prefix}/Loss', metrics['loss'], epoch)
-        self.writer.add_scalar(f'{prefix}/Accuracy', metrics['accuracy'], epoch)
+        
+        # Log detection metrics
+        if 'detection_stats' in metrics:
+            self.writer.add_scalar(f'{prefix}/CorrectDetections', metrics['detection_stats']['correct_count_percent'], epoch)
+            self.writer.add_scalar(f'{prefix}/AvgDetectionsPerImage', metrics['detection_stats']['avg_detections'], epoch)
+        
+        # Log IoU metrics
+        if 'iou_stats' in metrics:
+            self.writer.add_scalar(f'{prefix}/MeanIoU', metrics['iou_stats']['mean'], epoch)
+        
+        # Log confidence metrics
+        if 'confidence_stats' in metrics:
+            self.writer.add_scalar(f'{prefix}/MeanConfidence', metrics['confidence_stats']['mean'], epoch)
+        
+        # Log performance metrics
+        if 'performance' in metrics:
+            self.writer.add_scalar(f'{prefix}/Precision', metrics['performance']['precision'], epoch)
+            self.writer.add_scalar(f'{prefix}/Recall', metrics['performance']['recall'], epoch)
+            self.writer.add_scalar(f'{prefix}/F1Score', metrics['performance']['f1_score'], epoch)
 
     def draw_boxes(self, image, boxes, scores=None, gt_boxes=None):
         # Denormalize the image first
