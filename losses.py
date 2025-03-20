@@ -56,11 +56,17 @@ class DetectionLoss(nn.Module):
         # Initialize loss components
         total_loc_loss = torch.tensor(0., device=device)
         total_conf_loss = torch.tensor(0., device=device)
+        total_count_loss = torch.tensor(0., device=device)
         num_pos = 0
+        
+        # Count statistics to track mismatches
+        pred_counts = []
+        gt_counts = []
         
         for i in range(batch_size):
             gt_boxes = targets[i]['boxes']  # [num_gt, 4]
             num_gt = len(gt_boxes)
+            gt_counts.append(num_gt)
             
             if num_gt == 0:
                 # If no ground truth boxes, all predictions should have low confidence
@@ -92,6 +98,10 @@ class DetectionLoss(nn.Module):
             positive_indices = torch.where(positive_mask)[0]
             num_positive = len(positive_indices)
             num_pos += num_positive
+            
+            # Count the number of predicted boxes (where confidence > 0.5)
+            pred_count = torch.sum(conf_pred[i] > 0.5).item()
+            pred_counts.append(pred_count)
             
             if num_positive > 0:
                 # Localization loss for positive anchors
@@ -135,10 +145,18 @@ class DetectionLoss(nn.Module):
                 
                 total_conf_loss += conf_loss
         
+        # Calculate count loss based on the difference between prediction and ground truth counts
+        for pred_count, gt_count in zip(pred_counts, gt_counts):
+            # Count penalty increases quadratically with the difference
+            count_diff = abs(pred_count - gt_count)
+            count_penalty = count_diff ** 2  # Quadratic penalty for wrong counts
+            total_count_loss += torch.tensor(count_penalty, device=device)
+        
         # Normalize losses
         num_pos = max(1, num_pos)  # Avoid division by zero
         total_loc_loss = total_loc_loss / num_pos
         total_conf_loss = total_conf_loss / num_pos
+        total_count_loss = total_count_loss / batch_size  # Normalize by batch size
         
         # Calculate IoU quality factor to dynamically adjust loss weights
         # Lower IoU means we should focus more on bbox regression
@@ -147,19 +165,23 @@ class DetectionLoss(nn.Module):
         
         # Dynamically adjust weights based on IoU quality
         dynamic_bbox_weight = bbox_weight * (1.0 + iou_quality)
+        count_weight = 0.5  # Weight for count loss
         
         # Apply weights to loss components
         weighted_loc_loss = dynamic_bbox_weight * total_loc_loss
         weighted_conf_loss = conf_weight * total_conf_loss
+        weighted_count_loss = count_weight * total_count_loss
         
-        total_loss = weighted_loc_loss + weighted_conf_loss
+        total_loss = weighted_loc_loss + weighted_conf_loss + weighted_count_loss
         
         return {
             'total_loss': total_loss,
             'conf_loss': total_conf_loss.item(),
             'bbox_loss': total_loc_loss.item(),
+            'count_loss': total_count_loss.item(),
             'mean_iou': mean_iou.item() if isinstance(mean_iou, torch.Tensor) else mean_iou,
-            'bbox_weight': dynamic_bbox_weight.item() if isinstance(dynamic_bbox_weight, torch.Tensor) else dynamic_bbox_weight
+            'bbox_weight': dynamic_bbox_weight.item() if isinstance(dynamic_bbox_weight, torch.Tensor) else dynamic_bbox_weight,
+            'count_weight': count_weight
         }
 
     @staticmethod

@@ -248,6 +248,8 @@ class Trainer:
                     print(f"SWA Model Metrics - Precision: {swa_val_metrics['precision']:.4f}, "
                           f"Recall: {swa_val_metrics['recall']:.4f}, F1: {swa_val_metrics['f1_score']:.4f}")
                     print(f"                  - Mean IoU: {swa_val_metrics['mean_iou']:.4f}, "
+                          f"Count Match %: {swa_val_metrics['count_match_percentage']:.1f}%")
+                    print(f"                  - Avg Count Diff: {swa_val_metrics['avg_count_diff']:.2f}, "
                           f"Loss: {swa_val_loss:.4f}")
                     
                     # Check if SWA model is the best one so far
@@ -266,15 +268,26 @@ class Trainer:
             print(f"Epoch {epoch+1}/{self.num_epochs} Results:")
             print(f"Learning Rate: {current_lr:.6f}, Weight Decay: {current_wd:.6f}")
             print(f"Loss Weights - Confidence: {conf_weight:.2f}, BBox: {bbox_weight:.2f}")
+            
+            # Print train metrics
             print(f"Training   - Total Loss: {train_loss:.6f}")
+            if 'count_loss' in train_metrics:
+                print(f"            Count Loss: {train_metrics['count_loss']:.6f}, "
+                      f"Count Match %: {train_metrics['count_match_percentage']:.1f}%")
+            
+            # Print validation metrics
             print(f"Validation - Total Loss: {val_loss:.6f}")
             print(f"Smoothed Val Loss: {smoothed_val_loss:.6f}, EMA Val Loss: {ema_val_loss:.6f}")
             
-            # Print validation metrics
+            # Print validation metrics with new count-related information
             print(f"Validation Metrics - Precision: {val_metrics['precision']:.4f}, "
                   f"Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
             print(f"                  - Mean IoU: {val_metrics['mean_iou']:.4f}, "
                   f"Mean Confidence: {val_metrics['mean_confidence']:.4f}")
+            print(f"                  - Count Match %: {val_metrics['count_match_percentage']:.1f}%, "
+                  f"Avg Count Diff: {val_metrics['avg_count_diff']:.2f}")
+            print(f"                  - Over Detect: {val_metrics['over_detections']}, "
+                  f"Under Detect: {val_metrics['under_detections']}")
             
             # Print loss changes from previous epoch
             if epoch > 0:
@@ -656,6 +669,10 @@ class Trainer:
         total_ground_truth = 0
         true_positives = 0
         
+        # New metrics for count mismatch
+        count_match_percentage = 0
+        count_diff_sum = 0
+        
         detections_per_image = []
         
         for pred, target in zip(predictions, targets):
@@ -670,9 +687,11 @@ class Trainer:
             total_detections += num_pred
             total_ground_truth += num_gt
             
-            # Detection count analysis
+            # Track count differences
+            count_diff_sum += abs(num_pred - num_gt)
             if num_pred == num_gt:
                 correct_count += 1
+                count_match_percentage += 1
             elif num_pred > num_gt:
                 over_detections += 1
             else:
@@ -682,35 +701,59 @@ class Trainer:
             if len(pred_scores) > 0:
                 all_confidences.extend(pred_scores.cpu().tolist())
             
-            # Calculate IoUs for matched predictions
-            if num_pred > 0 and num_gt > 0:
-                # Calculate IoUs between all predictions and ground truths
-                pred_boxes_expanded = pred_boxes.unsqueeze(1)  # [num_pred, 1, 4]
-                gt_boxes_expanded = gt_boxes.unsqueeze(0)      # [1, num_gt, 4]
-                
-                # Calculate IoU matrix (using the same implementation as in loss function)
-                left = torch.max(pred_boxes_expanded[..., 0], gt_boxes_expanded[..., 0])
-                top = torch.max(pred_boxes_expanded[..., 1], gt_boxes_expanded[..., 1])
-                right = torch.min(pred_boxes_expanded[..., 2], gt_boxes_expanded[..., 2])
-                bottom = torch.min(pred_boxes_expanded[..., 3], gt_boxes_expanded[..., 3])
-                
-                width = (right - left).clamp(min=0)
-                height = (bottom - top).clamp(min=0)
-                intersection = width * height
-                
-                area1 = (pred_boxes_expanded[..., 2] - pred_boxes_expanded[..., 0]) * (pred_boxes_expanded[..., 3] - pred_boxes_expanded[..., 1])
-                area2 = (gt_boxes_expanded[..., 2] - gt_boxes_expanded[..., 0]) * (gt_boxes_expanded[..., 3] - gt_boxes_expanded[..., 1])
-                union = area1 + area2 - intersection
-                
-                iou_matrix = intersection / (union + 1e-6)  # [num_pred, num_gt]
-                
-                # For each GT box, find the prediction with highest IoU
-                # This helps identify the best prediction for each ground truth
-                max_ious_per_gt, _ = iou_matrix.max(dim=0)  # [num_gt]
-                all_ious.extend(max_ious_per_gt.cpu().tolist())
-                
-                # Count true positives (IoU > 0.5)
-                true_positives += (max_ious_per_gt > 0.5).sum().item()
+            # Calculate IoUs for matched predictions and handle count mismatches
+            if num_gt > 0:  # Only process if there are ground truth boxes
+                if num_pred > 0:
+                    # Calculate IoUs between all predictions and ground truths
+                    pred_boxes_expanded = pred_boxes.unsqueeze(1)  # [num_pred, 1, 4]
+                    gt_boxes_expanded = gt_boxes.unsqueeze(0)      # [1, num_gt, 4]
+                    
+                    # Calculate IoU matrix (using the same implementation as in loss function)
+                    left = torch.max(pred_boxes_expanded[..., 0], gt_boxes_expanded[..., 0])
+                    top = torch.max(pred_boxes_expanded[..., 1], gt_boxes_expanded[..., 1])
+                    right = torch.min(pred_boxes_expanded[..., 2], gt_boxes_expanded[..., 2])
+                    bottom = torch.min(pred_boxes_expanded[..., 3], gt_boxes_expanded[..., 3])
+                    
+                    width = (right - left).clamp(min=0)
+                    height = (bottom - top).clamp(min=0)
+                    intersection = width * height
+                    
+                    area1 = (pred_boxes_expanded[..., 2] - pred_boxes_expanded[..., 0]) * (pred_boxes_expanded[..., 3] - pred_boxes_expanded[..., 1])
+                    area2 = (gt_boxes_expanded[..., 2] - gt_boxes_expanded[..., 0]) * (gt_boxes_expanded[..., 3] - gt_boxes_expanded[..., 1])
+                    union = area1 + area2 - intersection
+                    
+                    iou_matrix = intersection / (union + 1e-6)  # [num_pred, num_gt]
+                    
+                    # For each GT box, find the prediction with highest IoU
+                    max_ious_per_gt, matched_pred_indices = iou_matrix.max(dim=0)  # [num_gt]
+                    
+                    # Count true positives (IoU > 0.5)
+                    true_positives += (max_ious_per_gt > 0.5).sum().item()
+                    
+                    # Add IoUs for matched boxes
+                    all_ious.extend(max_ious_per_gt.cpu().tolist())
+                    
+                    # For any missing boxes (when num_pred < num_gt), add zero IoU values
+                    # This penalizes the model for not predicting enough boxes
+                    if num_pred < num_gt:
+                        # We've already accounted for all predictions, so we just need to add zeros for the missing ones
+                        zeros_to_add = num_gt - num_pred
+                        all_ious.extend([0.0] * zeros_to_add)
+                        
+                    # For extra boxes (when num_pred > num_gt), we need to identify unmatched predictions and penalize them
+                    elif num_pred > num_gt:
+                        # Create a mask of matched predictions
+                        matched_mask = torch.zeros(num_pred, dtype=torch.bool, device=pred_boxes.device)
+                        matched_mask[matched_pred_indices] = True
+                        
+                        # Find unmatched predictions
+                        unmatched_pred_indices = torch.where(~matched_mask)[0]
+                        
+                        # Add zero IoU for each unmatched prediction (these are false positives)
+                        all_ious.extend([0.0] * len(unmatched_pred_indices))
+                else:
+                    # If no predictions but we have GT boxes, add zeros for all missing boxes
+                    all_ious.extend([0.0] * num_gt)
         
         # Convert lists to tensors for histogram logging
         iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
@@ -718,11 +761,13 @@ class Trainer:
         detections_per_image = torch.tensor(detections_per_image)
         
         # Calculate final metrics
-        correct_count_percent = (correct_count / total_images) * 100
-        avg_detections = total_detections / total_images
-        avg_ground_truth = total_ground_truth / total_images
+        correct_count_percent = (correct_count / total_images) * 100  # Percentage of images with correct box count
+        count_match_percentage = (count_match_percentage / total_images) * 100 if total_images > 0 else 0
+        avg_count_diff = count_diff_sum / total_images if total_images > 0 else 0
+        avg_detections = total_detections / total_images if total_images > 0 else 0
+        avg_ground_truth = total_ground_truth / total_images if total_images > 0 else 0
         
-        # Calculate mean and median IoU
+        # Calculate mean and median IoU (including penalties for count mismatches)
         mean_iou = np.mean(all_ious) if all_ious else 0
         median_iou = np.median(all_ious) if all_ious else 0
         
@@ -737,6 +782,8 @@ class Trainer:
         
         return {
             'correct_count_percent': correct_count_percent,
+            'count_match_percentage': count_match_percentage,
+            'avg_count_diff': avg_count_diff,
             'over_detections': over_detections,
             'under_detections': under_detections,
             'mean_iou': mean_iou,
