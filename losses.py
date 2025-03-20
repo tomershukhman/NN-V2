@@ -8,6 +8,8 @@ class DetectionLoss(nn.Module):
         self.neg_pos_ratio = neg_pos_ratio
         self.bce_loss = nn.BCELoss(reduction='none')
         self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
+        # Count loss weight - we'll start with a moderate value
+        self.count_weight = 0.3
 
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs
@@ -103,6 +105,12 @@ class DetectionLoss(nn.Module):
             pred_count = torch.sum(conf_pred[i] > 0.5).item()
             pred_counts.append(pred_count)
             
+            # Calculate count loss - penalize difference between predicted and ground truth counts
+            # This helps the model better handle multiple dogs
+            count_diff = abs(pred_count - num_gt)
+            count_loss = torch.tensor(count_diff, dtype=torch.float32, device=device)
+            total_count_loss += count_loss
+            
             if num_positive > 0:
                 # Localization loss for positive anchors
                 matched_gt_boxes = gt_boxes.squeeze(0)[best_gt_idx[positive_indices]]
@@ -149,18 +157,21 @@ class DetectionLoss(nn.Module):
         num_pos = max(1, num_pos)  # Avoid division by zero
         total_loc_loss = total_loc_loss / num_pos
         total_conf_loss = total_conf_loss / num_pos
+        total_count_loss = total_count_loss / batch_size
         
         # Apply weights to loss components
         weighted_loc_loss = bbox_weight * total_loc_loss
         weighted_conf_loss = conf_weight * total_conf_loss
+        weighted_count_loss = self.count_weight * total_count_loss
         
-        # Simple total loss without count loss for now
-        total_loss = weighted_loc_loss + weighted_conf_loss
+        # Include the count loss in the total loss
+        total_loss = weighted_loc_loss + weighted_conf_loss + weighted_count_loss
         
         return {
             'total_loss': total_loss,
             'conf_loss': total_conf_loss.item(),
             'bbox_loss': total_loc_loss.item(),
+            'count_loss': total_count_loss.item(),
             'mean_iou': 0.0,  # We'll calculate this in metrics separately
             'bbox_weight': bbox_weight
         }

@@ -6,32 +6,47 @@ from torchvision.models import ResNet18_Weights
 from torchvision.ops import nms
 from config import (
     CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD
+    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD,
+    ANCHOR_SCALES, ANCHOR_RATIOS, FEATURE_MAP_SIZE
 )
 import math
 
 class DogDetector(nn.Module):
-    def __init__(self, num_anchors_per_cell=9, feature_map_size=7):
+    def __init__(self, num_anchors_per_cell=None, feature_map_size=None):
         super(DogDetector, self).__init__()
+        
+        # Use values from config if not provided
+        self.feature_map_size = feature_map_size or FEATURE_MAP_SIZE
         
         # Load pretrained ResNet18 backbone
         backbone = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
         
-        # Remove the last two layers (avg pool and fc)
-        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
+        # Split backbone for multi-scale features
+        self.backbone_layers = nn.ModuleList([
+            nn.Sequential(*list(backbone.children())[:5]),    # C2 output
+            nn.Sequential(*list(backbone.children())[5:6]),   # C3 output
+            nn.Sequential(*list(backbone.children())[6:7]),   # C4 output
+            nn.Sequential(*list(backbone.children())[7:8])    # C5 output
+        ])
         
-        # Store feature map size
-        self.feature_map_size = feature_map_size
-        
-        # Freeze the first few layers of ResNet18
-        for param in list(self.backbone.parameters())[:-6]:
+        # Freeze the first layers of ResNet18 to avoid overfitting
+        for param in self.backbone_layers[0].parameters():
             param.requires_grad = False
         
-        # FPN-like feature pyramid with fixed pooling to ensure MPS compatibility
-        self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
-        self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        # Multi-scale feature fusion (FPN-like approach)
+        self.lateral_convs = nn.ModuleList([
+            nn.Conv2d(512, 256, kernel_size=1),  # C5 lateral
+            nn.Conv2d(256, 256, kernel_size=1),  # C4 lateral
+            nn.Conv2d(128, 256, kernel_size=1)   # C3 lateral
+        ])
         
-        # Replace adaptive pooling with fixed pooling
+        self.smooth_convs = nn.ModuleList([
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),  # P5 smooth
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),  # P4 smooth
+            nn.Conv2d(256, 256, kernel_size=3, padding=1)   # P3 smooth
+        ])
+        
+        # Use fixed-size pooling for consistent output shape
         self.pool = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
@@ -39,28 +54,37 @@ class DogDetector(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         
-        # Detection head
+        # Detection head with skip connections for better gradient flow
         self.conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.bn1 = nn.BatchNorm2d(256)
         self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.bn2 = nn.BatchNorm2d(256)
+        
+        # Dropout for regularization
+        self.dropout = nn.Dropout(0.2)
         
         # Generate anchor boxes with different scales and aspect ratios
-        self.anchor_scales = [0.5, 1.0, 2.0]
-        self.anchor_ratios = [0.5, 1.0, 2.0]
-        self.num_anchors_per_cell = num_anchors_per_cell
+        self.anchor_scales = ANCHOR_SCALES
+        self.anchor_ratios = ANCHOR_RATIOS
+        self.num_anchors_per_cell = num_anchors_per_cell or len(self.anchor_scales) * len(self.anchor_ratios)
         
         # Prediction heads
-        self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
-        self.cls_head = nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
+        self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        self.cls_head = nn.Conv2d(256, self.num_anchors_per_cell, kernel_size=3, padding=1)
         
-        # Initialize weights
-        for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head, self.cls_head]:
+        # Initialize weights using Kaiming initialization for better training dynamics
+        for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, std=0.01)
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
         
         # Generate and register anchor boxes
         self.register_buffer('default_anchors', self._generate_anchors())
-
+        
     def _generate_anchors(self):
         """Generate anchor boxes for each cell in the feature map"""
         anchors = []
@@ -81,14 +105,25 @@ class DogDetector(nn.Module):
         return torch.tensor(anchors, dtype=torch.float32)
         
     def forward(self, x, targets=None):
-        # Extract features using backbone
-        features = self.backbone(x)
+        # Extract multi-scale features using backbone
+        c2 = self.backbone_layers[0](x)
+        c3 = self.backbone_layers[1](c2)
+        c4 = self.backbone_layers[2](c3)
+        c5 = self.backbone_layers[3](c4)
         
-        # FPN-like feature processing with fixed pooling
-        lateral = self.lateral_conv(features)
-        features = self.smooth_conv(lateral)
+        # FPN-like feature fusion for multi-scale awareness
+        p5 = self.lateral_convs[0](c5)
+        p5_upsampled = F.interpolate(p5, size=c4.shape[-2:], mode='nearest')
+        p4 = self.lateral_convs[1](c4) + p5_upsampled
+        p4 = self.smooth_convs[1](p4)
+        p4_upsampled = F.interpolate(p4, size=c3.shape[-2:], mode='nearest')
+        p3 = self.lateral_convs[2](c3) + p4_upsampled
+        p3 = self.smooth_convs[2](p3)
         
-        # Apply fixed-size pooling operations until we reach desired size
+        # Use the most appropriate feature level based on target size
+        features = p3
+        
+        # Resize to target feature map size if needed
         while features.shape[-1] > self.feature_map_size:
             features = self.pool(features)
             
@@ -101,9 +136,12 @@ class DogDetector(nn.Module):
                 align_corners=False
             )
         
-        # Detection head
-        x = F.relu(self.conv1(features))
-        x = F.relu(self.conv2(x))
+        # Detection head with residual connection for better gradient flow
+        identity = features
+        x = F.relu(self.bn1(self.conv1(features)))
+        x = self.dropout(x)
+        x = F.relu(self.bn2(self.conv2(x)))
+        x = x + identity  # Residual connection
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(x)

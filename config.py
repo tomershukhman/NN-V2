@@ -16,26 +16,26 @@ DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is
 
 # Model parameters
 NUM_CLASSES = 2  # Background and Dog
-FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
+FEATURE_MAP_SIZE = 9  # Increased from 7 to 9 for better resolution for multiple objects
 
-# Anchor box configuration - use original settings which work
-ANCHOR_SCALES = [0.5, 1.0, 2.0]
-ANCHOR_RATIOS = [0.5, 1.0, 2.0]
+# Anchor box configuration - enhanced for better multi-scale detection
+ANCHOR_SCALES = [0.25, 0.5, 1.0, 2.0]  # Added smaller scale for detecting small dogs
+ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5, 2.0]  # Added more aspect ratios for varied dog poses
 NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
 # Detection parameters
-IOU_THRESHOLD = 0.4  # Threshold for box matching during training
+IOU_THRESHOLD = 0.35  # Slightly lower threshold to increase recall for multiple dogs
 NEG_POS_RATIO = 3  # Ratio of negative to positive examples 
 
 # Training thresholds
-TRAIN_CONFIDENCE_THRESHOLD = 0.3
-TRAIN_NMS_THRESHOLD = 0.5
+TRAIN_CONFIDENCE_THRESHOLD = 0.25  # Lower threshold to ensure more objects are detected during training
+TRAIN_NMS_THRESHOLD = 0.6  # Higher NMS threshold to prevent over-suppression during training
 
 # Inference thresholds
-CONFIDENCE_THRESHOLD = 0.3  # Lower threshold to ensure boxes are detected
-NMS_THRESHOLD = 0.45  # Balanced NMS threshold
-MAX_DETECTIONS = 25  # Allow more detections per image
+CONFIDENCE_THRESHOLD = 0.25  # Lower threshold to ensure boxes are detected
+NMS_THRESHOLD = 0.4  # Reduced threshold to prevent merging close dogs
+MAX_DETECTIONS = 30  # Increased to allow more detections per image
 
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0
