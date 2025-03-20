@@ -103,6 +103,81 @@ class DogDetector(nn.Module):
                         y2 = cy + h/2
                         anchors.append([x1, y1, x2, y2])
         return torch.tensor(anchors, dtype=torch.float32)
+    
+    def _box_area(self, boxes):
+        """Calculate area of boxes"""
+        return (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
+    
+    def _soft_nms(self, boxes, scores, threshold=0.3, sigma=0.5, method='gaussian'):
+        """
+        Implements Soft-NMS for better handling of multiple close objects
+        
+        Args:
+            boxes: boxes in [x1, y1, x2, y2] format
+            scores: confidence scores
+            threshold: IoU threshold for considering a box for score adjustment
+            sigma: parameter for gaussian score decay
+            method: 'gaussian' or 'linear' for score adjustment
+            
+        Returns:
+            indices of boxes to keep
+        """
+        # Make a copy of scores for modification
+        scores_adj = scores.clone()
+        
+        # Sort boxes by score
+        _, order = scores.sort(descending=True)
+        keep = []
+        
+        while order.numel() > 0:
+            # Pick the box with highest score
+            i = order[0].item()
+            keep.append(i)
+            
+            # If only one box left, we're done
+            if order.numel() == 1:
+                break
+                
+            # Get IoU of the current box with remaining boxes
+            current_box = boxes[i].unsqueeze(0)
+            other_boxes = boxes[order[1:]]
+            
+            # Calculate intersection
+            x1 = torch.max(current_box[:, 0], other_boxes[:, 0])
+            y1 = torch.max(current_box[:, 1], other_boxes[:, 1])
+            x2 = torch.min(current_box[:, 2], other_boxes[:, 2])
+            y2 = torch.min(current_box[:, 3], other_boxes[:, 3])
+            
+            # Calculate intersection area
+            width = (x2 - x1).clamp(min=0)
+            height = (y2 - y1).clamp(min=0)
+            intersection = width * height
+            
+            # Calculate union area
+            area1 = self._box_area(current_box)
+            area2 = self._box_area(other_boxes)
+            union = area1 + area2 - intersection
+            
+            # Calculate IoU
+            iou = intersection / union.clamp(min=1e-6)
+            
+            # Apply soft-NMS score adjustment
+            if method == 'gaussian':
+                # Gaussian decay
+                scores_adj[order[1:]] *= torch.exp(-(iou * iou) / sigma)
+            else:
+                # Linear decay
+                scores_adj[order[1:]] *= (1.0 - iou).clamp(min=0)
+                
+            # Remove boxes with scores below threshold
+            remaining = (scores_adj[order[1:]] > threshold).nonzero().squeeze()
+            if remaining.numel() == 0:
+                break
+            
+            # Update order with adjusted indices
+            order = order[1:][remaining]
+            
+        return torch.tensor(keep, dtype=torch.long, device=boxes.device)
         
     def forward(self, x, targets=None):
         # Extract multi-scale features using backbone
@@ -186,9 +261,22 @@ class DogDetector(nn.Module):
                     # Clip boxes to image boundaries
                     boxes = torch.clamp(boxes, min=0, max=1)
                     
-                    # Apply NMS with appropriate threshold
-                    nms_threshold = TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
-                    keep_idx = nms(boxes, scores, nms_threshold)
+                    # Use multi-stage NMS to better handle multi-dog detection
+                    # First try with higher threshold to detect very distinct dogs
+                    nms_threshold_high = TRAIN_NMS_THRESHOLD if self.training else min(NMS_THRESHOLD + 0.15, 0.7)
+                    keep_idx_high = nms(boxes, scores, nms_threshold_high)
+                    
+                    # Only if we found just one dog, try again with lower threshold
+                    # This helps catch dogs that might be close to each other
+                    if len(keep_idx_high) <= 1 and len(boxes) > 1:
+                        nms_threshold_low = TRAIN_NMS_THRESHOLD if self.training else max(NMS_THRESHOLD - 0.1, 0.3)
+                        keep_idx = nms(boxes, scores, nms_threshold_low)
+                    else:
+                        # Use Soft-NMS for multi-dog images when not in training
+                        if not self.training:
+                            keep_idx = self._soft_nms(boxes, scores, threshold=confidence_threshold, sigma=0.5)
+                        else:
+                            keep_idx = keep_idx_high
                     
                     # Limit maximum detections
                     if len(keep_idx) > MAX_DETECTIONS:
@@ -208,7 +296,8 @@ class DogDetector(nn.Module):
                 results.append({
                     'boxes': boxes,
                     'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
+                    'anchors': default_anchors,  # Include anchors in each result
+                    'count': len(boxes)  # Add count information 
                 })
             
             return results
