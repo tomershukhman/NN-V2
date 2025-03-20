@@ -667,6 +667,7 @@ class Trainer:
         over_detections = 0
         under_detections = 0
         all_ious = []
+        all_ious_with_penalties = []  # New list for penalized IOUs
         all_confidences = []
         total_detections = 0
         total_ground_truth = 0
@@ -718,19 +719,27 @@ class Trainer:
                     # For each GT box, find the prediction with highest IoU
                     max_ious_per_gt, matched_pred_indices = ious.max(dim=0)
                     
-                    # Add IoUs for matched boxes
+                    # Store original IOUs for standard metric
                     all_ious.extend(max_ious_per_gt.cpu().tolist())
+                    
+                    # Apply penalties for unmatched GT boxes (new calculation)
+                    penalty_mask = max_ious_per_gt < 0.5
+                    penalized_ious = max_ious_per_gt.clone()
+                    penalized_ious[penalty_mask] *= 0.5  # Reduce IOU score for poor matches
+                    
+                    # Add penalized IOUs
+                    all_ious_with_penalties.extend(penalized_ious.cpu().tolist())
                     
                     # Count true positives (IoU > 0.5)
                     true_positives += (max_ious_per_gt > 0.5).sum().item()
                     
-                    # For any missing boxes (when num_pred < num_gt), add zero IoU values
+                    # For each unmatched GT box (underdetection), add zero IOU
                     if num_pred < num_gt:
-                        # No need to add zeros here as we've already computed IoU for all GT boxes
-                        pass
+                        all_ious_with_penalties.extend([0.0] * (num_gt - num_pred))
                 else:
                     # If no predictions but we have GT boxes, add zeros for all missing boxes
                     all_ious.extend([0.0] * num_gt)
+                    all_ious_with_penalties.extend([0.0] * num_gt)
         
         # Convert lists to tensors for histogram logging
         iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
@@ -738,14 +747,15 @@ class Trainer:
         detections_per_image = torch.tensor(detections_per_image)
         
         # Calculate final metrics
-        correct_count_percent = (correct_count / total_images) * 100  # Percentage of images with correct box count
+        correct_count_percent = (correct_count / total_images) * 100
         count_match_percentage = (count_match_percentage / total_images) * 100 if total_images > 0 else 0
         avg_count_diff = count_diff_sum / total_images if total_images > 0 else 0
         avg_detections = total_detections / total_images if total_images > 0 else 0
         avg_ground_truth = total_ground_truth / total_images if total_images > 0 else 0
         
-        # Calculate mean and median IoU (including penalties for count mismatches)
+        # Calculate mean IOUs - both regular and penalized versions
         mean_iou = np.mean(all_ious) if all_ious else 0
+        mean_iou_with_penalties = np.mean(all_ious_with_penalties) if all_ious_with_penalties else 0
         median_iou = np.median(all_ious) if all_ious else 0
         
         # Calculate confidence score statistics
@@ -764,6 +774,7 @@ class Trainer:
             'over_detections': over_detections,
             'under_detections': under_detections,
             'mean_iou': mean_iou,
+            'mean_iou_with_penalties': mean_iou_with_penalties,  # New metric
             'median_iou': median_iou,
             'mean_confidence': mean_confidence,
             'median_confidence': median_confidence,
