@@ -289,19 +289,30 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     os.makedirs(root, exist_ok=True)
     print(f"Using data root directory: {os.path.abspath(root)}")
     
-    # Define Albumentations transforms for training
+    # Define Albumentations transforms for training with enhanced augmentation
     train_transform = A.Compose([
-        # More aggressive random crop to help with large dog detection
-        A.RandomResizedCrop(
-            size=(224, 224), 
-            scale=(0.6, 1.0),
-            ratio=(0.75, 1.33),
-            interpolation=1,
-            p=1.0
-        ),
+        # Resize with padding to maintain aspect ratio
+        A.OneOf([
+            A.RandomResizedCrop(
+                size=(224, 224), 
+                scale=(0.5, 1.0),
+                ratio=(0.75, 1.33),
+                p=0.7
+            ),
+            # Letterbox-style resize as an alternative
+            A.LongestMaxSize(max_size=224, p=0.3),
+            A.PadIfNeeded(min_height=224, min_width=224, border_mode=0, p=1.0)
+        ], p=1.0),
+        
+        # Geometric transformations
         A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, p=0.3),
-        # Color augmentations for better normalization and robustness
+        A.OneOf([
+            A.Rotate(limit=15, p=0.8),
+            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, p=0.8),
+            A.Perspective(scale=(0.05, 0.1), p=0.7),
+        ], p=0.5),
+        
+        # Color augmentations for robustness to different lighting conditions
         A.OneOf([
             A.RandomBrightnessContrast(
                 brightness_limit=0.3,
@@ -309,43 +320,67 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
                 p=1.0
             ),
             A.RGBShift(
-                r_shift_limit=15,
-                g_shift_limit=15,
-                b_shift_limit=15,
+                r_shift_limit=20,
+                g_shift_limit=20,
+                b_shift_limit=20,
                 p=1.0
             ),
             A.HueSaturationValue(
-                hue_shift_limit=10, 
-                sat_shift_limit=20, 
-                val_shift_limit=10, 
+                hue_shift_limit=15, 
+                sat_shift_limit=25, 
+                val_shift_limit=15, 
                 p=1.0
             ),
-        ], p=0.5),
-        # Add perspective transforms to simulate different viewpoints
+            A.CLAHE(clip_limit=4.0, p=1.0),
+        ], p=0.7),
+        
+        # Weather and noise simulations
         A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
-            A.MotionBlur(blur_limit=(3, 7), p=1.0),
-        ], p=0.2),
-        # Scale-specific augmentations
-        A.OneOf([
-            A.RandomScale(scale_limit=(-0.3, 0.1), p=1.0),
-            A.RandomScale(scale_limit=(0.1, 0.3), p=1.0),
+            A.GaussNoise(var_limit=(10, 50), p=0.5),
+            A.GaussianBlur(blur_limit=(3, 7), p=0.5),
+            A.MotionBlur(blur_limit=(3, 7), p=0.5),
+            A.ImageCompression(quality_lower=70, quality_upper=100, p=0.5),
         ], p=0.3),
+        
+        # Dog-specific augmentations - cutout/cutmix-like for occlusion robustness
+        A.OneOf([
+            A.CoarseDropout(
+                max_holes=8, 
+                max_height=32, 
+                max_width=32, 
+                fill_value=0,
+                p=0.5
+            ),
+            A.GridDropout(
+                ratio=0.1,
+                unit_size_min=10,
+                unit_size_max=40,
+                p=0.5
+            ),
+        ], p=0.2),
+        
         # Normalize and convert to tensor
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
         label_fields=['labels'],
-        min_visibility=0.3  # Ensure boxes remain mostly visible
+        min_visibility=0.3,  # Ensure boxes remain mostly visible
+        min_area=100  # Minimum area in pixels to keep a box
     ))
     
     # Define Albumentations transforms for validation - keep simple for consistent evaluation
     val_transform = A.Compose([
-        A.Resize(height=224, width=224),
+        # Letterboxing for validation to keep aspect ratio intact
+        A.LongestMaxSize(max_size=224),
+        A.PadIfNeeded(min_height=224, min_width=224, border_mode=0),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
-    ], bbox_params=A.BboxParams(format='pascal_voc', label_fields=['labels']))
+    ], bbox_params=A.BboxParams(
+        format='pascal_voc', 
+        label_fields=['labels'],
+        min_visibility=0.3
+    ))
     
     # Create the training and validation datasets
     print("Creating training dataset...")

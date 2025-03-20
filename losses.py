@@ -1,14 +1,17 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from config import IOU_THRESHOLD, NEG_POS_RATIO
 
 class DetectionLoss(nn.Module):
-    def __init__(self, iou_threshold=0.5, neg_pos_ratio=3):
+    def __init__(self, iou_threshold=IOU_THRESHOLD, neg_pos_ratio=NEG_POS_RATIO):
         super().__init__()
         self.iou_threshold = iou_threshold
         self.neg_pos_ratio = neg_pos_ratio
         self.bce_loss = nn.BCELoss(reduction='none')
         self.smooth_l1 = nn.SmoothL1Loss(reduction='none')
-
+        self.giou_loss = GIoULoss(reduction='none')
+        
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs
         if isinstance(predictions, list):
@@ -62,6 +65,8 @@ class DetectionLoss(nn.Module):
         # Count statistics to track mismatches
         pred_counts = []
         gt_counts = []
+        total_iou = 0.0
+        num_matched_boxes = 0
         
         for i in range(batch_size):
             gt_boxes = targets[i]['boxes']  # [num_gt, 4]
@@ -70,7 +75,8 @@ class DetectionLoss(nn.Module):
             
             if num_gt == 0:
                 # If no ground truth boxes, all predictions should have low confidence
-                conf_loss = self.bce_loss(conf_pred[i], torch.zeros_like(conf_pred[i]))
+                # Use focal loss to focus on hard negative examples
+                conf_loss = self._focal_loss(conf_pred[i], torch.zeros_like(conf_pred[i]))
                 total_conf_loss += conf_loss.mean()
                 continue
             
@@ -115,20 +121,30 @@ class DetectionLoss(nn.Module):
                 pred_centers = (pred_boxes[:, :2] + pred_boxes[:, 2:]) / 2
                 pred_sizes = pred_boxes[:, 2:] - pred_boxes[:, :2]
                 
-                # Calculate regression targets
-                loc_loss = self.smooth_l1(
-                    torch.cat([pred_centers, pred_sizes], dim=1),
-                    torch.cat([matched_gt_centers, matched_gt_sizes], dim=1)
-                )
-                total_loc_loss += loc_loss.sum()
+                # Use combination of smooth L1 and GIoU loss for better localization
+                # Smooth L1 for center points, GIoU for overall box
+                center_loss = self.smooth_l1(pred_centers, matched_gt_centers).sum(dim=1)
+                size_loss = self.smooth_l1(pred_sizes, matched_gt_sizes).sum(dim=1)
+                giou_loss = self.giou_loss(pred_boxes, matched_gt_boxes)
+                
+                # Combine losses with weights
+                box_loss = 0.5 * (center_loss + size_loss) + 0.5 * giou_loss
+                total_loc_loss += box_loss.sum()
+                
+                # Calculate IoUs for metrics tracking
+                batch_ious = self._box_iou(pred_boxes.unsqueeze(1), matched_gt_boxes.unsqueeze(0)).diagonal()
+                total_iou += batch_ious.sum().item()
+                num_matched_boxes += num_positive
                 
                 # Create confidence targets
                 conf_target = torch.zeros_like(conf_pred[i])
-                conf_target[positive_indices] = 1
+                conf_target[positive_indices] = batch_ious.detach()  # Use IoU as target confidence
                 
-                # Hard Negative Mining
+                # Hard Negative Mining with focal loss for negatives
                 num_neg = min(num_positive * self.neg_pos_ratio, num_anchors - num_positive)
-                neg_conf_loss = self.bce_loss(conf_pred[i], conf_target)
+                
+                # Use focal loss for better handling of class imbalance
+                neg_conf_loss = self._focal_loss(conf_pred[i], conf_target)
                 
                 # Remove positive examples from negative mining
                 neg_conf_loss[positive_indices] = 0
@@ -137,8 +153,8 @@ class DetectionLoss(nn.Module):
                 _, neg_indices = neg_conf_loss.sort(descending=True)
                 neg_indices = neg_indices[:num_neg]
                 
-                # Final confidence loss
-                conf_loss = neg_conf_loss[neg_indices].sum() + self.bce_loss(
+                # Final confidence loss - use focal loss for positives too
+                conf_loss = neg_conf_loss[neg_indices].sum() + self._focal_loss(
                     conf_pred[i][positive_indices],
                     conf_target[positive_indices]
                 ).sum()
@@ -154,17 +170,43 @@ class DetectionLoss(nn.Module):
         weighted_loc_loss = bbox_weight * total_loc_loss
         weighted_conf_loss = conf_weight * total_conf_loss
         
-        # Simple total loss without count loss for now
+        # Total loss
         total_loss = weighted_loc_loss + weighted_conf_loss
+        
+        # Calculate mean IoU for metrics
+        mean_iou = total_iou / max(1, num_matched_boxes)
         
         return {
             'total_loss': total_loss,
             'conf_loss': total_conf_loss.item(),
             'bbox_loss': total_loc_loss.item(),
-            'mean_iou': 0.0,  # We'll calculate this in metrics separately
+            'pred_counts': pred_counts,
+            'gt_counts': gt_counts,
+            'mean_iou': mean_iou,
             'bbox_weight': bbox_weight
         }
-
+    
+    def _focal_loss(self, pred, target, alpha=0.25, gamma=2.0):
+        """
+        Focal loss for better handling of class imbalance
+        """
+        bce_loss = self.bce_loss(pred, target)
+        
+        # Calculate focal weights
+        if gamma > 0:
+            pt = torch.where(target > 0, pred, 1-pred)
+            focal_weight = (1 - pt) ** gamma
+            
+            # Apply alpha for positive/negative balance
+            if alpha > 0:
+                alpha_weight = torch.ones_like(target) * alpha
+                alpha_weight = torch.where(target > 0, alpha_weight, 1-alpha_weight)
+                focal_weight = focal_weight * alpha_weight
+                
+            bce_loss = focal_weight * bce_loss
+            
+        return bce_loss
+    
     @staticmethod
     def _box_iou(boxes1, boxes2):
         """
@@ -186,6 +228,72 @@ class DetectionLoss(nn.Module):
         # Calculate union areas
         area1 = (boxes1[..., 2] - boxes1[..., 0]) * (boxes1[..., 3] - boxes1[..., 1])
         area2 = (boxes2[..., 2] - boxes2[..., 0]) * (boxes2[..., 3] - boxes2[..., 1])
+        union = area1 + area2 - intersection
+        
+        return intersection / (union + 1e-6)
+
+
+class GIoULoss(nn.Module):
+    """
+    Generalized IoU loss for better box regression
+    Provides better gradients when boxes don't overlap
+    """
+    def __init__(self, reduction='mean'):
+        super(GIoULoss, self).__init__()
+        self.reduction = reduction
+    
+    def forward(self, pred_boxes, target_boxes):
+        # Calculate IoU
+        iou = self._box_iou(pred_boxes, target_boxes)
+        
+        # Find enclosing box
+        left = torch.min(pred_boxes[:, 0], target_boxes[:, 0])
+        top = torch.min(pred_boxes[:, 1], target_boxes[:, 1])
+        right = torch.max(pred_boxes[:, 2], target_boxes[:, 2])
+        bottom = torch.max(pred_boxes[:, 3], target_boxes[:, 3])
+        
+        # Calculate area of enclosing box
+        width = (right - left).clamp(min=0)
+        height = (bottom - top).clamp(min=0)
+        enclosing_area = width * height + 1e-6
+        
+        # Calculate areas of original boxes
+        pred_area = (pred_boxes[:, 2] - pred_boxes[:, 0]) * (pred_boxes[:, 3] - pred_boxes[:, 1])
+        target_area = (target_boxes[:, 2] - target_boxes[:, 0]) * (target_boxes[:, 3] - target_boxes[:, 1])
+        
+        # Find union area of original boxes
+        union = pred_area + target_area - iou * pred_area * target_area
+        
+        # Calculate the extra penalty term
+        giou = iou - (enclosing_area - union) / enclosing_area
+        
+        # Convert to loss (1 - GIoU)
+        loss = 1 - giou
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:  # 'none'
+            return loss
+    
+    @staticmethod
+    def _box_iou(boxes1, boxes2):
+        # Calculate intersection areas
+        left = torch.max(boxes1[:, 0], boxes2[:, 0])
+        top = torch.max(boxes1[:, 1], boxes2[:, 1])
+        right = torch.min(boxes1[:, 2], boxes2[:, 2])
+        bottom = torch.min(boxes1[:, 3], boxes2[:, 3])
+        
+        width = (right - left).clamp(min=0)
+        height = (bottom - top).clamp(min=0)
+        intersection = width * height
+        
+        # Calculate box areas
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        
+        # Calculate IoU
         union = area1 + area2 - intersection
         
         return intersection / (union + 1e-6)
