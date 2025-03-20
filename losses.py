@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F  # Added missing import
 
 class DetectionLoss(nn.Module):
     def __init__(self):
