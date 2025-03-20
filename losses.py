@@ -6,15 +6,15 @@ class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
         # Lower positive threshold to catch more potential matches
-        self.positive_threshold = 0.4  # Lowered from 0.5
-        self.negative_threshold = 0.3  # Keep as is
+        self.positive_threshold = 0.35  # Lowered from 0.4 to catch more positives
+        self.negative_threshold = 0.2   # Lowered from 0.3 to be more strict with negatives
         
-        # Adjusted focal loss parameters for better handling of hard negatives
-        self.alpha = 0.6  # Increased to give more weight to positive samples
-        self.gamma = 1.5  # Keep as is
+        # Adjusted focal loss parameters
+        self.alpha = 0.7    # Increased from 0.6 to give even more weight to positive samples
+        self.gamma = 2.0    # Increased from 1.5 for harder negative mining
         
         # IOU thresholds for loss calculation
-        self.iou_threshold = 0.5
+        self.iou_threshold = 0.4
         self.iou_good_match = 0.7
         
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
@@ -102,15 +102,25 @@ class DetectionLoss(nn.Module):
                 
                 # Additional weight for underdetection cases
                 if len(target_boxes) > positive_mask.sum():
-                    underdetection_factor = 1.2  # Increase penalty for missed detections
+                    underdetection_factor = 1.4  # Increased from 1.2
                     focal_weight[positive_mask] *= underdetection_factor
+                    conf_loss = conf_loss * 1.2  # Additional global boost for underdetection cases
                 
-                # Confidence loss with enhanced weighting
-                conf_loss = -(conf_target * torch.log(conf_pred[i] + 1e-6) + 
-                            (1 - conf_target) * torch.log(1 - conf_pred[i] + 1e-6))
+                # Enhanced penalty for high confidence predictions with low IoU
+                if len(target_boxes) > 0:
+                    # Find predictions with high confidence but low IoU
+                    high_conf_mask = conf_pred[i] > 0.7
+                    if high_conf_mask.any():
+                        ious = self._calculate_box_iou(default_anchors[high_conf_mask], target_boxes)
+                        max_ious, _ = ious.max(dim=1)
+                        # Add extra penalty for high confidence but low IoU predictions
+                        low_iou_mask = max_ious < 0.3
+                        if low_iou_mask.any():
+                            conf_loss = conf_loss + 0.3 * (-torch.log(1 - conf_pred[i][high_conf_mask][low_iou_mask] + 1e-6)).mean()
+
                 conf_loss = (conf_loss * focal_weight * alpha_factor).mean()
                 
-                # Calculate bbox loss only for positive samples
+                # Calculate bbox loss only for positive samples with enhanced underdetection handling
                 if positive_mask.sum() > 0:
                     matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
                     pred_boxes = bbox_pred[i][positive_mask]
@@ -127,14 +137,15 @@ class DetectionLoss(nn.Module):
                     iou_quality = torch.clamp((ious - self.iou_threshold) / (self.iou_good_match - self.iou_threshold), 0, 1)
                     bbox_loss = (iou_loss + (1 - iou_quality) * l1_loss).mean()
                     
-                    # Add extra penalty for underdetection cases
+                    # Stronger penalty for missed detections in bbox loss
                     if len(target_boxes) > positive_mask.sum():
-                        bbox_loss *= 1.2  # Increase bbox loss for missed detections
+                        bbox_loss *= 1.4  # Increased from 1.2
+
+                    bbox_losses.append(bbox_loss)
                 else:
-                    bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
+                    bbox_losses.append(torch.tensor(0.0, device=bbox_pred.device))
             
             conf_losses.append(conf_loss)
-            bbox_losses.append(bbox_loss)
         
         # Average losses across batch
         conf_loss = torch.stack(conf_losses).mean()

@@ -162,29 +162,52 @@ class DogDetector(nn.Module):
                     # Clip boxes to image boundaries
                     boxes = torch.clamp(boxes, min=0, max=1)
                     
-                    # Apply NMS with appropriate threshold
-                    nms_threshold = TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
-                    keep_idx = nms(boxes, scores, nms_threshold)
+                    # Enhanced filtering for isolated high-confidence predictions
+                    if len(boxes) == 1 and scores[0] > 0.7:
+                        # Calculate average activation in box region
+                        # Use feature map before classification head
+                        feat_size = x.shape[-1]
+                        box_feat_coords = (boxes[0] * feat_size).long()
+                        region_feats = x[0, :, 
+                                      box_feat_coords[1]:box_feat_coords[3]+1,
+                                      box_feat_coords[0]:box_feat_coords[2]+1]
+                        if region_feats.numel() > 0:
+                            avg_activation = region_feats.mean()
+                            # If average activation is too low, likely a false positive
+                            if avg_activation < 0.1:  # This threshold might need tuning
+                                boxes = boxes[1:]  # Remove the detection
+                                scores = scores[1:]
                     
-                    # Limit maximum detections
-                    if len(keep_idx) > MAX_DETECTIONS:
-                        scores_for_topk = scores[keep_idx]
-                        _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
-                        keep_idx = keep_idx[topk_indices]
-                    
-                    boxes = boxes[keep_idx]
-                    scores = scores[keep_idx]
+                    if len(boxes) > 0:  # Check again after potential filtering
+                        # Apply NMS with appropriate threshold
+                        nms_threshold = TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
+                        keep_idx = nms(boxes, scores, nms_threshold)
+                        
+                        # Limit maximum detections but ensure at least one high-confidence detection remains
+                        if len(keep_idx) > MAX_DETECTIONS:
+                            scores_for_topk = scores[keep_idx]
+                            _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
+                            keep_idx = keep_idx[topk_indices]
+                        
+                        boxes = boxes[keep_idx]
+                        scores = scores[keep_idx]
                 
-                # Always ensure we have at least one prediction for stability
+                # Only add default box if no high-confidence detections were found
                 if len(boxes) == 0:
-                    # Default box covers most of the image
-                    boxes = torch.tensor([[0.2, 0.2, 0.8, 0.8]], device=bbox_pred.device)
-                    scores = torch.tensor([confidence_threshold], device=bbox_pred.device)
+                    # Check feature map activations before adding default box
+                    avg_activation = x[0].mean()
+                    if avg_activation > 0.15:  # Only add default box if there's significant activation
+                        boxes = torch.tensor([[0.3, 0.3, 0.7, 0.7]], device=bbox_pred.device)  # Smaller default box
+                        scores = torch.tensor([confidence_threshold], device=bbox_pred.device)
+                    else:
+                        # No significant activation, return empty prediction
+                        boxes = torch.zeros((0, 4), device=bbox_pred.device)
+                        scores = torch.zeros(0, device=bbox_pred.device)
                 
                 results.append({
                     'boxes': boxes,
                     'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
+                    'anchors': default_anchors
                 })
             
             return results
