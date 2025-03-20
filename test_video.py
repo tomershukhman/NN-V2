@@ -2,7 +2,7 @@ import cv2
 import torch
 import numpy as np
 from model import get_model
-from config import DEVICE, CONFIDENCE_THRESHOLD
+from config import DEVICE
 import argparse
 from torchvision import transforms
 
@@ -31,7 +31,7 @@ def preprocess_frame(frame):
     img_tensor = transform(frame_rgb).unsqueeze(0).to(DEVICE)
     return img_tensor
 
-def draw_detections(frame, predictions, threshold=0.5):
+def draw_detections(frame, predictions, threshold=0.31):
     """Draw detection boxes on the frame"""
     height, width = frame.shape[:2]
     boxes = predictions[0]['boxes']
@@ -55,7 +55,7 @@ def draw_detections(frame, predictions, threshold=0.5):
     
     return frame
 
-def process_video(input_path, output_path, model, conf_threshold=0.5):
+def process_video(input_path, output_path, model, conf_threshold=0.31):
     """Process video file and save output with detections"""
     cap = cv2.VideoCapture(input_path)
     
@@ -101,7 +101,7 @@ def main():
     parser.add_argument('output_video', help='Path to save output video')
     parser.add_argument('--checkpoint', default='outputs/checkpoints/best_model.pth',
                        help='Path to model checkpoint')
-    parser.add_argument('--threshold', type=float, default=CONFIDENCE_THRESHOLD,
+    parser.add_argument('--threshold', type=float, default=0.31,
                        help='Confidence threshold for detections')
     
     args = parser.parse_args()
