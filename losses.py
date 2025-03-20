@@ -89,6 +89,9 @@ class DetectionLoss(nn.Module):
                 negative_mask = max_ious < self.negative_threshold
                 negative_mask[positive_mask] = False
                 
+                # Initialize conf_loss for this batch item
+                conf_loss = -torch.log(1 - conf_pred[i] + 1e-6)  # Start with background loss
+                
                 # Calculate confidence target with adaptive weighting
                 conf_target = positive_mask.float()
                 
