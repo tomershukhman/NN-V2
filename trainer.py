@@ -143,7 +143,7 @@ class Trainer:
         
         # For model EMA (parameter averaging)
         self.model_ema = None
-        self.ema_update_ratio = 0.999
+        self.ema_update_ratio = 0.9995  # Increased from 0.999
         
         # For Stochastic Weight Averaging (SWA)
         self.swa_model = None
@@ -159,16 +159,16 @@ class Trainer:
         self.val_batch_size = 16
         
         # Gradient accumulation to stabilize training
-        self.gradient_accumulation_steps = 4
+        self.gradient_accumulation_steps = 8  # Increased from 4
         
         # Validation cycle strategy to reduce zigzag pattern
-        self.validation_cycle = 3  # How many validation batches to average
+        self.validation_cycle = 5  # Increased from 3
         
         # Add loss weights scheduler
-        self.loss_conf_weight_start = 1.0
-        self.loss_conf_weight_end = 0.8
-        self.loss_bbox_weight_start = 1.0
-        self.loss_bbox_weight_end = 1.2
+        self.loss_conf_weight_start = 1.2  # Increased from 1.0
+        self.loss_conf_weight_end = 0.7   # Decreased from 0.8
+        self.loss_bbox_weight_start = 0.8  # Decreased from 1.0
+        self.loss_bbox_weight_end = 1.4    # Increased from 1.2
         
         # Set random seed for reproducibility
         torch.manual_seed(42)
@@ -335,7 +335,7 @@ class Trainer:
                 print(f"Saved new best model with val_loss: {val_loss:.4f} (EMA: {ema_val_loss:.4f})")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 20:  # More patience
+                if epochs_without_improvement >= 25:  # Increased from 20
                     print("Early stopping triggered")
                     break
         

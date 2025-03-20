@@ -29,7 +29,9 @@ class DogDetector(nn.Module):
         
         # FPN-like feature pyramid with fixed pooling to ensure MPS compatibility
         self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
+        self.lateral_bn = nn.BatchNorm2d(256)
         self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        self.smooth_bn = nn.BatchNorm2d(256)
         
         # Replace adaptive pooling with fixed pooling
         self.pool = nn.Sequential(
@@ -44,8 +46,9 @@ class DogDetector(nn.Module):
         self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
         
         # Generate anchor boxes with different scales and aspect ratios
-        self.anchor_scales = [0.5, 1.0, 2.0]
-        self.anchor_ratios = [0.5, 1.0, 2.0]
+        # Refined for typical dog proportions
+        self.anchor_scales = [0.4, 0.8, 1.6]  # Smaller base anchor for better small dog detection
+        self.anchor_ratios = [0.67, 1.0, 1.5]  # More natural width/height ratios for dogs
         self.num_anchors_per_cell = num_anchors_per_cell
         
         # Prediction heads
@@ -86,7 +89,9 @@ class DogDetector(nn.Module):
         
         # FPN-like feature processing with fixed pooling
         lateral = self.lateral_conv(features)
+        lateral = self.lateral_bn(lateral)
         features = self.smooth_conv(lateral)
+        features = self.smooth_bn(features)
         
         # Apply fixed-size pooling operations until we reach desired size
         while features.shape[-1] > self.feature_map_size:
