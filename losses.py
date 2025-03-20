@@ -146,11 +146,21 @@ class DetectionLoss(nn.Module):
                 total_conf_loss += conf_loss
         
         # Calculate count loss based on the difference between prediction and ground truth counts
+        # but with a more stable approach that won't cause exploding gradients
         for pred_count, gt_count in zip(pred_counts, gt_counts):
-            # Count penalty increases quadratically with the difference
+            # Calculate absolute difference
             count_diff = abs(pred_count - gt_count)
-            count_penalty = count_diff ** 2  # Quadratic penalty for wrong counts
-            total_count_loss += torch.tensor(count_penalty, device=device)
+            
+            # Use a more controlled scaling that caps the maximum penalty
+            # Linear scaling up to a threshold, then logarithmic to prevent explosion
+            if count_diff <= 3:
+                # Linear penalty for small differences
+                count_penalty = count_diff * 0.2
+            else:
+                # Logarithmic penalty for larger differences to prevent explosion
+                count_penalty = 0.6 + 0.2 * torch.log(torch.tensor(count_diff - 2, dtype=torch.float, device=device))
+            
+            total_count_loss += count_penalty
         
         # Normalize losses
         num_pos = max(1, num_pos)  # Avoid division by zero
@@ -165,7 +175,8 @@ class DetectionLoss(nn.Module):
         
         # Dynamically adjust weights based on IoU quality
         dynamic_bbox_weight = bbox_weight * (1.0 + iou_quality)
-        count_weight = 0.5  # Weight for count loss
+        # Use a smaller weight for count loss to avoid dominating the overall loss
+        count_weight = 0.2
         
         # Apply weights to loss components
         weighted_loc_loss = dynamic_bbox_weight * total_loc_loss

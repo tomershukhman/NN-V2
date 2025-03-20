@@ -52,6 +52,17 @@ class DogDetector(nn.Module):
         self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
         self.cls_head = nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
         
+        # Count estimator - a small network that predicts the number of objects from global features
+        self.count_estimator = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),  # Global average pooling
+            nn.Flatten(),
+            nn.Linear(256, 128),
+            nn.ReLU(),
+            nn.Dropout(0.3),
+            nn.Linear(128, 1),  # Predict a single value for object count
+            nn.ReLU()  # Ensure positive output
+        )
+        
         # Initialize weights
         for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head, self.cls_head]:
             if isinstance(m, nn.Conv2d):
@@ -79,7 +90,7 @@ class DogDetector(nn.Module):
                         y2 = cy + h/2
                         anchors.append([x1, y1, x2, y2])
         return torch.tensor(anchors, dtype=torch.float32)
-
+        
     def forward(self, x, targets=None):
         # Extract features using backbone
         features = self.backbone(x)
@@ -109,6 +120,9 @@ class DogDetector(nn.Module):
         bbox_pred = self.bbox_head(x)
         conf_pred = torch.sigmoid(self.cls_head(x))
         
+        # Predict object count (only used during inference)
+        estimated_count = self.count_estimator(x).squeeze(-1)
+        
         # Get shapes
         batch_size = x.shape[0]
         feature_size = x.shape[2]  # Should be self.feature_map_size
@@ -135,9 +149,16 @@ class DogDetector(nn.Module):
         else:
             # Process each image in the batch
             results = []
-            for boxes, scores in zip(bbox_pred, conf_pred):
+            for i, (boxes, scores, count) in enumerate(zip(bbox_pred, conf_pred, estimated_count)):
+                # Determine adaptive threshold based on expected count and confidence distribution
+                if not self.training:
+                    adaptive_threshold = self._get_adaptive_threshold(scores, count)
+                    threshold = min(adaptive_threshold, CONFIDENCE_THRESHOLD)  # Don't go higher than config
+                else:
+                    threshold = TRAIN_CONFIDENCE_THRESHOLD
+                
                 # Filter by confidence threshold
-                mask = scores > (TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD)
+                mask = scores > threshold
                 boxes = boxes[mask]
                 scores = scores[mask]
                 
@@ -149,8 +170,15 @@ class DogDetector(nn.Module):
                     keep_idx = nms(boxes, scores, 
                                  TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD)
                     
-                    # Limit maximum detections
-                    if len(keep_idx) > MAX_DETECTIONS:
+                    # Limit maximum detections, but try to respect estimated count
+                    if not self.training and count is not None:
+                        # Aim for the estimated count, but don't exceed MAX_DETECTIONS
+                        target_count = min(int(count.item() + 0.5), MAX_DETECTIONS)
+                        if len(keep_idx) > target_count:
+                            scores_for_topk = scores[keep_idx]
+                            _, topk_indices = torch.topk(scores_for_topk, k=target_count)
+                            keep_idx = keep_idx[topk_indices]
+                    elif len(keep_idx) > MAX_DETECTIONS:
                         scores_for_topk = scores[keep_idx]
                         _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
                         keep_idx = keep_idx[topk_indices]
@@ -164,11 +192,32 @@ class DogDetector(nn.Module):
                 results.append({
                     'boxes': boxes,
                     'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
+                    'anchors': default_anchors,  # Include anchors in each result
+                    'estimated_count': count.item() if not self.training else None
                 })
             
             return results
-
+            
+    def _get_adaptive_threshold(self, scores, count_estimate):
+        """Calculate an adaptive confidence threshold to match the expected object count"""
+        # Sort scores in descending order
+        sorted_scores, _ = torch.sort(scores, descending=True)
+        
+        # Get target count from count estimator (round to nearest integer)
+        target_count = max(1, min(int(count_estimate.item() + 0.5), MAX_DETECTIONS))
+        
+        # If we have enough scores, set threshold just below the target count's score
+        if len(sorted_scores) > target_count:
+            # Use the score at target_count position as threshold, but add a small buffer
+            adaptive_threshold = sorted_scores[target_count - 1] * 0.95
+            # Don't let the threshold go too low
+            adaptive_threshold = max(adaptive_threshold, 0.15)
+        else:
+            # If we don't have enough detected objects, lower the threshold
+            adaptive_threshold = 0.15
+            
+        return adaptive_threshold
+        
     def _decode_boxes(self, box_pred, anchors):
         """Convert predicted box offsets back to absolute coordinates"""
         # Center form
