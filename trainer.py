@@ -701,56 +701,30 @@ class Trainer:
             if len(pred_scores) > 0:
                 all_confidences.extend(pred_scores.cpu().tolist())
             
-            # Calculate IoUs for matched predictions and handle count mismatches
+            # Calculate IoUs between predictions and ground truth boxes
             if num_gt > 0:  # Only process if there are ground truth boxes
                 if num_pred > 0:
-                    # Calculate IoUs between all predictions and ground truths
-                    pred_boxes_expanded = pred_boxes.unsqueeze(1)  # [num_pred, 1, 4]
-                    gt_boxes_expanded = gt_boxes.unsqueeze(0)      # [1, num_gt, 4]
-                    
-                    # Calculate IoU matrix (using the same implementation as in loss function)
-                    left = torch.max(pred_boxes_expanded[..., 0], gt_boxes_expanded[..., 0])
-                    top = torch.max(pred_boxes_expanded[..., 1], gt_boxes_expanded[..., 1])
-                    right = torch.min(pred_boxes_expanded[..., 2], gt_boxes_expanded[..., 2])
-                    bottom = torch.min(pred_boxes_expanded[..., 3], gt_boxes_expanded[..., 3])
-                    
-                    width = (right - left).clamp(min=0)
-                    height = (bottom - top).clamp(min=0)
-                    intersection = width * height
-                    
-                    area1 = (pred_boxes_expanded[..., 2] - pred_boxes_expanded[..., 0]) * (pred_boxes_expanded[..., 3] - pred_boxes_expanded[..., 1])
-                    area2 = (gt_boxes_expanded[..., 2] - gt_boxes_expanded[..., 0]) * (gt_boxes_expanded[..., 3] - gt_boxes_expanded[..., 1])
-                    union = area1 + area2 - intersection
-                    
-                    iou_matrix = intersection / (union + 1e-6)  # [num_pred, num_gt]
+                    # Calculate IoU matrix between predicted and ground truth boxes
+                    ious = torch.zeros((num_pred, num_gt), device=pred_boxes.device)
+                    for p_idx in range(num_pred):
+                        for gt_idx in range(num_gt):
+                            ious[p_idx, gt_idx] = self._calculate_single_iou(
+                                pred_boxes[p_idx], gt_boxes[gt_idx]
+                            )
                     
                     # For each GT box, find the prediction with highest IoU
-                    max_ious_per_gt, matched_pred_indices = iou_matrix.max(dim=0)  # [num_gt]
-                    
-                    # Count true positives (IoU > 0.5)
-                    true_positives += (max_ious_per_gt > 0.5).sum().item()
+                    max_ious_per_gt, matched_pred_indices = ious.max(dim=0)
                     
                     # Add IoUs for matched boxes
                     all_ious.extend(max_ious_per_gt.cpu().tolist())
                     
+                    # Count true positives (IoU > 0.5)
+                    true_positives += (max_ious_per_gt > 0.5).sum().item()
+                    
                     # For any missing boxes (when num_pred < num_gt), add zero IoU values
-                    # This penalizes the model for not predicting enough boxes
                     if num_pred < num_gt:
-                        # We've already accounted for all predictions, so we just need to add zeros for the missing ones
-                        zeros_to_add = num_gt - num_pred
-                        all_ious.extend([0.0] * zeros_to_add)
-                        
-                    # For extra boxes (when num_pred > num_gt), we need to identify unmatched predictions and penalize them
-                    elif num_pred > num_gt:
-                        # Create a mask of matched predictions
-                        matched_mask = torch.zeros(num_pred, dtype=torch.bool, device=pred_boxes.device)
-                        matched_mask[matched_pred_indices] = True
-                        
-                        # Find unmatched predictions
-                        unmatched_pred_indices = torch.where(~matched_mask)[0]
-                        
-                        # Add zero IoU for each unmatched prediction (these are false positives)
-                        all_ious.extend([0.0] * len(unmatched_pred_indices))
+                        # No need to add zeros here as we've already computed IoU for all GT boxes
+                        pass
                 else:
                     # If no predictions but we have GT boxes, add zeros for all missing boxes
                     all_ious.extend([0.0] * num_gt)
@@ -799,6 +773,25 @@ class Trainer:
             'iou_distribution': iou_distribution,
             'confidence_distribution': confidence_distribution
         }
+
+    def _calculate_single_iou(self, box1, box2):
+        """Calculate IoU between two boxes"""
+        # Calculate intersection area
+        x1 = torch.max(box1[0], box2[0])
+        y1 = torch.max(box1[1], box2[1])
+        x2 = torch.min(box1[2], box2[2])
+        y2 = torch.min(box1[3], box2[3])
+        
+        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+        
+        # Calculate union area
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = box1_area + box2_area - intersection
+        
+        # Calculate IoU
+        iou = intersection / (union + 1e-6)
+        return iou
 
     def _calculate_box_iou(self, boxes1, boxes2):
         """Calculate IoU between two sets of boxes"""

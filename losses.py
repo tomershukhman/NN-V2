@@ -145,54 +145,24 @@ class DetectionLoss(nn.Module):
                 
                 total_conf_loss += conf_loss
         
-        # Calculate count loss based on the difference between prediction and ground truth counts
-        # but with a more stable approach that won't cause exploding gradients
-        for pred_count, gt_count in zip(pred_counts, gt_counts):
-            # Calculate absolute difference
-            count_diff = abs(pred_count - gt_count)
-            
-            # Use a more controlled scaling that caps the maximum penalty
-            # Linear scaling up to a threshold, then logarithmic to prevent explosion
-            if count_diff <= 3:
-                # Linear penalty for small differences
-                count_penalty = count_diff * 0.2
-            else:
-                # Logarithmic penalty for larger differences to prevent explosion
-                count_penalty = 0.6 + 0.2 * torch.log(torch.tensor(count_diff - 2, dtype=torch.float, device=device))
-            
-            total_count_loss += count_penalty
-        
         # Normalize losses
         num_pos = max(1, num_pos)  # Avoid division by zero
         total_loc_loss = total_loc_loss / num_pos
         total_conf_loss = total_conf_loss / num_pos
-        total_count_loss = total_count_loss / batch_size  # Normalize by batch size
-        
-        # Calculate IoU quality factor to dynamically adjust loss weights
-        # Lower IoU means we should focus more on bbox regression
-        mean_iou = best_gt_iou[best_gt_iou > 0].mean() if torch.sum(best_gt_iou > 0) > 0 else torch.tensor(0.1, device=device)
-        iou_quality = torch.clamp(1.0 - mean_iou, 0.1, 0.9)  # Lower IoU -> higher bbox weight
-        
-        # Dynamically adjust weights based on IoU quality
-        dynamic_bbox_weight = bbox_weight * (1.0 + iou_quality)
-        # Use a smaller weight for count loss to avoid dominating the overall loss
-        count_weight = 0.2
         
         # Apply weights to loss components
-        weighted_loc_loss = dynamic_bbox_weight * total_loc_loss
+        weighted_loc_loss = bbox_weight * total_loc_loss
         weighted_conf_loss = conf_weight * total_conf_loss
-        weighted_count_loss = count_weight * total_count_loss
         
-        total_loss = weighted_loc_loss + weighted_conf_loss + weighted_count_loss
+        # Simple total loss without count loss for now
+        total_loss = weighted_loc_loss + weighted_conf_loss
         
         return {
             'total_loss': total_loss,
             'conf_loss': total_conf_loss.item(),
             'bbox_loss': total_loc_loss.item(),
-            'count_loss': total_count_loss.item(),
-            'mean_iou': mean_iou.item() if isinstance(mean_iou, torch.Tensor) else mean_iou,
-            'bbox_weight': dynamic_bbox_weight.item() if isinstance(dynamic_bbox_weight, torch.Tensor) else dynamic_bbox_weight,
-            'count_weight': count_weight
+            'mean_iou': 0.0,  # We'll calculate this in metrics separately
+            'bbox_weight': bbox_weight
         }
 
     @staticmethod
