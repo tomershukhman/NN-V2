@@ -27,7 +27,7 @@ class DogDetector(nn.Module):
         for param in list(self.backbone.parameters())[:-6]:
             param.requires_grad = False
         
-        # FPN-like feature pyramid with fixed pooling to ensure MPS compatibility
+        # FPN-like feature pyramid with fixed pooling
         self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
         self.lateral_bn = nn.BatchNorm2d(256)
         self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
@@ -41,14 +41,23 @@ class DogDetector(nn.Module):
             nn.MaxPool2d(kernel_size=2, stride=2)
         )
         
-        # Detection head
-        self.conv1 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        # Detection head with improved regularization
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2)
+        )
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Dropout(0.2)
+        )
         
-        # Generate anchor boxes with different scales and aspect ratios
-        # Refined for typical dog proportions
-        self.anchor_scales = [0.4, 0.8, 1.6]  # Smaller base anchor for better small dog detection
-        self.anchor_ratios = [0.67, 1.0, 1.5]  # More natural width/height ratios for dogs
+        # Return to original anchor configuration but with slight adjustments
+        self.anchor_scales = [0.5, 1.0, 2.0]  # Original scales
+        self.anchor_ratios = [0.6, 1.0, 1.67]  # Slightly adjusted for dogs
         self.num_anchors_per_cell = num_anchors_per_cell
         
         # Prediction heads
@@ -107,8 +116,8 @@ class DogDetector(nn.Module):
             )
         
         # Detection head
-        x = F.relu(self.conv1(features))
-        x = F.relu(self.conv2(x))
+        x = self.conv1(features)
+        x = self.conv2(x)
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(x)

@@ -117,12 +117,12 @@ class Trainer:
         self.visualization_logger = visualization_logger
         self.checkpoints_dir = checkpoints_dir
         
-        # Add cosine annealing LR scheduler with warmup
+        # Refined learning rate scheduler
         self.lr_scheduler = LRWarmupCosineAnnealing(
             optimizer=optimizer,
-            warmup_epochs=5,
+            warmup_epochs=3,  # Reduced warmup period
             total_epochs=num_epochs,
-            min_lr=LEARNING_RATE * 0.01
+            min_lr=LEARNING_RATE * 0.001  # More aggressive LR decay
         )
         
         # Add weight decay scheduler with more gentle decay
@@ -159,16 +159,19 @@ class Trainer:
         self.val_batch_size = 16
         
         # Gradient accumulation to stabilize training
-        self.gradient_accumulation_steps = 8  # Increased from 4
+        self.gradient_accumulation_steps = 4  # Reduced from 8
         
-        # Validation cycle strategy to reduce zigzag pattern
-        self.validation_cycle = 5  # Increased from 3
+        # Increased validation frequency for better monitoring
+        self.validation_cycle = 3  # Reduced from 5 to catch overfitting earlier
         
-        # Add loss weights scheduler
-        self.loss_conf_weight_start = 1.2  # Increased from 1.0
-        self.loss_conf_weight_end = 0.7   # Decreased from 0.8
-        self.loss_bbox_weight_start = 0.8  # Decreased from 1.0
-        self.loss_bbox_weight_end = 1.4    # Increased from 1.2
+        # Refined loss weights for better balance
+        self.loss_conf_weight_start = 1.0  # Back to original
+        self.loss_conf_weight_end = 1.0    # Keep constant
+        self.loss_bbox_weight_start = 1.0  # Start equal
+        self.loss_bbox_weight_end = 1.2    # Slight increase for bbox accuracy
+        
+        # Early stopping with more patience
+        self.early_stopping_patience = 15  # Match config
         
         # Set random seed for reproducibility
         torch.manual_seed(42)
