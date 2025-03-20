@@ -6,7 +6,8 @@ from torchvision.models import ResNet18_Weights
 from torchvision.ops import nms
 from config import (
     CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD
+    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD,
+    ANCHOR_SCALES, ANCHOR_RATIOS
 )
 import math
 
@@ -49,7 +50,7 @@ class FeaturePyramidNetwork(nn.Module):
         return features
 
 class DogDetector(nn.Module):
-    def __init__(self, num_anchors_per_cell=9, feature_map_size=7):
+    def __init__(self, feature_map_size=7):
         super(DogDetector, self).__init__()
         
         # Load pretrained ResNet18 backbone
@@ -62,7 +63,7 @@ class DogDetector(nn.Module):
         self.feature_map_size = feature_map_size
         
         # Freeze the first few layers of ResNet18
-        for param in list(self.backbone.parameters())[:-8]:  # Freeze fewer layers for better feature extraction
+        for param in list(self.backbone.parameters())[:-8]:
             param.requires_grad = False
         
         # Enhanced Feature Pyramid Network
@@ -83,9 +84,8 @@ class DogDetector(nn.Module):
         self.bn2 = nn.BatchNorm2d(256)
         
         # Generate anchor boxes with more varied scales and aspect ratios
-        # Adding more varied scales improves detection of different sized dogs
-        self.anchor_scales = [0.3, 0.5, 0.75, 1.0, 1.5, 2.0]  # More varied scales
-        self.anchor_ratios = [0.5, 0.75, 1.0, 1.33, 2.0]  # More varied aspect ratios
+        self.anchor_scales = ANCHOR_SCALES
+        self.anchor_ratios = ANCHOR_RATIOS
         self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
         # Prediction heads
@@ -96,7 +96,6 @@ class DogDetector(nn.Module):
         for m in [self.fpn.lateral_conv, self.fpn.smooth_conv1, self.fpn.smooth_conv2, 
                  self.conv1, self.conv2, self.bbox_head, self.cls_head]:
             if isinstance(m, nn.Conv2d):
-                # Xavier initialization for better convergence
                 nn.init.xavier_uniform_(m.weight)
                 nn.init.constant_(m.bias, 0)
         
@@ -158,12 +157,12 @@ class DogDetector(nn.Module):
         bbox_pred = self.bbox_head(x)
         conf_pred = torch.sigmoid(self.cls_head(x))
         
-        # Get shapes
+        # Get batch size and calculate number of anchors
         batch_size = x.shape[0]
-        feature_size = x.shape[2]  # Should be self.feature_map_size
-        total_anchors = feature_size * feature_size * self.num_anchors_per_cell
+        total_anchors = self.feature_map_size * self.feature_map_size * self.num_anchors_per_cell
         
-        # Reshape bbox predictions to [batch, total_anchors, 4]
+        # Reshape predictions with correct dimensions
+        # bbox_pred: [B, num_anchors * 4, H, W] -> [B, H, W, num_anchors * 4] -> [B, H*W*num_anchors, 4]
         bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
         bbox_pred = bbox_pred.view(batch_size, total_anchors, 4)
         
@@ -172,6 +171,7 @@ class DogDetector(nn.Module):
         bbox_pred = self._decode_boxes(bbox_pred, default_anchors)
         
         # Reshape confidence predictions
+        # conf_pred: [B, num_anchors, H, W] -> [B, H, W, num_anchors] -> [B, H*W*num_anchors]
         conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
         conf_pred = conf_pred.view(batch_size, total_anchors)
         
@@ -197,10 +197,10 @@ class DogDetector(nn.Module):
                     # Clip boxes to image boundaries
                     boxes = torch.clamp(boxes, min=0, max=1)
                     
-                    # Apply Soft-NMS instead of standard NMS for better overlapping dog detection
+                    # Apply Soft-NMS
                     keep_indices = self._soft_nms(boxes, scores, 
-                                                 nms_threshold=TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD,
-                                                 method='gaussian')
+                                               nms_threshold=TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD,
+                                               method='gaussian')
                     
                     # Limit maximum detections
                     if len(keep_indices) > MAX_DETECTIONS:
@@ -213,14 +213,13 @@ class DogDetector(nn.Module):
                 
                 # Always ensure we have at least one prediction for stability
                 if len(boxes) == 0:
-                    # Default box covers most of the image
                     boxes = torch.tensor([[0.2, 0.2, 0.8, 0.8]], device=bbox_pred.device)
                     scores = torch.tensor([confidence_threshold], device=bbox_pred.device)
                 
                 results.append({
                     'boxes': boxes,
                     'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
+                    'anchors': default_anchors
                 })
             
             return results
@@ -302,7 +301,6 @@ class DogDetector(nn.Module):
         anchor_sizes = anchors[:, 2:] - anchors[:, :2]
         
         # Decode predictions with scaled offsets for better stability
-        # Use scale factors to control the influence of predictions
         center_scale = 0.1
         size_scale = 0.2
         
@@ -310,7 +308,6 @@ class DogDetector(nn.Module):
         pred_centers = box_pred[:, :, :2] * center_scale * anchor_sizes + anchor_centers
         
         # Decode sizes with exponential to ensure positive values
-        # Use tanh to limit extreme size changes
         pred_sizes = torch.exp(torch.clamp(box_pred[:, :, 2:] * size_scale, min=-4, max=4)) * anchor_sizes
         
         # Convert back to [x1, y1, x2, y2] format

@@ -308,7 +308,12 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         A.HorizontalFlip(p=0.5),
         A.OneOf([
             A.Rotate(limit=15, p=0.8),
-            A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1, rotate_limit=10, p=0.8),
+            A.Affine(  # Replace ShiftScaleRotate with Affine
+                scale=(0.9, 1.1),
+                translate_percent=(-0.05, 0.05),
+                rotate=(-10, 10),
+                p=0.8
+            ),
             A.Perspective(scale=(0.05, 0.1), p=0.7),
         ], p=0.5),
         
@@ -336,25 +341,29 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         
         # Weather and noise simulations
         A.OneOf([
-            A.GaussNoise(var_limit=(10, 50), p=0.5),
+            A.GaussNoise(per_channel=True, p=0.5),
             A.GaussianBlur(blur_limit=(3, 7), p=0.5),
             A.MotionBlur(blur_limit=(3, 7), p=0.5),
-            A.ImageCompression(quality_lower=70, quality_upper=100, p=0.5),
+            A.ImageCompression(quality_lower=50, quality_upper=100, p=0.5),
         ], p=0.3),
         
         # Dog-specific augmentations - cutout/cutmix-like for occlusion robustness
         A.OneOf([
             A.CoarseDropout(
-                max_holes=8, 
-                max_height=32, 
-                max_width=32, 
+                max_holes=8,
+                min_holes=2,
+                max_height=32,
+                max_width=32,
+                min_height=8,
+                min_width=8,
                 fill_value=0,
                 p=0.5
             ),
             A.GridDropout(
                 ratio=0.1,
-                unit_size_min=10,
-                unit_size_max=40,
+                holes_number_x=4,
+                holes_number_y=4,
+                random_offset=True,
                 p=0.5
             ),
         ], p=0.2),
@@ -365,8 +374,8 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
         label_fields=['labels'],
-        min_visibility=0.3,  # Ensure boxes remain mostly visible
-        min_area=100  # Minimum area in pixels to keep a box
+        min_visibility=0.3,
+        min_area=100
     ))
     
     # Define Albumentations transforms for validation - keep simple for consistent evaluation
