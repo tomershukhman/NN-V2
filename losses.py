@@ -140,8 +140,16 @@ class DetectionLoss(nn.Module):
         total_loc_loss = total_loc_loss / num_pos
         total_conf_loss = total_conf_loss / num_pos
         
+        # Calculate IoU quality factor to dynamically adjust loss weights
+        # Lower IoU means we should focus more on bbox regression
+        mean_iou = best_gt_iou[best_gt_iou > 0].mean() if torch.sum(best_gt_iou > 0) > 0 else torch.tensor(0.1, device=device)
+        iou_quality = torch.clamp(1.0 - mean_iou, 0.1, 0.9)  # Lower IoU -> higher bbox weight
+        
+        # Dynamically adjust weights based on IoU quality
+        dynamic_bbox_weight = bbox_weight * (1.0 + iou_quality)
+        
         # Apply weights to loss components
-        weighted_loc_loss = bbox_weight * total_loc_loss
+        weighted_loc_loss = dynamic_bbox_weight * total_loc_loss
         weighted_conf_loss = conf_weight * total_conf_loss
         
         total_loss = weighted_loc_loss + weighted_conf_loss
@@ -149,7 +157,9 @@ class DetectionLoss(nn.Module):
         return {
             'total_loss': total_loss,
             'conf_loss': total_conf_loss.item(),
-            'bbox_loss': total_loc_loss.item()
+            'bbox_loss': total_loc_loss.item(),
+            'mean_iou': mean_iou.item() if isinstance(mean_iou, torch.Tensor) else mean_iou,
+            'bbox_weight': dynamic_bbox_weight.item() if isinstance(dynamic_bbox_weight, torch.Tensor) else dynamic_bbox_weight
         }
 
     @staticmethod

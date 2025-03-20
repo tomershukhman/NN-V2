@@ -684,12 +684,33 @@ class Trainer:
             
             # Calculate IoUs for matched predictions
             if num_pred > 0 and num_gt > 0:
-                ious = self._calculate_box_iou(pred_boxes, gt_boxes)
-                if len(ious) > 0:
-                    max_ious, _ = ious.max(dim=0)
-                    all_ious.extend(max_ious.cpu().tolist())
-                    # Count true positives (IoU > 0.5)
-                    true_positives += (max_ious > 0.5).sum().item()
+                # Calculate IoUs between all predictions and ground truths
+                pred_boxes_expanded = pred_boxes.unsqueeze(1)  # [num_pred, 1, 4]
+                gt_boxes_expanded = gt_boxes.unsqueeze(0)      # [1, num_gt, 4]
+                
+                # Calculate IoU matrix (using the same implementation as in loss function)
+                left = torch.max(pred_boxes_expanded[..., 0], gt_boxes_expanded[..., 0])
+                top = torch.max(pred_boxes_expanded[..., 1], gt_boxes_expanded[..., 1])
+                right = torch.min(pred_boxes_expanded[..., 2], gt_boxes_expanded[..., 2])
+                bottom = torch.min(pred_boxes_expanded[..., 3], gt_boxes_expanded[..., 3])
+                
+                width = (right - left).clamp(min=0)
+                height = (bottom - top).clamp(min=0)
+                intersection = width * height
+                
+                area1 = (pred_boxes_expanded[..., 2] - pred_boxes_expanded[..., 0]) * (pred_boxes_expanded[..., 3] - pred_boxes_expanded[..., 1])
+                area2 = (gt_boxes_expanded[..., 2] - gt_boxes_expanded[..., 0]) * (gt_boxes_expanded[..., 3] - gt_boxes_expanded[..., 1])
+                union = area1 + area2 - intersection
+                
+                iou_matrix = intersection / (union + 1e-6)  # [num_pred, num_gt]
+                
+                # For each GT box, find the prediction with highest IoU
+                # This helps identify the best prediction for each ground truth
+                max_ious_per_gt, _ = iou_matrix.max(dim=0)  # [num_gt]
+                all_ious.extend(max_ious_per_gt.cpu().tolist())
+                
+                # Count true positives (IoU > 0.5)
+                true_positives += (max_ious_per_gt > 0.5).sum().item()
         
         # Convert lists to tensors for histogram logging
         iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
