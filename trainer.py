@@ -178,6 +178,20 @@ class Trainer:
         np.random.seed(42)
         random.seed(42)
         
+        # Add adaptive underdetection handling
+        self.underdetection_weight_start = 1.0
+        self.underdetection_weight_end = 2.0  # Gradually increase penalty
+        self.min_overdetection_epochs = int(num_epochs * 0.2)  # Allow overdetections initially
+        
+    def _get_underdetection_weight(self, epoch):
+        """Calculate weight for underdetection penalty based on training progress"""
+        if epoch < self.min_overdetection_epochs:
+            return self.underdetection_weight_start
+        
+        progress = (epoch - self.min_overdetection_epochs) / (self.num_epochs - self.min_overdetection_epochs)
+        progress = min(1.0, max(0.0, progress))  # Clamp between 0 and 1
+        return self.underdetection_weight_start + progress * (self.underdetection_weight_end - self.underdetection_weight_start)
+        
     def train(self):
         # Initialize tracking variables
         best_val_loss = float('inf')
@@ -199,6 +213,9 @@ class Trainer:
         # Initialize SWA model
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(self.optimizer, swa_lr=1e-5)
+
+        previous_under_detections = 0
+        under_detection_increase_count = 0
 
         for epoch in range(self.num_epochs):
             # Update learning rate and weight decay
@@ -338,9 +355,20 @@ class Trainer:
                 print(f"Saved new best model with val_loss: {val_loss:.4f} (EMA: {ema_val_loss:.4f})")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 25:  # Increased from 20
-                    print("Early stopping triggered")
-                    break
+
+            # Modified early stopping check that considers detection balance
+            if val_metrics['under_detections'] > previous_under_detections and epoch > self.min_overdetection_epochs:
+                under_detection_increase_count += 1
+            else:
+                under_detection_increase_count = 0
+            
+            previous_under_detections = val_metrics['under_detections']
+            
+            # Stop if underdetections keep increasing or regular stopping criterion is met
+            if under_detection_increase_count >= 5 or epochs_without_improvement >= 25:
+                print("Early stopping triggered" + 
+                      (" due to increasing underdetections" if under_detection_increase_count >= 5 else ""))
+                break
         
         # Final update of SWA model if needed
         if self.swa_model_updated:
@@ -448,9 +476,13 @@ class Trainer:
                 }
                 targets.append(target)
             
-            # Forward pass and loss calculation
+            # Forward pass and loss calculation with adaptive underdetection weight
             predictions = self.model(images, targets)
-            loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
+            underdetection_weight = self._get_underdetection_weight(epoch)
+            loss_dict = self.criterion(predictions, targets, 
+                                     conf_weight=conf_weight, 
+                                     bbox_weight=bbox_weight,
+                                     underdetection_weight=underdetection_weight)
             loss = loss_dict['total_loss']
             
             # Scale loss for gradient accumulation

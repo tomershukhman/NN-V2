@@ -40,13 +40,13 @@ IOU_THRESHOLD = 0.4  # Threshold for box matching during training
 NEG_POS_RATIO = 3  # Ratio of negative to positive examples 
 
 # Training thresholds
-TRAIN_CONFIDENCE_THRESHOLD = 0.45  # Keep training threshold higher for stability
-TRAIN_NMS_THRESHOLD = 0.6  # Higher NMS threshold during training
+TRAIN_CONFIDENCE_THRESHOLD = 0.35  # Lowered from 0.45 to keep more candidates
+TRAIN_NMS_THRESHOLD = 0.7  # Increased from 0.6 to allow more overlapping boxes during training
 
 # Inference thresholds
-CONFIDENCE_THRESHOLD = 0.35  # Lowered from 0.4 to catch more detections
-NMS_THRESHOLD = 0.45  # Increased from 0.3 to allow overlapping dogs
-MAX_DETECTIONS = 10  # Increased from 5 to handle multiple dogs better
+CONFIDENCE_THRESHOLD = 0.25  # Lowered to catch more valid detections
+NMS_THRESHOLD = 0.5  # Slightly increased to allow some overlap
+MAX_DETECTIONS = 15  # Increased to allow more simultaneous detections
 
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0

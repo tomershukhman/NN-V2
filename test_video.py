@@ -101,7 +101,7 @@ def main():
     parser.add_argument('output_video', help='Path to save output video')
     parser.add_argument('--checkpoint', default='outputs/checkpoints/best_model.pth',
                        help='Path to model checkpoint')
-    parser.add_argument('--threshold', type=float, default=0.31,
+    parser.add_argument('--threshold', type=float, default=0.1,
                        help='Confidence threshold for detections')
     
     args = parser.parse_args()

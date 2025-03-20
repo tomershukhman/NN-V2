@@ -5,157 +5,96 @@ import torch.nn.functional as F  # Added missing import
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Lower positive threshold to catch more potential matches
-        self.positive_threshold = 0.4  # Lowered from 0.5
-        self.negative_threshold = 0.3  # Keep as is
+        self.positive_threshold = 0.35  # Lowered from 0.4
+        self.negative_threshold = 0.3
         
-        # Adjusted focal loss parameters for better handling of hard negatives
-        self.alpha = 0.6  # Increased to give more weight to positive samples
-        self.gamma = 1.5  # Keep as is
-        
-        # IOU thresholds for loss calculation
-        self.iou_threshold = 0.5
-        self.iou_good_match = 0.7
-        
-    def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
-        # Handle both training and validation outputs
-        if isinstance(predictions, list):
-            # Convert validation format to training format
-            batch_size = len(predictions)
-            device = predictions[0]['boxes'].device
-            
-            # Get number of anchors from the first prediction that includes anchors
-            default_anchors = None
-            for pred in predictions:
-                if 'anchors' in pred and pred['anchors'] is not None:
-                    default_anchors = pred['anchors']
-                    break
-            
-            if default_anchors is None:
-                raise ValueError("No default anchors found in predictions")
-                
-            num_anchors = len(default_anchors)
-            
-            # Create tensors in training format
-            bbox_pred = torch.zeros((batch_size, num_anchors, 4), device=device)
-            conf_pred = torch.zeros((batch_size, num_anchors), device=device)
-            
-            for i, pred in enumerate(predictions):
-                valid_preds = pred['boxes'].shape[0]
-                if valid_preds > 0:
-                    bbox_pred[i, :valid_preds] = pred['boxes']
-                    conf_pred[i, :valid_preds] = pred['scores']
-            
-            predictions = {
-                'bbox_pred': bbox_pred,
-                'conf_pred': conf_pred,
-                'anchors': default_anchors
-            }
-
-        # Extract predictions
-        bbox_pred = predictions['bbox_pred']
-        conf_pred = predictions['conf_pred']
-        default_anchors = predictions['anchors']
-        
-        batch_size = bbox_pred.shape[0]
-        num_anchors = bbox_pred.shape[1]
-        
-        # Initialize losses
-        conf_losses = []
-        bbox_losses = []
+    def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0, underdetection_weight=1.0):
+        batch_size = len(targets)
+        total_conf_loss = 0
+        total_bbox_loss = 0
         
         for i in range(batch_size):
             target_boxes = targets[i]['boxes']
             
+            # Handle completely empty predictions
             if len(target_boxes) == 0:
-                # Handle empty targets
-                conf_loss = -torch.log(1 - conf_pred[i] + 1e-6).mean()
-                bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
+                conf_loss = -torch.log(1 - predictions['conf_pred'][i] + 1e-6).mean()
+                bbox_loss = torch.tensor(0.0, device=predictions['bbox_pred'].device)
             else:
-                # Calculate IoU between anchors and target boxes
-                ious = self._calculate_box_iou(default_anchors, target_boxes)
+                # Calculate IoU matrix between predicted boxes and target boxes
+                ious = self._calculate_box_iou(predictions['bbox_pred'][i], target_boxes)
                 max_ious, best_target_idx = ious.max(dim=1)
                 
-                # For each target, get best matching anchor
+                # For each target, find best matching prediction
                 target_best_ious, _ = ious.max(dim=0)
                 
-                # Assign positive and negative samples
+                # Positive/negative sample assignment
                 positive_mask = max_ious >= self.positive_threshold
+                negative_mask = max_ious < self.negative_threshold
                 
-                # Force best anchor for each target to be positive
+                # Force best prediction for each target to be positive
                 _, force_positive_idx = ious.max(dim=0)
                 positive_mask[force_positive_idx] = True
+                negative_mask[force_positive_idx] = False
                 
-                negative_mask = max_ious < self.negative_threshold
-                negative_mask[positive_mask] = False
+                # Set target confidence scores
+                conf_target = torch.zeros_like(predictions['conf_pred'][i])
+                conf_target[positive_mask] = 1
                 
-                # Calculate confidence target with adaptive weighting
-                conf_target = positive_mask.float()
+                # Calculate confidence loss with underdetection penalty
+                base_conf_loss = -(conf_target * torch.log(predictions['conf_pred'][i] + 1e-6) + 
+                                 (1 - conf_target) * torch.log(1 - predictions['conf_pred'][i] + 1e-6))
                 
-                # Calculate focal weights with stronger emphasis on hard examples
-                alpha_factor = torch.ones_like(conf_target) * self.alpha
-                alpha_factor[positive_mask] = 1 - self.alpha
-                
-                # Enhanced focal loss weighting
-                focal_weight = (1 - conf_pred[i]) * conf_target + conf_pred[i] * (1 - conf_target)
-                focal_weight = focal_weight.pow(self.gamma)
-                
-                # Additional weight for underdetection cases
+                # Apply underdetection penalty when we have fewer detections than targets
                 if len(target_boxes) > positive_mask.sum():
-                    underdetection_factor = 1.2  # Increase penalty for missed detections
-                    focal_weight[positive_mask] *= underdetection_factor
+                    missed_ratio = (len(target_boxes) - positive_mask.sum()) / len(target_boxes)
+                    # Scale up loss for positive samples based on underdetection
+                    base_conf_loss[positive_mask] *= (1 + missed_ratio * underdetection_weight)
                 
-                # Confidence loss with enhanced weighting
-                conf_loss = -(conf_target * torch.log(conf_pred[i] + 1e-6) + 
-                            (1 - conf_target) * torch.log(1 - conf_pred[i] + 1e-6))
-                conf_loss = (conf_loss * focal_weight * alpha_factor).mean()
+                conf_loss = base_conf_loss.mean()
                 
                 # Calculate bbox loss only for positive samples
                 if positive_mask.sum() > 0:
                     matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
-                    pred_boxes = bbox_pred[i][positive_mask]
+                    pred_boxes = predictions['bbox_pred'][i][positive_mask]
                     
-                    # Calculate IoU-based loss
-                    ious = self._calculate_box_iou(pred_boxes, matched_target_boxes)
-                    iou_loss = -torch.log(ious + 1e-6)  # Convert to loss
+                    # IoU loss for positive samples
+                    pos_ious = self._calculate_box_iou(pred_boxes, matched_target_boxes)
+                    iou_loss = -torch.log(pos_ious.diag() + 1e-6)
                     
                     # L1 loss weighted by IoU quality
-                    l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none')
-                    l1_loss = l1_loss.mean(dim=1)
+                    l1_loss = torch.abs(pred_boxes - matched_target_boxes).mean(dim=1)
                     
-                    # Combine losses with adaptive weighting
-                    iou_quality = torch.clamp((ious - self.iou_threshold) / (self.iou_good_match - self.iou_threshold), 0, 1)
-                    bbox_loss = (iou_loss + (1 - iou_quality) * l1_loss).mean()
-                    
-                    # Add extra penalty for underdetection cases
+                    # Combined box loss with underdetection penalty
+                    box_losses = iou_loss + l1_loss
                     if len(target_boxes) > positive_mask.sum():
-                        bbox_loss *= 1.2  # Increase bbox loss for missed detections
+                        box_losses *= (1 + missed_ratio * (underdetection_weight * 0.5))  # Less aggressive for bbox loss
+                    
+                    bbox_loss = box_losses.mean()
                 else:
-                    bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
+                    bbox_loss = torch.tensor(0.0, device=predictions['bbox_pred'].device)
             
-            conf_losses.append(conf_loss)
-            bbox_losses.append(bbox_loss)
+            total_conf_loss += conf_loss
+            total_bbox_loss += bbox_loss
         
-        # Average losses across batch
-        conf_loss = torch.stack(conf_losses).mean()
-        bbox_loss = torch.stack(bbox_losses).mean()
+        # Average losses over batch
+        total_conf_loss = total_conf_loss / batch_size
+        total_bbox_loss = total_bbox_loss / batch_size
         
-        # Apply weights and combine
-        total_loss = conf_weight * conf_loss + bbox_weight * bbox_loss
+        # Apply weights
+        weighted_conf_loss = conf_weight * total_conf_loss
+        weighted_bbox_loss = bbox_weight * total_bbox_loss
+        total_loss = weighted_conf_loss + weighted_bbox_loss
         
         return {
             'total_loss': total_loss,
-            'conf_loss': conf_loss.item(),
-            'bbox_loss': bbox_loss.item()
+            'conf_loss': total_conf_loss.item(),
+            'bbox_loss': total_bbox_loss.item()
         }
-    
+        
     def _calculate_box_iou(self, boxes1, boxes2):
         """Calculate IoU between two sets of boxes"""
-        # Convert to x1y1x2y2 format if normalized
-        boxes1 = boxes1.clone()
-        boxes2 = boxes2.clone()
-        
-        # Calculate intersection areas
+        # Calculate intersection
         x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
         y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
         x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
@@ -163,9 +102,11 @@ class DetectionLoss(nn.Module):
         
         intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
         
-        # Calculate union areas
+        # Calculate areas
         area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
         area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        
+        # Calculate union
         union = area1[:, None] + area2 - intersection
         
         return intersection / (union + 1e-6)

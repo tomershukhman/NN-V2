@@ -123,6 +123,9 @@ class DogDetector(nn.Module):
         bbox_pred = self.bbox_head(x)
         conf_pred = torch.sigmoid(self.cls_head(x))
         
+        # Add confidence damping to reduce phantom detections
+        conf_pred = conf_pred * (1 - 0.2 * (1 - conf_pred))  # Slightly dampen mid-range confidences
+        
         # Get shapes
         batch_size = x.shape[0]
         feature_size = x.shape[2]  # Should be self.feature_map_size
@@ -175,15 +178,9 @@ class DogDetector(nn.Module):
                     boxes = boxes[keep_idx]
                     scores = scores[keep_idx]
                 
-                # Always ensure we have at least one prediction for stability
-                if len(boxes) == 0:
-                    # Default box covers most of the image
-                    boxes = torch.tensor([[0.2, 0.2, 0.8, 0.8]], device=bbox_pred.device)
-                    scores = torch.tensor([confidence_threshold], device=bbox_pred.device)
-                
                 results.append({
-                    'boxes': boxes,
-                    'scores': scores,
+                    'boxes': boxes if len(boxes) > 0 else torch.zeros((0, 4), device=boxes.device),
+                    'scores': scores if len(scores) > 0 else torch.zeros(0, device=scores.device),
                     'anchors': default_anchors  # Include anchors in each result
                 })
             
