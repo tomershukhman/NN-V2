@@ -31,14 +31,30 @@ def preprocess_frame(frame):
     img_tensor = transform(frame_rgb).unsqueeze(0).to(DEVICE)
     return img_tensor
 
-def draw_detections(frame, predictions, threshold=0.31):
+def draw_detections(frame, predictions, threshold=0.25):
     """Draw detection boxes on the frame"""
     height, width = frame.shape[:2]
     boxes = predictions[0]['boxes']
     scores = predictions[0]['scores']
     
-    for box, score in zip(boxes, scores):
-        if score > threshold:
+    # Calculate areas for size-adaptive thresholding
+    areas = []
+    for box in boxes:
+        x1, y1, x2, y2 = box.cpu().numpy()
+        # Get denormalized width and height
+        w = (x2 - x1) * width
+        h = (y2 - y1) * height
+        areas.append(w * h)
+    areas = np.array(areas)
+    
+    for i, (box, score) in enumerate(zip(boxes, scores)):
+        # Adjust threshold for smaller boxes
+        area = areas[i]
+        adaptive_threshold = threshold
+        if area < 2500:  # Small box (distant dog)
+            adaptive_threshold = threshold * 0.8
+        
+        if score > adaptive_threshold:
             # Get normalized coordinates
             x1, y1, x2, y2 = box.cpu().numpy()
             
@@ -48,14 +64,23 @@ def draw_detections(frame, predictions, threshold=0.31):
             x2 = int(x2 * width)
             y2 = int(y2 * height)
             
+            # Calculate box area for color adjustment (smaller boxes get different color)
+            box_area = (x2 - x1) * (y2 - y1)
+            
+            # Choose color based on size - red for smaller boxes to make them more visible
+            if box_area < 2500:
+                color = (0, 0, 255)  # Red for smaller/distant dogs
+            else:
+                color = (0, 255, 0)  # Green for regular sized dogs
+            
             # Draw rectangle and confidence score
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
             cv2.putText(frame, f'{score:.2f}', (x1, y1 - 10),
-                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
     
     return frame
 
-def process_video(input_path, output_path, model, conf_threshold=0.31):
+def process_video(input_path, output_path, model, conf_threshold=0.25):
     """Process video file and save output with detections"""
     cap = cv2.VideoCapture(input_path)
     
@@ -101,7 +126,7 @@ def main():
     parser.add_argument('output_video', help='Path to save output video')
     parser.add_argument('--checkpoint', default='outputs/checkpoints/best_model.pth',
                        help='Path to model checkpoint')
-    parser.add_argument('--threshold', type=float, default=0.35,
+    parser.add_argument('--threshold', type=float, default=0.25,
                        help='Confidence threshold for detections')
     
     args = parser.parse_args()

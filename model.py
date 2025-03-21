@@ -90,7 +90,8 @@ class DogDetector(nn.Module):
         )
         
         # Expanded anchor configuration for better coverage of different dog sizes and poses
-        self.anchor_scales = [0.3, 0.5, 0.8, 1.2]  # Added more scales for diverse sizes
+        # Added smaller scales to better detect distant dogs (0.15, 0.25)
+        self.anchor_scales = [0.15, 0.25, 0.3, 0.5, 0.8, 1.2]  # Added smaller scales for distant dogs
         self.anchor_ratios = [0.5, 0.75, 1.0, 1.5]  # Added more ratios for different poses
         self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
