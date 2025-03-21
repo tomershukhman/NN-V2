@@ -49,9 +49,9 @@ TRAIN_CONFIDENCE_THRESHOLD = 0.3  # Lowered to allow more predictions during tra
 TRAIN_NMS_THRESHOLD = 0.45  # Increased to prevent losing overlapping dogs
 
 # Inference thresholds - optimized for multi-dog detection
-CONFIDENCE_THRESHOLD = 0.25  # Lowered to catch more valid detections
-NMS_THRESHOLD = 0.35  # Increased to allow overlapping dogs
-MAX_DETECTIONS = 10  # Increased from 5 to handle more dogs
+CONFIDENCE_THRESHOLD = 0.2  # Lowered to catch more potential dogs
+NMS_THRESHOLD = 0.45  # Increased to allow more overlapping dogs
+MAX_DETECTIONS = 15  # Increased from 5 to handle more dogs
 
 # Loss function parameters - balanced for multi-object detection
 BBOX_LOSS_WEIGHT = 1.2  # Increased importance of accurate localization

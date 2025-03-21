@@ -89,20 +89,29 @@ class DogDetector(nn.Module):
             nn.Dropout(0.25)  # Increased dropout
         )
         
-        # Expanded anchor configuration for better coverage of different dog sizes and poses
-        self.anchor_scales = [0.3, 0.5, 0.8, 1.2]  # Added more scales for diverse sizes
-        self.anchor_ratios = [0.5, 0.75, 1.0, 1.5]  # Added more ratios for different poses
+        # Expanded anchor configuration for better coverage of different dog sizes and group scenarios
+        self.anchor_scales = [0.2, 0.3, 0.5, 0.7, 0.9, 1.2]  # More fine-grained scales
+        self.anchor_ratios = [0.5, 0.75, 1.0, 1.33, 1.5, 2.0]  # Better coverage of side-by-side dogs
         self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
-        # Enhanced prediction heads with better initialization
+        # Enhanced prediction heads with deeper network for better multi-dog detection
         self.cls_head = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
             nn.Conv2d(256, self.num_anchors_per_cell, kernel_size=3, padding=1),
         )
         
-        self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        # Improved bbox head for better localization
+        self.bbox_head = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1),
+        )
         
         # Initialize weights
         self._initialize_weights()
@@ -275,20 +284,23 @@ class DogDetector(nn.Module):
         return results
         
     def _decode_boxes(self, box_pred, anchors):
-        """Convert predicted box offsets back to absolute coordinates"""
+        """Convert predicted box offsets back to absolute coordinates with better scaling"""
         # Center form
         anchor_centers = (anchors[:, :2] + anchors[:, 2:]) / 2
         anchor_sizes = anchors[:, 2:] - anchors[:, :2]
         
-        # Decode predictions
-        pred_centers = box_pred[:, :, :2] * anchor_sizes + anchor_centers
-        pred_sizes = torch.exp(box_pred[:, :, 2:]) * anchor_sizes
+        # Decode predictions with adjusted scaling for better precision
+        pred_centers = box_pred[:, :, :2] * anchor_sizes * 0.1 + anchor_centers  # Reduced scale factor
+        pred_sizes = torch.exp(torch.clamp(box_pred[:, :, 2:], min=-4.0, max=4.0)) * anchor_sizes  # Added clamping
         
         # Convert back to [x1, y1, x2, y2] format
         boxes = torch.cat([
             pred_centers - pred_sizes/2,
             pred_centers + pred_sizes/2
         ], dim=-1)
+        
+        # Ensure boxes stay within valid range
+        boxes = torch.clamp(boxes, min=0.0, max=1.0)
         
         return boxes
 

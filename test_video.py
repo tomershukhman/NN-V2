@@ -31,7 +31,7 @@ def preprocess_frame(frame):
     img_tensor = transform(frame_rgb).unsqueeze(0).to(DEVICE)
     return img_tensor
 
-def draw_detections(frame, predictions, threshold=0.31):
+def draw_detections(frame, predictions, threshold=0.2):
     """Draw detection boxes on the frame with enhanced multi-dog visualization"""
     height, width = frame.shape[:2]
     boxes = predictions[0]['boxes']
@@ -138,7 +138,7 @@ def main():
     parser.add_argument('output_video', help='Path to save output video')
     parser.add_argument('--checkpoint', default='outputs/checkpoints/best_model.pth',
                        help='Path to model checkpoint')
-    parser.add_argument('--threshold', type=float, default=0.35,
+    parser.add_argument('--threshold', type=float, default=0.2,
                        help='Confidence threshold for detections')
     
     args = parser.parse_args()
