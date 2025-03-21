@@ -654,9 +654,9 @@ class Trainer:
             
             # Log sample validation images (only for regular validation)
             if prefix == "val":
-                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
+                self.visualization_logger.log_images(prefix, all_images[:16], all_predictions[:16], all_targets[:16], epoch)
             elif prefix == "val_ema":
-                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
+                self.visualization_logger.log_images(prefix, all_images[:16], all_predictions[:16], all_targets[:16], epoch)
         
         return metrics
 
