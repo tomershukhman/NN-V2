@@ -1,3 +1,6 @@
+from typing import Literal
+
+
 import os
 import torch
 from device import get_device
@@ -15,7 +18,6 @@ BATCH_SIZE = 16
 NUM_WORKERS = min(8, os.cpu_count() or 1)
 LEARNING_RATE = 1e-4  # Slightly reduced
 NUM_EPOCHS = 100
-DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 WEIGHT_DECAY = 0.01  # Added L2 regularization
 
 # Early stopping
