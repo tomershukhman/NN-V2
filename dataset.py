@@ -289,72 +289,52 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     os.makedirs(root, exist_ok=True)
     print(f"Using data root directory: {os.path.abspath(root)}")
     
-    # Define Albumentations transforms for training with enhanced multi-dog detection
+    # Define Albumentations transforms with memory-efficient operations
     train_transform = A.Compose([
-        # Less aggressive random crop to preserve multiple dogs
+        A.LongestMaxSize(max_size=300),  # Increased size to preserve more detail
         A.RandomResizedCrop(
             size=(224, 224), 
-            scale=(0.7, 1.0),  # Increased min scale to keep more dogs in frame
-            ratio=(0.8, 1.25),  # Adjusted for better group captures
+            scale=(0.8, 1.0),  # Less aggressive cropping to keep more dogs in frame
+            ratio=(0.75, 1.33),  # Better range for group photos
             interpolation=1,
             p=1.0
         ),
-        # Add grid distortion to help with dog clusters
-        A.GridDistortion(
-            num_steps=5,
-            distort_limit=0.3,
-            p=0.3
-        ),
+        A.OneOf([
+            A.Affine(
+                rotate=[-90, 90],
+                scale=(1.0, 1.0),  # No scaling for 90-degree rotations
+                translate_percent={"x": (0, 0), "y": (0, 0)},  # No translation
+                shear={"x": (0, 0), "y": (0, 0)},  # No shearing
+                p=0.3
+            ),
+            A.Affine(
+                rotate=[-15, 15],
+                scale=(0.9, 1.1),
+                translate_percent={"x": (-0.0625, 0.0625), "y": (-0.0625, 0.0625)},
+                shear={"x": (-5, 5), "y": (-5, 5)},  # Small shear for perspective-like effects
+                p=0.7
+            )
+        ], p=0.3),
         A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, p=0.3),
-        # Enhanced color augmentations with regional variations
+        # Enhanced color augmentations for different colored dogs
         A.OneOf([
-            A.RandomBrightnessContrast(
-                brightness_limit=0.3,
-                contrast_limit=0.3,
-                brightness_by_max=True,  # This helps distinguish overlapping dogs
-                p=1.0
-            ),
-            # Add regional contrast variation
-            A.CoarseDropout(
-                max_holes=8,
-                max_height=30,
-                max_width=30,
-                min_holes=2,
-                min_height=10,
-                min_width=10,
-                fill_value=0,
-                mask_fill_value=None,
-                p=1.0
-            ),
-            A.HueSaturationValue(
-                hue_shift_limit=10, 
-                sat_shift_limit=20, 
-                val_shift_limit=10, 
-                p=1.0
-            ),
-        ], p=0.6),  # Increased probability
-        # Multi-scale augmentations for better group detection
+            A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=1.0),
+            A.HueSaturationValue(hue_shift_limit=20, sat_shift_limit=30, val_shift_limit=20, p=1.0),
+            A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=1.0),
+        ], p=0.8),
+        # Add blur for motion and depth variations
         A.OneOf([
-            # Added more scale variations
-            A.RandomScale(scale_limit=(-0.3, 0.5), p=1.0),  # Increased upper limit
-            A.RandomScale(scale_limit=(0.2, 0.7), p=1.0),   # Added larger scale option
-            # Add perspective variation
-            A.Perspective(scale=(0.05, 0.1), p=1.0),
-        ], p=0.5),  # Increased probability
-        # Add blur variations to help with overlapping dogs
-        A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
-            A.MotionBlur(blur_limit=(3, 7), p=1.0),
-            A.MedianBlur(blur_limit=5, p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+            A.MotionBlur(blur_limit=(3, 5), p=1.0),
         ], p=0.2),
-        # Normalize and convert to tensor
+        # Single Perspective transform (removed duplicate IAAPerspective)
+        A.Perspective(scale=(0.05, 0.1), p=0.2),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
         label_fields=['labels'],
-        min_visibility=0.3
+        min_visibility=0.4  # Increased minimum visibility requirement
     ))
     
     # Keep validation transform simple but ensure consistent sizing
