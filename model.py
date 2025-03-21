@@ -17,6 +17,15 @@ class DogDetector(nn.Module):
         # Load pretrained ResNet18 backbone
         backbone = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
         
+        # Store initial convolution layers
+        self.backbone_conv1 = backbone.conv1
+        self.bn1 = backbone.bn1
+        self.relu = backbone.relu
+        self.maxpool = backbone.maxpool
+        
+        # Add adaptive pooling layer
+        self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
+        
         # Store intermediate layers for FPN
         self.layer1 = backbone.layer1  # 64 channels
         self.layer2 = backbone.layer2  # 128 channels
@@ -28,7 +37,7 @@ class DogDetector(nn.Module):
         self.input_size = (224, 224)  # Standard input size
         
         # Freeze only the first few layers for better feature extraction
-        for param in list(self.layer1.parameters()) + list(self.layer2.parameters())[:-4]:
+        for param in list(self.backbone_conv1.parameters()) + list(self.bn1.parameters()) + list(self.layer1.parameters()) + list(self.layer2.parameters())[:-4]:
             param.requires_grad = False
         
         # Enhanced FPN with multi-scale features
@@ -67,13 +76,13 @@ class DogDetector(nn.Module):
         )
         
         # Detection head with improved regularization
-        self.conv1 = nn.Sequential(
+        self.det_conv1 = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
             nn.Dropout(0.25)  # Increased dropout
         )
-        self.conv2 = nn.Sequential(
+        self.det_conv2 = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
@@ -106,7 +115,7 @@ class DogDetector(nn.Module):
         self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.5))  # Negative bias to reduce false positives
 
     def _initialize_weights(self):
-        for m in [self.fpn_convs, self.smooth_convs, self.conv1, self.conv2, self.bbox_head]:
+        for m in [self.fpn_convs, self.smooth_convs, self.det_conv1, self.det_conv2, self.bbox_head]:
             if isinstance(m, nn.Conv2d):
                 nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 nn.init.constant_(m.bias, 0)
@@ -137,28 +146,44 @@ class DogDetector(nn.Module):
         return torch.tensor(anchors, dtype=torch.float32)
         
     def forward(self, x, targets=None):
+        # Initial convolution layers
+        x = self.backbone_conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        x = self.maxpool(x)
+        
         # Extract features using backbone layers
         x = self.layer1(x)
         c3 = self.layer2(x)      # 128 channels
         c4 = self.layer3(c3)     # 256 channels
         c5 = self.layer4(c4)     # 512 channels
         
-        # FPN-like feature processing with fixed pooling
+        # FPN-like feature processing
         p5 = self.fpn_convs['p5'](c5)
         p5 = self.fpn_bns['p5'](p5)
-        p4 = self.fpn_convs['p4'](c4)
-        p4 = self.fpn_bns['p4'](p4)
-        p3 = self.fpn_convs['p3'](c3)
-        p3 = self.fpn_bns['p3'](p3)
-        
         p5 = self.smooth_convs['p5'](p5)
         p5 = self.smooth_bns['p5'](p5)
+
+        # Upsample p5 to match p4's size
+        p5_upsampled = F.interpolate(p5, size=c4.shape[-2:], mode='nearest')
+        
+        p4 = self.fpn_convs['p4'](c4)
+        p4 = self.fpn_bns['p4'](p4)
         p4 = self.smooth_convs['p4'](p4)
         p4 = self.smooth_bns['p4'](p4)
+        p4 = p4 + p5_upsampled
+
+        # Upsample combined p4 to match p3's size
+        p4_upsampled = F.interpolate(p4, size=c3.shape[-2:], mode='nearest')
+        
+        p3 = self.fpn_convs['p3'](c3)
+        p3 = self.fpn_bns['p3'](p3)
         p3 = self.smooth_convs['p3'](p3)
         p3 = self.smooth_bns['p3'](p3)
-        
-        features = p5 + p4 + p3
+        p3 = p3 + p4_upsampled
+
+        # Use p3 as our final features since it has the highest resolution
+        features = p3
         
         # Apply attention mechanism
         attention = self.attention(features)
@@ -177,24 +202,21 @@ class DogDetector(nn.Module):
                 align_corners=False
             )
         
-        # Detection head
-        x = self.conv1(features)
-        x = self.conv2(x)
+        # Detection head processing
+        features = self.det_conv1(features)
+        features = self.det_conv2(features)
         
         # Predict bounding boxes and confidence scores
-        bbox_pred = self.bbox_head(x)
-        
-        # Enhanced confidence prediction with calibration
-        conf_pred = self.cls_head(x)
+        bbox_pred = self.bbox_head(features)
+        conf_pred = self.cls_head(features)
         conf_pred = conf_pred * self.conf_scaling + self.conf_bias
         conf_pred = torch.sigmoid(conf_pred)
         
         # Get shapes
-        batch_size = x.shape[0]
-        feature_size = x.shape[2]  # Should be self.feature_map_size
-        total_anchors = feature_size * feature_size * self.num_anchors_per_cell
+        batch_size = features.shape[0]
+        total_anchors = self.feature_map_size * self.feature_map_size * self.num_anchors_per_cell
         
-        # Reshape bbox predictions to [batch, total_anchors, 4]
+        # Reshape predictions
         bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
         bbox_pred = bbox_pred.view(batch_size, total_anchors, 4)
         
@@ -206,54 +228,51 @@ class DogDetector(nn.Module):
         conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
         conf_pred = conf_pred.view(batch_size, total_anchors)
         
+        # Return predictions based on training/inference mode
         if self.training and targets is not None:
             return {
                 'bbox_pred': bbox_pred,
                 'conf_pred': conf_pred,
                 'anchors': default_anchors
             }
-        else:
-            # Process each image in the batch
-            results = []
-            for boxes, scores in zip(bbox_pred, conf_pred):
-                # Use appropriate confidence threshold based on mode
-                confidence_threshold = TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD
-                
-                # Filter by confidence threshold
-                mask = scores > confidence_threshold
-                boxes = boxes[mask]
-                scores = scores[mask]
-                
-                if len(boxes) > 0:
-                    # Clip boxes to image boundaries
-                    boxes = torch.clamp(boxes, min=0, max=1)
-                    
-                    # Improved NMS with soft-NMS characteristics
-                    nms_threshold = TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
-                    keep_idx = nms(boxes, scores, nms_threshold)
-                    
-                    # Limit maximum detections
-                    if len(keep_idx) > MAX_DETECTIONS:
-                        scores_for_topk = scores[keep_idx]
-                        _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
-                        keep_idx = keep_idx[topk_indices]
-                    
-                    boxes = boxes[keep_idx]
-                    scores = scores[keep_idx]
-                
-                # Always ensure we have at least one prediction for stability
-                if len(boxes) == 0:
-                    # Create a more reasonable default box
-                    boxes = torch.tensor([[0.3, 0.3, 0.7, 0.7]], device=bbox_pred.device)
-                    scores = torch.tensor([confidence_threshold], device=bbox_pred.device)
-                
-                results.append({
-                    'boxes': boxes,
-                    'scores': scores,
-                    'anchors': default_anchors  # Include anchors in each result
-                })
+        
+        # Process each image in the batch for inference
+        results = []
+        for boxes, scores in zip(bbox_pred, conf_pred):
+            # Filter by confidence
+            mask = scores > (TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD)
+            boxes = boxes[mask]
+            scores = scores[mask]
             
-            return results
+            if len(boxes) > 0:
+                # Apply NMS
+                keep_idx = nms(
+                    boxes, 
+                    scores, 
+                    TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
+                )
+                
+                # Limit detections
+                if len(keep_idx) > MAX_DETECTIONS:
+                    scores_for_topk = scores[keep_idx]
+                    _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
+                    keep_idx = keep_idx[topk_indices]
+                
+                boxes = boxes[keep_idx]
+                scores = scores[keep_idx]
+            
+            # Ensure at least one prediction
+            if len(boxes) == 0:
+                boxes = torch.tensor([[0.3, 0.3, 0.7, 0.7]], device=bbox_pred.device)
+                scores = torch.tensor([CONFIDENCE_THRESHOLD], device=bbox_pred.device)
+            
+            results.append({
+                'boxes': boxes,
+                'scores': scores,
+                'anchors': default_anchors
+            })
+        
+        return results
         
     def _decode_boxes(self, box_pred, anchors):
         """Convert predicted box offsets back to absolute coordinates"""
