@@ -1,5 +1,8 @@
 import os
 import torch
+from device import get_device
+DEVICE = get_device()
+
 
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
@@ -12,7 +15,6 @@ BATCH_SIZE = 16
 NUM_WORKERS = min(8, os.cpu_count() or 1)
 LEARNING_RATE = 1e-4  # Slightly reduced
 NUM_EPOCHS = 100
-DEVICE = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
 WEIGHT_DECAY = 0.01  # Added L2 regularization
 
 # Early stopping
@@ -55,3 +57,7 @@ CONF_LOSS_WEIGHT = 1.0
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20
 TENSORBOARD_VAL_IMAGES = 20
+
+if torch.device("cuda"):
+    print("CUDA is available. Using GPU for training.")
+    DATA_SET_TO_USE = 1  
