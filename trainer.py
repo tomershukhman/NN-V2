@@ -744,188 +744,142 @@ class Trainer:
         
         # Multi-dog specific tracking
         single_dog_metrics = {
-            'true_positives': 0,
-            'false_positives': 0, 
-            'false_negatives': 0,
-            'total_gt': 0,
-            'total_pred': 0
+            'true_positives': 0, 'false_positives': 0, 'false_negatives': 0,
+            'total_gt': 0, 'total_pred': 0
         }
         
         multi_dog_metrics = {
-            'true_positives': 0,
-            'false_positives': 0, 
-            'false_negatives': 0,
-            'total_gt': 0,
-            'total_pred': 0
+            'true_positives': 0, 'false_positives': 0, 'false_negatives': 0,
+            'total_gt': 0, 'total_pred': 0
         }
         
-        # New metrics for count mismatch
         count_match_percentage = 0
         count_diff_sum = 0
-        
         detections_per_image = []
         
-        for pred, target in zip(predictions, targets):
-            pred_boxes = pred['boxes']
-            pred_scores = pred['scores']
-            gt_boxes = target['boxes']
+        # Process batches to reduce memory usage
+        batch_size = 32
+        for batch_start in range(0, total_images, batch_size):
+            batch_end = min(batch_start + batch_size, total_images)
+            batch_preds = predictions[batch_start:batch_end]
+            batch_targets = targets[batch_start:batch_end]
             
-            # Get dog count for the image (if available)
-            is_multi_dog = False
-            if 'dog_count' in target:
-                dog_count = target['dog_count']
-                is_multi_dog = dog_count > 1
-            else:
-                dog_count = len(gt_boxes)
-                is_multi_dog = dog_count > 1
-            
-            # Count statistics
-            num_pred = len(pred_boxes)
-            num_gt = len(gt_boxes)
-            detections_per_image.append(num_pred)
-            total_detections += num_pred
-            total_ground_truth += num_gt
-            
-            # Update the appropriate metrics tracker based on single/multi-dog
-            metrics_tracker = multi_dog_metrics if is_multi_dog else single_dog_metrics
-            metrics_tracker['total_gt'] += num_gt
-            metrics_tracker['total_pred'] += num_pred
-            
-            # Track count differences
-            count_diff_sum += abs(num_pred - num_gt)
-            if num_pred == num_gt:
-                correct_count += 1
-                count_match_percentage += 1
-            elif num_pred > num_gt:
-                over_detections += 1
-            else:
-                under_detections += 1
-            
-            # Collect confidence scores
-            if len(pred_scores) > 0:
-                all_confidences.extend(pred_scores.cpu().tolist())
-            
-            # Calculate IoUs between predictions and ground truth boxes
-            if num_gt > 0:  # Only process if there are ground truth boxes
-                if num_pred > 0:
-                    # Calculate IoU matrix between predicted and ground truth boxes
-                    ious = torch.zeros((num_pred, num_gt), device=pred_boxes.device)
-                    for p_idx in range(num_pred):
-                        for gt_idx in range(num_gt):
-                            ious[p_idx, gt_idx] = self._calculate_single_iou(
-                                pred_boxes[p_idx], gt_boxes[gt_idx]
-                            )
+            for pred, target in zip(batch_preds, batch_targets):
+                pred_boxes = pred['boxes']
+                pred_scores = pred['scores']
+                gt_boxes = target['boxes']
+                
+                # Get dog count and update multi-dog tracking
+                is_multi_dog = False
+                if 'dog_count' in target:
+                    dog_count = target['dog_count']
+                    is_multi_dog = dog_count > 1
+                else:
+                    dog_count = len(gt_boxes)
+                    is_multi_dog = dog_count > 1
+                
+                num_pred = len(pred_boxes)
+                num_gt = len(gt_boxes)
+                
+                metrics_tracker = multi_dog_metrics if is_multi_dog else single_dog_metrics
+                metrics_tracker['total_gt'] += num_gt
+                metrics_tracker['total_pred'] += num_pred
+                
+                detections_per_image.append(num_pred)
+                total_detections += num_pred
+                total_ground_truth += num_gt
+                
+                # Track count differences
+                count_diff_sum += abs(num_pred - num_gt)
+                if num_pred == num_gt:
+                    correct_count += 1
+                    count_match_percentage += 1
+                elif num_pred > num_gt:
+                    over_detections += 1
+                else:
+                    under_detections += 1
+                
+                # Collect confidence scores
+                if len(pred_scores) > 0:
+                    all_confidences.extend(pred_scores.cpu().tolist())
+                
+                # Calculate IoUs efficiently using vectorized operations
+                if num_gt > 0 and num_pred > 0:
+                    # Move tensors to the same device if needed
+                    if pred_boxes.device != gt_boxes.device:
+                        gt_boxes = gt_boxes.to(pred_boxes.device)
                     
-                    # For each GT box, find the prediction with highest IoU
+                    # Vectorized IoU calculation
+                    ious = self._calculate_box_iou(pred_boxes, gt_boxes)  # Shape: (num_pred, num_gt)
+                    
+                    # Get max IoU for each GT box
                     max_ious_per_gt, matched_pred_indices = ious.max(dim=0)
-                    
-                    # Add IoUs for matched boxes
                     all_ious.extend(max_ious_per_gt.cpu().tolist())
                     
-                    # Count true positives (IoU > 0.5)
+                    # Count true positives
                     image_true_positives = (max_ious_per_gt > 0.5).sum().item()
                     true_positives += image_true_positives
                     metrics_tracker['true_positives'] += image_true_positives
                     
-                    # Count false positives (predictions without a matching GT box with IoU > 0.5)
-                    # Get predicted boxes that were matched with IoU > 0.5
-                    matched_preds = set()
-                    for gt_idx, pred_idx in enumerate(matched_pred_indices):
-                        if max_ious_per_gt[gt_idx] > 0.5:
-                            matched_preds.add(pred_idx.item())
+                    # Count false positives efficiently
+                    matched_with_high_iou = (max_ious_per_gt > 0.5).sum().item()
+                    metrics_tracker['false_positives'] += (num_pred - matched_with_high_iou)
                     
-                    # Count predictions not matched to any GT box with IoU > 0.5
-                    metrics_tracker['false_positives'] += (num_pred - len(matched_preds))
-                    
-                    # Count false negatives (GT boxes without a matching prediction with IoU > 0.5)
+                    # Count false negatives
                     metrics_tracker['false_negatives'] += (num_gt - image_true_positives)
-                    
-                    # For any missing boxes (when num_pred < num_gt), add zero IoU values
-                    if num_pred < num_gt:
-                        # No need to add zeros here as we've already computed IoU for all GT boxes
-                        pass
-                else:
-                    # If no predictions but we have GT boxes, add zeros for all missing boxes
+                elif num_gt > 0:
+                    # If no predictions but we have GT boxes
                     all_ious.extend([0.0] * num_gt)
                     metrics_tracker['false_negatives'] += num_gt
-        
-        # Convert lists to tensors for histogram logging
+
+        # Convert metrics to tensors and calculate final values
         iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
         confidence_distribution = torch.tensor(all_confidences) if all_confidences else torch.zeros(0)
         detections_per_image = torch.tensor(detections_per_image)
         
-        # Calculate final metrics
-        correct_count_percent = (correct_count / total_images) * 100  # Percentage of images with correct box count
-        count_match_percentage = (count_match_percentage / total_images) * 100 if total_images > 0 else 0
-        avg_count_diff = count_diff_sum / total_images if total_images > 0 else 0
-        avg_detections = total_detections / total_images if total_images > 0 else 0
-        avg_ground_truth = total_ground_truth / total_images if total_images > 0 else 0
+        # Calculate final metrics using numpy for efficiency
+        all_ious_np = np.array(all_ious) if all_ious else np.array([0])
+        all_confidences_np = np.array(all_confidences) if all_confidences else np.array([0])
         
-        # Calculate mean and median IoU (including penalties for count mismatches)
-        mean_iou = np.mean(all_ious) if all_ious else 0
-        median_iou = np.median(all_ious) if all_ious else 0
-        
-        # Calculate confidence score statistics
-        mean_confidence = np.mean(all_confidences) if all_confidences else 0
-        median_confidence = np.median(all_confidences) if all_confidences else 0
-        
-        # Calculate precision, recall, and F1 score
-        precision = true_positives / total_detections if total_detections > 0 else 0
-        recall = true_positives / total_ground_truth if total_ground_truth > 0 else 0
-        f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
-        
-        # Calculate single-dog and multi-dog specific metrics
-        single_dog_precision = (
-            single_dog_metrics['true_positives'] / single_dog_metrics['total_pred'] 
-            if single_dog_metrics['total_pred'] > 0 else 0
-        )
-        
-        single_dog_recall = (
-            single_dog_metrics['true_positives'] / single_dog_metrics['total_gt'] 
-            if single_dog_metrics['total_gt'] > 0 else 0
-        )
-        
-        multi_dog_precision = (
-            multi_dog_metrics['true_positives'] / multi_dog_metrics['total_pred'] 
-            if multi_dog_metrics['total_pred'] > 0 else 0
-        )
-        
-        multi_dog_recall = (
-            multi_dog_metrics['true_positives'] / multi_dog_metrics['total_gt'] 
-            if multi_dog_metrics['total_gt'] > 0 else 0
-        )
-        
-        # Update the multi-dog tracking metrics
-        self.multi_dog_metrics['single_dog_precision'].append(single_dog_precision)
-        self.multi_dog_metrics['single_dog_recall'].append(single_dog_recall)
-        self.multi_dog_metrics['multi_dog_precision'].append(multi_dog_precision)
-        self.multi_dog_metrics['multi_dog_recall'].append(multi_dog_recall)
-        
-        return {
-            'correct_count_percent': correct_count_percent,
-            'count_match_percentage': count_match_percentage,
-            'avg_count_diff': avg_count_diff,
+        metrics = {
+            'correct_count_percent': (correct_count / total_images) * 100 if total_images > 0 else 0,
+            'count_match_percentage': (count_match_percentage / total_images) * 100 if total_images > 0 else 0,
+            'avg_count_diff': count_diff_sum / total_images if total_images > 0 else 0,
             'over_detections': over_detections,
             'under_detections': under_detections,
-            'mean_iou': mean_iou,
-            'median_iou': median_iou,
-            'mean_confidence': mean_confidence,
-            'median_confidence': median_confidence,
-            'avg_detections': avg_detections,
-            'avg_ground_truth': avg_ground_truth,
-            'precision': precision,
-            'recall': recall,
-            'f1_score': f1_score,
+            'mean_iou': float(all_ious_np.mean()) if len(all_ious_np) > 0 else 0,
+            'median_iou': float(np.median(all_ious_np)) if len(all_ious_np) > 0 else 0,
+            'mean_confidence': float(all_confidences_np.mean()) if len(all_confidences_np) > 0 else 0,
+            'median_confidence': float(np.median(all_confidences_np)) if len(all_confidences_np) > 0 else 0,
+            'avg_detections': total_detections / total_images if total_images > 0 else 0,
+            'avg_ground_truth': total_ground_truth / total_images if total_images > 0 else 0,
+            'precision': true_positives / total_detections if total_detections > 0 else 0,
+            'recall': true_positives / total_ground_truth if total_ground_truth > 0 else 0,
             'detections_per_image': detections_per_image,
             'iou_distribution': iou_distribution,
             'confidence_distribution': confidence_distribution,
-            'single_dog_precision': single_dog_precision,
-            'single_dog_recall': single_dog_recall,
-            'multi_dog_precision': multi_dog_precision,
-            'multi_dog_recall': multi_dog_recall,
-            'single_dog_metrics': single_dog_metrics,
-            'multi_dog_metrics': multi_dog_metrics
         }
+        
+        # Calculate F1 after precision and recall
+        metrics['f1_score'] = 2 * (metrics['precision'] * metrics['recall']) / (metrics['precision'] + metrics['recall']) if (metrics['precision'] + metrics['recall']) > 0 else 0
+        
+        # Calculate single-dog and multi-dog metrics
+        for prefix, tracker in [('single_dog', single_dog_metrics), ('multi_dog', multi_dog_metrics)]:
+            total_pred = tracker['total_pred']
+            total_gt = tracker['total_gt']
+            metrics[f'{prefix}_precision'] = tracker['true_positives'] / total_pred if total_pred > 0 else 0
+            metrics[f'{prefix}_recall'] = tracker['true_positives'] / total_gt if total_gt > 0 else 0
+        
+        # Update tracking metrics
+        for metric_type in ['precision', 'recall']:
+            self.multi_dog_metrics[f'single_dog_{metric_type}'].append(metrics[f'single_dog_{metric_type}'])
+            self.multi_dog_metrics[f'multi_dog_{metric_type}'].append(metrics[f'multi_dog_{metric_type}'])
+        
+        # Add the detailed trackers to the metrics
+        metrics['single_dog_metrics'] = single_dog_metrics
+        metrics['multi_dog_metrics'] = multi_dog_metrics
+        
+        return metrics
         
     def _calculate_single_iou(self, box1, box2):
         """Calculate IoU between two boxes"""
