@@ -94,12 +94,25 @@ class DogDetector(nn.Module):
         self.anchor_ratios = [0.5, 0.75, 1.0, 1.5]  # Added more ratios for different poses
         self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
-        # Enhanced prediction heads with better initialization
-        self.cls_head = nn.Sequential(
+        # Significantly enhanced classification head with better capacity
+        self.cls_features = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, self.num_anchors_per_cell, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.Dropout(0.2)
+        )
+        
+        # Enhanced final classification layer with deeper processing
+        self.cls_head = nn.Sequential(
+            nn.Conv2d(128, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
+            nn.Dropout(0.2),
+            nn.Conv2d(128, self.num_anchors_per_cell, kernel_size=3, padding=1)
         )
         
         self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
@@ -208,7 +221,8 @@ class DogDetector(nn.Module):
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(features)
-        conf_pred = self.cls_head(features)
+        conf_pred = self.cls_features(features)
+        conf_pred = self.cls_head(conf_pred)
         conf_pred = conf_pred * self.conf_scaling + self.conf_bias
         conf_pred = torch.sigmoid(conf_pred)
         
