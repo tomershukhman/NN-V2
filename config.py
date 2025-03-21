@@ -25,7 +25,7 @@ PATIENCE = 15  # Increased from 10
 MIN_DELTA = 1e-4  # Reduced sensitivity
 
 # Data augmentation parameters
-MIN_SCALE = 0.8  # Increased minimum scale
+MIN_SCALE = 0.7  # Increased to keep more dogs in frame
 MAX_SCALE = 1.2  # Reduced maximum scale
 ROTATION_MAX = 15  # Reduced rotation range
 TRANSLATION_FRAC = 0.1  # Reduced translation
@@ -34,27 +34,27 @@ TRANSLATION_FRAC = 0.1  # Reduced translation
 NUM_CLASSES = 2  # Background and Dog
 FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
 
-# Anchor box configuration - use original settings which work
-ANCHOR_SCALES = [0.5, 1.0, 2.0]
-ANCHOR_RATIOS = [0.5, 1.0, 2.0]
+# Anchor box configuration - expanded for better multi-dog detection
+ANCHOR_SCALES = [0.3, 0.5, 0.8, 1.2, 1.5]  # Added more scales
+ANCHOR_RATIOS = [0.3, 0.5, 0.75, 1.0, 1.5, 2.0]  # Added more ratios for different group poses
 NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
-# Detection parameters
-IOU_THRESHOLD = 0.45  # Increased from 0.4 for better box matching
+# Detection parameters - adjusted for multi-dog scenarios
+IOU_THRESHOLD = 0.4  # Lowered to allow more overlapping dogs
 NEG_POS_RATIO = 3  # Keep existing ratio
 
-# Training thresholds - adjusted for better confidence calibration
-TRAIN_CONFIDENCE_THRESHOLD = 0.35  # Lowered to allow more predictions during training
-TRAIN_NMS_THRESHOLD = 0.5  # Adjusted for better multi-dog detection during training
+# Training thresholds - adjusted for better multi-dog detection
+TRAIN_CONFIDENCE_THRESHOLD = 0.3  # Lowered to allow more predictions during training
+TRAIN_NMS_THRESHOLD = 0.45  # Increased to prevent losing overlapping dogs
 
-# Inference thresholds - fine-tuned for production
+# Inference thresholds - optimized for multi-dog detection
 CONFIDENCE_THRESHOLD = 0.25  # Lowered to catch more valid detections
-NMS_THRESHOLD = 0.4  # Balanced to prevent duplicate detections while allowing overlapping dogs
-MAX_DETECTIONS = 5  # Reduced from 10 to prevent spurious detections
+NMS_THRESHOLD = 0.35  # Increased to allow overlapping dogs
+MAX_DETECTIONS = 10  # Increased from 5 to handle more dogs
 
-# Loss function parameters
-BBOX_LOSS_WEIGHT = 1.0
+# Loss function parameters - balanced for multi-object detection
+BBOX_LOSS_WEIGHT = 1.2  # Increased importance of accurate localization
 CONF_LOSS_WEIGHT = 1.0
 
 # Visualization parameters

@@ -5,13 +5,12 @@ import torch.nn.functional as F  # Added missing import
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Reduce threshold gap for more consistent predictions
-        self.positive_threshold = 0.5  # Back to original
-        self.negative_threshold = 0.3  # Lower for better recall
+        self.positive_threshold = 0.5
+        self.negative_threshold = 0.25  # Lowered to catch more potential dogs
         
-        # Adjusted focal loss parameters
-        self.alpha = 0.5  # Increased from 0.25 for better balance
-        self.gamma = 1.5  # Reduced from 2.0 to prevent over-suppression
+        # Adjusted focal loss parameters for multi-dog scenarios
+        self.alpha = 0.6  # Increased to focus more on positive examples
+        self.gamma = 1.0  # Reduced to prevent over-suppression of hard negatives
         
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs
@@ -64,7 +63,7 @@ class DetectionLoss(nn.Module):
             target_boxes = targets[i]['boxes']
             
             if len(target_boxes) == 0:
-                # Handle empty targets
+                # Handle empty targets with modified background confidence loss
                 conf_loss = -torch.log(1 - conf_pred[i] + 1e-6).mean()
                 bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             else:
@@ -74,49 +73,58 @@ class DetectionLoss(nn.Module):
                 # For each anchor, get IoU with best matching target
                 max_ious, best_target_idx = ious.max(dim=1)
                 
-                # For each target, ensure at least one anchor is assigned
-                _, best_anchor_idx = ious.max(dim=0)
+                # For each target, find best matching anchor
+                best_target_ious, _ = ious.max(dim=0)
                 
-                # Assign positive and negative samples
-                positive_mask = max_ious >= self.positive_threshold
-                positive_mask[best_anchor_idx] = True  # Force best anchors to be positive
+                # For each target, ensure multiple anchors can be assigned if they have good overlap
+                good_ious = ious > self.positive_threshold
                 
+                # Create positive mask considering multiple conditions
+                positive_mask = (max_ious >= self.positive_threshold) | good_ious.any(dim=1)
+                
+                # Create negative mask avoiding any decent overlaps
                 negative_mask = max_ious < self.negative_threshold
                 negative_mask[positive_mask] = False
                 
-                # Calculate confidence loss with modified focal loss
-                conf_target = positive_mask.float()
+                # Calculate IoU-aware confidence targets
+                conf_target = torch.zeros_like(max_ious)
+                conf_target[positive_mask] = torch.clamp(max_ious[positive_mask], min=0.5)
                 
-                # Adjust focal weights for multiple dogs
+                # Apply focal weighting with IoU awareness
                 alpha_factor = torch.ones_like(conf_target) * self.alpha
-                alpha_factor[positive_mask] = 1 - self.alpha  # Inverse alpha for positive samples
+                alpha_factor[positive_mask] = 1 - self.alpha
                 
-                # Calculate focal weight with temperature scaling
-                focal_weight = (1 - conf_pred[i]) * conf_target + conf_pred[i] * (1 - conf_target)
-                focal_weight = focal_weight.pow(self.gamma)
+                focal_weight = (1 - conf_pred[i]).pow(self.gamma)
+                focal_weight[positive_mask] = (1 - conf_pred[i][positive_mask] * max_ious[positive_mask]).pow(self.gamma)
                 
+                # Calculate confidence loss with IoU-aware weighting
                 conf_loss = -(conf_target * torch.log(conf_pred[i] + 1e-6) + 
                             (1 - conf_target) * torch.log(1 - conf_pred[i] + 1e-6))
                 conf_loss = (conf_loss * focal_weight * alpha_factor).mean()
                 
-                # Calculate bbox loss only for positive samples with better scaling
+                # Calculate bbox loss only for positive samples
                 if positive_mask.sum() > 0:
                     matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
                     pred_boxes = bbox_pred[i][positive_mask]
                     
-                    # Use combined IoU and L1 loss for better localization
+                    # Calculate IoU loss for better handling of overlapping boxes
                     iou_loss = self._giou_loss(pred_boxes, matched_target_boxes)
-                    l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none').mean(dim=1)
                     
-                    # Combine losses with adaptive weighting
-                    bbox_loss = (iou_loss + 0.5 * l1_loss).mean()
+                    # L1 loss weighted by IoU to focus on accurate localization
+                    l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none')
+                    l1_loss = (l1_loss * max_ious[positive_mask].unsqueeze(1)).mean(dim=1)
+                    
+                    # Combine losses with adaptive weighting based on number of targets
+                    num_targets = len(target_boxes)
+                    target_weight = torch.sqrt(torch.tensor(num_targets, device=bbox_pred.device))
+                    bbox_loss = (iou_loss * 0.7 + l1_loss * 0.3).mean() * target_weight
                 else:
                     bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             
             conf_losses.append(conf_loss)
             bbox_losses.append(bbox_loss)
         
-        # Average losses across batch
+        # Average losses across batch with count-based scaling
         conf_loss = torch.stack(conf_losses).mean()
         bbox_loss = torch.stack(bbox_losses).mean()
         

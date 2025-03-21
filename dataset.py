@@ -289,29 +289,42 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     os.makedirs(root, exist_ok=True)
     print(f"Using data root directory: {os.path.abspath(root)}")
     
-    # Define Albumentations transforms for training
+    # Define Albumentations transforms for training with enhanced multi-dog detection
     train_transform = A.Compose([
-        # More aggressive random crop to help with large dog detection
+        # Less aggressive random crop to preserve multiple dogs
         A.RandomResizedCrop(
             size=(224, 224), 
-            scale=(0.6, 1.0),
-            ratio=(0.75, 1.33),
+            scale=(0.7, 1.0),  # Increased min scale to keep more dogs in frame
+            ratio=(0.8, 1.25),  # Adjusted for better group captures
             interpolation=1,
             p=1.0
         ),
+        # Add grid distortion to help with dog clusters
+        A.GridDistortion(
+            num_steps=5,
+            distort_limit=0.3,
+            p=0.3
+        ),
         A.HorizontalFlip(p=0.5),
         A.Rotate(limit=15, p=0.3),
-        # Color augmentations for better normalization and robustness
+        # Enhanced color augmentations with regional variations
         A.OneOf([
             A.RandomBrightnessContrast(
                 brightness_limit=0.3,
                 contrast_limit=0.3,
+                brightness_by_max=True,  # This helps distinguish overlapping dogs
                 p=1.0
             ),
-            A.RGBShift(
-                r_shift_limit=15,
-                g_shift_limit=15,
-                b_shift_limit=15,
+            # Add regional contrast variation
+            A.CoarseDropout(
+                max_holes=8,
+                max_height=30,
+                max_width=30,
+                min_holes=2,
+                min_height=10,
+                min_width=10,
+                fill_value=0,
+                mask_fill_value=None,
                 p=1.0
             ),
             A.HueSaturationValue(
@@ -320,27 +333,31 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
                 val_shift_limit=10, 
                 p=1.0
             ),
-        ], p=0.5),
-        # Add perspective transforms to simulate different viewpoints
+        ], p=0.6),  # Increased probability
+        # Multi-scale augmentations for better group detection
+        A.OneOf([
+            # Added more scale variations
+            A.RandomScale(scale_limit=(-0.3, 0.5), p=1.0),  # Increased upper limit
+            A.RandomScale(scale_limit=(0.2, 0.7), p=1.0),   # Added larger scale option
+            # Add perspective variation
+            A.Perspective(scale=(0.05, 0.1), p=1.0),
+        ], p=0.5),  # Increased probability
+        # Add blur variations to help with overlapping dogs
         A.OneOf([
             A.GaussianBlur(blur_limit=(3, 7), p=1.0),
             A.MotionBlur(blur_limit=(3, 7), p=1.0),
+            A.MedianBlur(blur_limit=5, p=1.0),
         ], p=0.2),
-        # Scale-specific augmentations
-        A.OneOf([
-            A.RandomScale(scale_limit=(-0.3, 0.1), p=1.0),
-            A.RandomScale(scale_limit=(0.1, 0.3), p=1.0),
-        ], p=0.3),
         # Normalize and convert to tensor
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
         label_fields=['labels'],
-        min_visibility=0.3  # Ensure boxes remain mostly visible
+        min_visibility=0.3
     ))
     
-    # Define Albumentations transforms for validation - keep simple for consistent evaluation
+    # Keep validation transform simple but ensure consistent sizing
     val_transform = A.Compose([
         A.Resize(height=224, width=224),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -375,6 +392,7 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     print(f"Train set: {len(train_dataset)} images with dogs")
     print(f"Val set: {len(val_dataset)} images with dogs")
     
+    # Adjust dataloader settings for better multi-dog handling
     num_workers = min(8, NUM_WORKERS)
     
     train_loader = DataLoader(
@@ -382,9 +400,9 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         batch_size=batch_size,
         shuffle=True,
         num_workers=num_workers,
-        pin_memory=True,  # Ensure pinned memory
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=2,  # Prefetch 2 batches per worker
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
         collate_fn=collate_fn,
         drop_last=True
     )
