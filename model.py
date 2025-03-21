@@ -6,7 +6,7 @@ from torchvision.models import ResNet18_Weights
 from torchvision.ops import nms
 from config import (
     CONFIDENCE_THRESHOLD, NMS_THRESHOLD, MAX_DETECTIONS,
-    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD
+    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD, ANCHOR_SCALES, ANCHOR_RATIOS
 )
 import math
 
@@ -89,9 +89,9 @@ class DogDetector(nn.Module):
             nn.Dropout(0.25)  # Increased dropout
         )
         
-        # Expanded anchor configuration for better coverage of different dog sizes and poses
-        self.anchor_scales = [0.3, 0.5, 0.8, 1.2]  # Added more scales for diverse sizes
-        self.anchor_ratios = [0.5, 0.75, 1.0, 1.5]  # Added more ratios for different poses
+        # Expanded anchor configuration from config.py
+        self.anchor_scales = ANCHOR_SCALES
+        self.anchor_ratios = ANCHOR_RATIOS
         self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
         # Enhanced prediction heads with better initialization
@@ -110,9 +110,12 @@ class DogDetector(nn.Module):
         # Generate and register anchor boxes
         self.register_buffer('default_anchors', self._generate_anchors())
         
-        # Add confidence calibration parameters with better initialization
-        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 1.5))  # Higher initial scaling
-        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.5))  # Negative bias to reduce false positives
+        # Improved confidence calibration parameters for multi-object detection
+        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 1.3))  # Slightly reduced from 1.5
+        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.3))    # Reduced negative bias
+        
+        # Add separate calibration for multi-object scenarios
+        self.register_parameter('multi_obj_conf_boost', nn.Parameter(torch.ones(1) * 0.2))  # Boost for multiple objects
 
     def _initialize_weights(self):
         for m in [self.fpn_convs, self.smooth_convs, self.det_conv1, self.det_conv2, self.bbox_head]:
@@ -240,26 +243,38 @@ class DogDetector(nn.Module):
         results = []
         for boxes, scores in zip(bbox_pred, conf_pred):
             # Filter by confidence
-            mask = scores > (TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD)
+            confidence_threshold = TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD
+            mask = scores > confidence_threshold
             boxes = boxes[mask]
             scores = scores[mask]
             
             if len(boxes) > 0:
                 # Apply NMS
+                nms_threshold = TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
                 keep_idx = nms(
                     boxes, 
                     scores, 
-                    TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
+                    nms_threshold
                 )
+                
+                # If we have multiple detections after NMS, boost their confidence
+                if len(keep_idx) > 1:
+                    # Apply a small boost to all scores when multiple objects are detected
+                    # This helps with the multi-dog detection confidence problem
+                    adjusted_scores = scores[keep_idx] * (1 + self.multi_obj_conf_boost)
+                    # Clamp to ensure we don't exceed 1.0
+                    scores = torch.clamp(adjusted_scores, max=1.0)
+                else:
+                    scores = scores[keep_idx]
+                    
+                boxes = boxes[keep_idx]
                 
                 # Limit detections
                 if len(keep_idx) > MAX_DETECTIONS:
-                    scores_for_topk = scores[keep_idx]
+                    scores_for_topk = scores
                     _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
-                    keep_idx = keep_idx[topk_indices]
-                
-                boxes = boxes[keep_idx]
-                scores = scores[keep_idx]
+                    boxes = boxes[topk_indices]
+                    scores = scores[topk_indices]
             
             # Ensure at least one prediction
             if len(boxes) == 0:
