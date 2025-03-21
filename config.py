@@ -1,6 +1,4 @@
 from typing import Literal
-
-
 import os
 import torch
 from device import get_device
@@ -34,28 +32,28 @@ TRANSLATION_FRAC = 0.1  # Reduced translation
 NUM_CLASSES = 2  # Background and Dog
 FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
 
-# Anchor box configuration - use original settings which work
-ANCHOR_SCALES = [0.5, 1.0, 2.0]
-ANCHOR_RATIOS = [0.5, 1.0, 2.0]
+# Anchor box configuration - enhanced with more diverse scales and ratios
+ANCHOR_SCALES = [0.25, 0.4, 0.6, 0.8, 1.2]  # Better scaled steps for diverse sizes
+ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5, 2.0]  # Enhanced ratios for different poses
 NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
 # Detection parameters
-IOU_THRESHOLD = 0.45  # Increased from 0.4 for better box matching
+IOU_THRESHOLD = 0.4  # Optimal threshold for dog detection
 NEG_POS_RATIO = 3  # Keep existing ratio
 
-# Training thresholds - adjusted for better confidence calibration
-TRAIN_CONFIDENCE_THRESHOLD = 0.35  # Lowered to allow more predictions during training
+# Training thresholds - optimized for better confidence calibration
+TRAIN_CONFIDENCE_THRESHOLD = 0.3  # Lower threshold to detect more potential dogs during training
 TRAIN_NMS_THRESHOLD = 0.5  # Adjusted for better multi-dog detection during training
 
-# Inference thresholds - fine-tuned for production
-CONFIDENCE_THRESHOLD = 0.25  # Lowered to catch more valid detections
-NMS_THRESHOLD = 0.4  # Balanced to prevent duplicate detections while allowing overlapping dogs
-MAX_DETECTIONS = 5  # Reduced from 10 to prevent spurious detections
+# Inference thresholds - optimized for better dog detection
+CONFIDENCE_THRESHOLD = 0.2  # Lowered to improve dog detection recall
+NMS_THRESHOLD = 0.45  # Better balance between duplicate suppression and distinct dog detection
+MAX_DETECTIONS = 8  # Increased to allow more dogs in a single frame
 
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0
-CONF_LOSS_WEIGHT = 1.0
+CONF_LOSS_WEIGHT = 1.2  # Slightly increased to improve confidence scores
 
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20

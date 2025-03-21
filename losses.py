@@ -5,13 +5,13 @@ import torch.nn.functional as F  # Added missing import
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Reduce threshold gap for more consistent predictions
-        self.positive_threshold = 0.5  # Back to original
-        self.negative_threshold = 0.3  # Lower for better recall
+        # Optimize thresholds for better detection
+        self.positive_threshold = 0.5  # Maintain original positive threshold
+        self.negative_threshold = 0.35  # Raised slightly to reduce false negatives
         
-        # Adjusted focal loss parameters
-        self.alpha = 0.5  # Increased from 0.25 for better balance
-        self.gamma = 1.5  # Reduced from 2.0 to prevent over-suppression
+        # Enhanced focal loss parameters for better confidence learning
+        self.alpha = 0.6  # Increased to give more weight to positive samples
+        self.gamma = 1.5  # Moderate gamma to avoid over-suppression
         
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs
@@ -47,7 +47,7 @@ class DetectionLoss(nn.Module):
                 'conf_pred': conf_pred,
                 'anchors': default_anchors
             }
-
+        
         # Extract predictions
         bbox_pred = predictions['bbox_pred']
         conf_pred = predictions['conf_pred']
@@ -64,7 +64,7 @@ class DetectionLoss(nn.Module):
             target_boxes = targets[i]['boxes']
             
             if len(target_boxes) == 0:
-                # Handle empty targets
+                # Handle empty targets with smooth focal loss
                 conf_loss = -torch.log(1 - conf_pred[i] + 1e-6).mean()
                 bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             else:
@@ -81,35 +81,59 @@ class DetectionLoss(nn.Module):
                 positive_mask = max_ious >= self.positive_threshold
                 positive_mask[best_anchor_idx] = True  # Force best anchors to be positive
                 
+                # For targets with lower IoU, ensure some anchors are assigned
+                for target_idx in range(len(target_boxes)):
+                    # Find top-k anchors per target
+                    if target_idx not in best_target_idx[positive_mask]:
+                        target_ious = ious[:, target_idx]
+                        # Get top 2 matching anchors that aren't already positive
+                        candidate_anchors = torch.where((target_ious >= 0.3) & ~positive_mask)[0]
+                        if len(candidate_anchors) > 0:
+                            # Take top 2 at most
+                            k = min(2, len(candidate_anchors))
+                            _, top_k_indices = torch.topk(target_ious[candidate_anchors], k=k)
+                            top_anchors = candidate_anchors[top_k_indices]
+                            positive_mask[top_anchors] = True
+                
                 negative_mask = max_ious < self.negative_threshold
                 negative_mask[positive_mask] = False
                 
-                # Calculate confidence loss with modified focal loss
+                # Calculate confidence loss with enhanced focal loss
                 conf_target = positive_mask.float()
                 
-                # Adjust focal weights for multiple dogs
+                # Adaptive focal loss weighting based on IoU quality
+                iou_weights = torch.ones_like(conf_target)
+                iou_weights[positive_mask] = torch.pow(max_ious[positive_mask], 2)  # Higher weight for better IoU
+                
+                # Alpha weighting for class imbalance
                 alpha_factor = torch.ones_like(conf_target) * self.alpha
                 alpha_factor[positive_mask] = 1 - self.alpha  # Inverse alpha for positive samples
                 
-                # Calculate focal weight with temperature scaling
-                focal_weight = (1 - conf_pred[i]) * conf_target + conf_pred[i] * (1 - conf_target)
-                focal_weight = focal_weight.pow(self.gamma)
+                # Calculate focal weight
+                pt = torch.where(conf_target == 1, conf_pred[i], 1 - conf_pred[i])
+                focal_weight = torch.pow(1 - pt, self.gamma)
                 
-                conf_loss = -(conf_target * torch.log(conf_pred[i] + 1e-6) + 
-                            (1 - conf_target) * torch.log(1 - conf_pred[i] + 1e-6))
-                conf_loss = (conf_loss * focal_weight * alpha_factor).mean()
+                # Combine weights
+                combined_weight = focal_weight * alpha_factor * iou_weights
+                
+                # Binary cross entropy with weights
+                bce_loss = F.binary_cross_entropy(conf_pred[i], conf_target, reduction='none')
+                conf_loss = (bce_loss * combined_weight).sum() / (combined_weight.sum() + 1e-6)
                 
                 # Calculate bbox loss only for positive samples with better scaling
                 if positive_mask.sum() > 0:
                     matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
                     pred_boxes = bbox_pred[i][positive_mask]
                     
-                    # Use combined IoU and L1 loss for better localization
-                    iou_loss = self._giou_loss(pred_boxes, matched_target_boxes)
-                    l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none').mean(dim=1)
+                    # Use Distance-IoU loss for better localization
+                    diou_loss = self._diou_loss(pred_boxes, matched_target_boxes)
                     
-                    # Combine losses with adaptive weighting
-                    bbox_loss = (iou_loss + 0.5 * l1_loss).mean()
+                    # Scale loss based on prediction confidence to prioritize confident predictions
+                    conf_values = conf_pred[i][positive_mask]
+                    # Weighted loss gives more importance to high-confidence predictions
+                    weighted_diou_loss = diou_loss * conf_values
+                    
+                    bbox_loss = weighted_diou_loss.mean()
                 else:
                     bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             
@@ -130,28 +154,65 @@ class DetectionLoss(nn.Module):
         }
     
     def _calculate_box_iou(self, boxes1, boxes2):
-        """Calculate IoU between two sets of boxes"""
-        # Convert to x1y1x2y2 format if normalized
-        boxes1 = boxes1.clone()
-        boxes2 = boxes2.clone()
-        
-        # Calculate intersection areas
-        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
-        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
-        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
-        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
-        
-        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-        
-        # Calculate union areas
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-        union = area1[:, None] + area2 - intersection
-        
-        return intersection / (union + 1e-6)
+        """Calculate IoU between two sets of boxes with safe broadcasting"""
+        # Handle different dimensions properly
+        if boxes1.dim() == 2 and boxes2.dim() == 2:
+            # Get the coordinates
+            boxes1_area = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+            boxes2_area = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+            
+            # Calculate intersection
+            left = torch.max(boxes1[:, None, 0], boxes2[:, 0])  # [N,M]
+            top = torch.max(boxes1[:, None, 1], boxes2[:, 1])   # [N,M]
+            right = torch.min(boxes1[:, None, 2], boxes2[:, 2]) # [N,M]
+            bottom = torch.min(boxes1[:, None, 3], boxes2[:, 3]) # [N,M]
+            
+            width = (right - left).clamp(min=0)  # [N,M]
+            height = (bottom - top).clamp(min=0)  # [N,M]
+            intersection = width * height  # [N,M]
+            
+            # Calculate union without using transpose
+            union = boxes1_area[:, None] + boxes2_area - intersection
+            
+            # Calculate IoU
+            iou = intersection / (union + 1e-6)  # [N,M]
+            
+            return iou
+        else:
+            # Fall back to element-wise calculation for different dimensions
+            iou_matrix = torch.zeros(boxes1.size(0), boxes2.size(0), device=boxes1.device)
+            for i in range(boxes1.size(0)):
+                for j in range(boxes2.size(0)):
+                    iou_matrix[i, j] = self._calculate_single_iou(boxes1[i], boxes2[j])
+            return iou_matrix
     
-    def _giou_loss(self, boxes1, boxes2):
-        """Calculate GIoU loss between boxes"""
+    def _calculate_single_iou(self, box1, box2):
+        """Calculate IoU between two individual boxes"""
+        # Calculate intersection
+        x1 = torch.max(box1[0], box2[0])
+        y1 = torch.max(box1[1], box2[1])
+        x2 = torch.min(box1[2], box2[2])
+        y2 = torch.min(box1[3], box2[3])
+        
+        # Calculate intersection area
+        width = (x2 - x1).clamp(min=0)
+        height = (y2 - y1).clamp(min=0)
+        intersection = width * height
+        
+        # Calculate union area
+        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
+        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
+        union = box1_area + box2_area - intersection
+        
+        # Calculate IoU
+        iou = intersection / (union + 1e-6)
+        return iou
+    
+    def _diou_loss(self, boxes1, boxes2):
+        """
+        Distance-IoU Loss for better bounding box regression
+        Directly optimizes the object detection evaluation metric
+        """
         # Calculate IoU
         x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
         y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
@@ -166,15 +227,25 @@ class DetectionLoss(nn.Module):
         
         iou = intersection / (union + 1e-6)
         
-        # Calculate the smallest enclosing box
+        # Calculate centers
+        c1_x = (boxes1[:, 0] + boxes1[:, 2]) / 2
+        c1_y = (boxes1[:, 1] + boxes1[:, 3]) / 2
+        c2_x = (boxes2[:, 0] + boxes2[:, 2]) / 2
+        c2_y = (boxes2[:, 1] + boxes2[:, 3]) / 2
+        
+        # Calculate distance between centers
+        center_dist = torch.sqrt((c1_x - c2_x)**2 + (c1_y - c2_y)**2)
+        
+        # Calculate diagonal distance of the smallest enclosing box
         enc_x1 = torch.min(boxes1[:, 0], boxes2[:, 0])
         enc_y1 = torch.min(boxes1[:, 1], boxes2[:, 1])
         enc_x2 = torch.max(boxes1[:, 2], boxes2[:, 2])
         enc_y2 = torch.max(boxes1[:, 3], boxes2[:, 3])
         
-        enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
+        enc_diag = torch.sqrt((enc_x2 - enc_x1)**2 + (enc_y2 - enc_y1)**2)
         
-        # Calculate GIoU
-        giou = iou - (enc_area - union) / (enc_area + 1e-6)
+        # Calculate DIoU
+        diou = iou - (center_dist**2) / (enc_diag**2 + 1e-6)
         
-        return 1 - giou
+        # DIoU loss
+        return 1 - diou
