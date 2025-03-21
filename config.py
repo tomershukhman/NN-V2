@@ -1,11 +1,14 @@
 import os
 import torch
+from device import get_device
 
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
 OUTPUT_ROOT = "outputs"
 DATA_SET_TO_USE = 0.1  # Use 10% of available data for faster iteration
 TRAIN_VAL_SPLIT = 0.85  # Slightly increased training data proportion
+
+DEVICE = get_device()
 
 # Training parameters
 BATCH_SIZE = 16
@@ -55,3 +58,7 @@ CONF_LOSS_WEIGHT = 1.0
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20
 TENSORBOARD_VAL_IMAGES = 20
+
+if DEVICE == torch.device("cuda"):
+    DATA_SET_TO_USE = 1.0
+    #BATCH_SIZE = 32  # Reduced from 64 for more stable training
