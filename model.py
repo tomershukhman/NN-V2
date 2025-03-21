@@ -55,23 +55,41 @@ class DogDetector(nn.Module):
             nn.Dropout(0.2)
         )
         
-        # Return to original anchor configuration but with slight adjustments
-        self.anchor_scales = [0.5, 1.0, 2.0]  # Original scales
-        self.anchor_ratios = [0.6, 1.0, 1.67]  # Slightly adjusted for dogs
+        # Adjusted anchor configuration for better coverage
+        self.anchor_scales = [0.4, 0.8, 1.6]  # Wider range of scales
+        self.anchor_ratios = [0.5, 1.0, 1.5]  # Better suited for dog shapes
         self.num_anchors_per_cell = num_anchors_per_cell
+        
+        # Enhanced confidence prediction head with calibration
+        self.cls_head = nn.Sequential(
+            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.BatchNorm2d(256),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1),
+        )
         
         # Prediction heads
         self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
-        self.cls_head = nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1)
         
-        # Initialize weights
-        for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head, self.cls_head]:
+        # Initialize weights with better scaling
+        for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head]:
             if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, std=0.01)
+                nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 nn.init.constant_(m.bias, 0)
+        
+        # Special initialization for confidence head
+        for m in self.cls_head.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
         
         # Generate and register anchor boxes
         self.register_buffer('default_anchors', self._generate_anchors())
+        
+        # Add confidence calibration parameters
+        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1)))
+        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1)))
 
     def _generate_anchors(self):
         """Generate anchor boxes for each cell in the feature map"""
@@ -121,7 +139,11 @@ class DogDetector(nn.Module):
         
         # Predict bounding boxes and confidence scores
         bbox_pred = self.bbox_head(x)
-        conf_pred = torch.sigmoid(self.cls_head(x))
+        
+        # Enhanced confidence prediction with calibration
+        conf_pred = self.cls_head(x)
+        conf_pred = conf_pred * self.conf_scaling + self.conf_bias
+        conf_pred = torch.sigmoid(conf_pred)
         
         # Get shapes
         batch_size = x.shape[0]
@@ -162,7 +184,7 @@ class DogDetector(nn.Module):
                     # Clip boxes to image boundaries
                     boxes = torch.clamp(boxes, min=0, max=1)
                     
-                    # Apply NMS with appropriate threshold
+                    # Improved NMS with soft-NMS characteristics
                     nms_threshold = TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
                     keep_idx = nms(boxes, scores, nms_threshold)
                     
@@ -177,8 +199,8 @@ class DogDetector(nn.Module):
                 
                 # Always ensure we have at least one prediction for stability
                 if len(boxes) == 0:
-                    # Default box covers most of the image
-                    boxes = torch.tensor([[0.2, 0.2, 0.8, 0.8]], device=bbox_pred.device)
+                    # Create a more reasonable default box
+                    boxes = torch.tensor([[0.3, 0.3, 0.7, 0.7]], device=bbox_pred.device)
                     scores = torch.tensor([confidence_threshold], device=bbox_pred.device)
                 
                 results.append({

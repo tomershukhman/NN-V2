@@ -36,17 +36,17 @@ NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
 # Detection parameters
-IOU_THRESHOLD = 0.4  # Threshold for box matching during training
-NEG_POS_RATIO = 3  # Ratio of negative to positive examples 
+IOU_THRESHOLD = 0.45  # Increased from 0.4 for better box matching
+NEG_POS_RATIO = 3  # Keep existing ratio
 
-# Training thresholds
-TRAIN_CONFIDENCE_THRESHOLD = 0.4  # Separate threshold for training
-TRAIN_NMS_THRESHOLD = 0.6  # Higher NMS threshold during training
+# Training thresholds - adjusted for better confidence calibration
+TRAIN_CONFIDENCE_THRESHOLD = 0.35  # Lowered to allow more predictions during training
+TRAIN_NMS_THRESHOLD = 0.5  # Adjusted for better multi-dog detection during training
 
-# Inference thresholds
-CONFIDENCE_THRESHOLD = 0.3  # Lowered from 0.5 for better multi-dog detection
-NMS_THRESHOLD = 0.45  # Increased from 0.3 to allow overlapping dogs
-MAX_DETECTIONS = 10  # Increased from 5 to handle multiple dogs better
+# Inference thresholds - fine-tuned for production
+CONFIDENCE_THRESHOLD = 0.25  # Lowered to catch more valid detections
+NMS_THRESHOLD = 0.4  # Balanced to prevent duplicate detections while allowing overlapping dogs
+MAX_DETECTIONS = 5  # Reduced from 10 to prevent spurious detections
 
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0
