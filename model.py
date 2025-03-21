@@ -11,7 +11,7 @@ from config import (
 import math
 
 class DogDetector(nn.Module):
-    def __init__(self, num_anchors_per_cell=9, feature_map_size=7):
+    def __init__(self, num_anchors_per_cell=12, feature_map_size=7):
         super(DogDetector, self).__init__()
         
         # Load pretrained ResNet18 backbone
@@ -20,25 +20,47 @@ class DogDetector(nn.Module):
         # Remove the last two layers (avg pool and fc)
         self.backbone = nn.Sequential(*list(backbone.children())[:-2])
         
-        # Store feature map size
+        # Store feature map size and input size
         self.feature_map_size = feature_map_size
+        self.input_size = (224, 224)  # Standard input size
         
-        # Freeze the first few layers of ResNet18
-        for param in list(self.backbone.parameters())[:-6]:
+        # Freeze only the first few layers of ResNet18 for better feature extraction
+        for param in list(self.backbone.parameters())[:-8]:  # Unfreeze more layers
             param.requires_grad = False
         
-        # FPN-like feature pyramid with fixed pooling
-        self.lateral_conv = nn.Conv2d(512, 256, kernel_size=1)
-        self.lateral_bn = nn.BatchNorm2d(256)
-        self.smooth_conv = nn.Conv2d(256, 256, kernel_size=3, padding=1)
-        self.smooth_bn = nn.BatchNorm2d(256)
+        # Enhanced FPN with multi-scale features
+        self.fpn_convs = nn.ModuleDict({
+            'p5': nn.Conv2d(512, 256, kernel_size=1),
+            'p4': nn.Conv2d(256, 256, kernel_size=1),
+            'p3': nn.Conv2d(128, 256, kernel_size=1)
+        })
         
-        # Replace adaptive pooling with fixed pooling
-        self.pool = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
-            nn.BatchNorm2d(256),
+        self.fpn_bns = nn.ModuleDict({
+            'p5': nn.BatchNorm2d(256),
+            'p4': nn.BatchNorm2d(256),
+            'p3': nn.BatchNorm2d(256)
+        })
+        
+        # Smooth convs for feature refinement
+        self.smooth_convs = nn.ModuleDict({
+            'p5': nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            'p4': nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            'p3': nn.Conv2d(256, 256, kernel_size=3, padding=1)
+        })
+        
+        self.smooth_bns = nn.ModuleDict({
+            'p5': nn.BatchNorm2d(256),
+            'p4': nn.BatchNorm2d(256),
+            'p3': nn.BatchNorm2d(256)
+        })
+
+        # Improved detection head with attention mechanism
+        self.attention = nn.Sequential(
+            nn.Conv2d(256, 64, kernel_size=1),
+            nn.BatchNorm2d(64),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=2, stride=2)
+            nn.Conv2d(64, 256, kernel_size=1),
+            nn.Sigmoid()
         )
         
         # Detection head with improved regularization
@@ -46,50 +68,51 @@ class DogDetector(nn.Module):
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2)
+            nn.Dropout(0.25)  # Increased dropout
         )
         self.conv2 = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.Dropout(0.2)
+            nn.Dropout(0.25)  # Increased dropout
         )
         
-        # Adjusted anchor configuration for better coverage
-        self.anchor_scales = [0.4, 0.8, 1.6]  # Wider range of scales
-        self.anchor_ratios = [0.5, 1.0, 1.5]  # Better suited for dog shapes
-        self.num_anchors_per_cell = num_anchors_per_cell
+        # Expanded anchor configuration for better coverage of different dog sizes and poses
+        self.anchor_scales = [0.3, 0.5, 0.8, 1.2]  # Added more scales for diverse sizes
+        self.anchor_ratios = [0.5, 0.75, 1.0, 1.5]  # Added more ratios for different poses
+        self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
-        # Enhanced confidence prediction head with calibration
+        # Enhanced prediction heads with better initialization
         self.cls_head = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
             nn.ReLU(inplace=True),
-            nn.Conv2d(256, num_anchors_per_cell, kernel_size=3, padding=1),
+            nn.Conv2d(256, self.num_anchors_per_cell, kernel_size=3, padding=1),
         )
         
-        # Prediction heads
-        self.bbox_head = nn.Conv2d(256, num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
         
-        # Initialize weights with better scaling
-        for m in [self.lateral_conv, self.smooth_conv, self.conv1, self.conv2, self.bbox_head]:
+        # Initialize weights
+        self._initialize_weights()
+        
+        # Generate and register anchor boxes
+        self.register_buffer('default_anchors', self._generate_anchors())
+        
+        # Add confidence calibration parameters with better initialization
+        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 1.5))  # Higher initial scaling
+        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.5))  # Negative bias to reduce false positives
+
+    def _initialize_weights(self):
+        for m in [self.fpn_convs, self.smooth_convs, self.conv1, self.conv2, self.bbox_head]:
             if isinstance(m, nn.Conv2d):
                 nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 nn.init.constant_(m.bias, 0)
         
-        # Special initialization for confidence head
         for m in self.cls_head.modules():
             if isinstance(m, nn.Conv2d):
                 nn.init.normal_(m.weight, mean=0.0, std=0.01)
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-        
-        # Generate and register anchor boxes
-        self.register_buffer('default_anchors', self._generate_anchors())
-        
-        # Add confidence calibration parameters
-        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1)))
-        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1)))
 
     def _generate_anchors(self):
         """Generate anchor boxes for each cell in the feature map"""
@@ -115,10 +138,25 @@ class DogDetector(nn.Module):
         features = self.backbone(x)
         
         # FPN-like feature processing with fixed pooling
-        lateral = self.lateral_conv(features)
-        lateral = self.lateral_bn(lateral)
-        features = self.smooth_conv(lateral)
-        features = self.smooth_bn(features)
+        p5 = self.fpn_convs['p5'](features)
+        p5 = self.fpn_bns['p5'](p5)
+        p4 = self.fpn_convs['p4'](features)
+        p4 = self.fpn_bns['p4'](p4)
+        p3 = self.fpn_convs['p3'](features)
+        p3 = self.fpn_bns['p3'](p3)
+        
+        p5 = self.smooth_convs['p5'](p5)
+        p5 = self.smooth_bns['p5'](p5)
+        p4 = self.smooth_convs['p4'](p4)
+        p4 = self.smooth_bns['p4'](p4)
+        p3 = self.smooth_convs['p3'](p3)
+        p3 = self.smooth_bns['p3'](p3)
+        
+        features = p5 + p4 + p3
+        
+        # Apply attention mechanism
+        attention = self.attention(features)
+        features = features * attention
         
         # Apply fixed-size pooling operations until we reach desired size
         while features.shape[-1] > self.feature_map_size:
