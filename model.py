@@ -75,18 +75,37 @@ class DogDetector(nn.Module):
             nn.Sigmoid()
         )
         
-        # Detection head with improved regularization
+        # Additional global context layers for improved confidence prediction
+        self.global_avg_pool = nn.AdaptiveAvgPool2d((1, 1))
+        self.global_max_pool = nn.AdaptiveMaxPool2d((1, 1))
+        
+        # Global context feature extractor - helps with overall scene understanding
+        # Corrected output dimension to 32 to match the concatenation in det_conv2
+        self.global_context = nn.Sequential(
+            nn.Linear(1024, 512),
+            nn.LayerNorm(512),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(512, 256),
+            nn.LayerNorm(256),
+            nn.GELU(),
+            nn.Dropout(0.3),
+            nn.Linear(256, 32)  # Changed to output 32 features
+        )
+        
+        # Enhanced detection head with improved regularization and capacity
         self.det_conv1 = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.25)  # Increased dropout
+            nn.GELU(),  # GELU instead of ReLU
+            nn.Dropout(0.3)
         )
+        
         self.det_conv2 = nn.Sequential(
-            nn.Conv2d(256, 256, kernel_size=3, padding=1),
+            nn.Conv2d(256 + 32, 256, kernel_size=3, padding=1),  # +32 for global context
             nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Dropout(0.25)  # Increased dropout
+            nn.GELU(),  # GELU instead of ReLU
+            nn.Dropout(0.3)
         )
         
         # Expanded anchor configuration for better coverage of different dog sizes and poses
@@ -94,15 +113,21 @@ class DogDetector(nn.Module):
         self.anchor_ratios = [0.5, 0.75, 1.0, 1.5]  # Added more ratios for different poses
         self.num_anchors_per_cell = len(self.anchor_scales) * len(self.anchor_ratios)
         
-        # Enhanced prediction heads with better initialization
-        self.cls_head = nn.Sequential(
+        # Enhanced prediction heads with deeper architecture for confidence
+        self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        
+        # Significantly enhanced classification head
+        self.cls_features = nn.Sequential(
             nn.Conv2d(256, 256, kernel_size=3, padding=1),
             nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            nn.Conv2d(256, self.num_anchors_per_cell, kernel_size=3, padding=1),
+            nn.GELU(),
+            nn.Conv2d(256, 128, kernel_size=3, padding=1),
+            nn.BatchNorm2d(128),
+            nn.GELU(),
         )
         
-        self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
+        # Final classification layer - separate convolution per anchor
+        self.cls_head = nn.Conv2d(128, self.num_anchors_per_cell, kernel_size=3, padding=1)
         
         # Initialize weights
         self._initialize_weights()
@@ -111,21 +136,25 @@ class DogDetector(nn.Module):
         self.register_buffer('default_anchors', self._generate_anchors())
         
         # Add confidence calibration parameters with better initialization
-        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 1.5))  # Higher initial scaling
-        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.5))  # Negative bias to reduce false positives
-
+        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 2.0))  # Higher initial scaling
+        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.7))  # More negative bias to reduce false positives
+    
     def _initialize_weights(self):
-        for m in [self.fpn_convs, self.smooth_convs, self.det_conv1, self.det_conv2, self.bbox_head]:
+        # Enhanced initialization for better convergence
+        for m in self.modules():
             if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, mean=0.0, std=0.01)
-                nn.init.constant_(m.bias, 0)
-        
-        for m in self.cls_head.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.normal_(m.weight, mean=0.0, std=0.01)
+                # Improved weight initialization for convolutions
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
                 if m.bias is not None:
                     nn.init.constant_(m.bias, 0)
-
+            elif isinstance(m, nn.BatchNorm2d):
+                nn.init.constant_(m.weight, 1)
+                nn.init.constant_(m.bias, 0)
+            elif isinstance(m, nn.Linear):
+                nn.init.normal_(m.weight, std=0.01)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+    
     def _generate_anchors(self):
         """Generate anchor boxes for each cell in the feature map"""
         anchors = []
@@ -157,6 +186,12 @@ class DogDetector(nn.Module):
         c3 = self.layer2(x)      # 128 channels
         c4 = self.layer3(c3)     # 256 channels
         c5 = self.layer4(c4)     # 512 channels
+        
+        # Create global context features from high-level representation
+        global_avg_features = self.global_avg_pool(c5).flatten(1)
+        global_max_features = self.global_max_pool(c5).flatten(1)
+        global_features = torch.cat([global_avg_features, global_max_features], dim=1)
+        global_context = self.global_context(global_features)
         
         # FPN-like feature processing
         p5 = self.fpn_convs['p5'](c5)
@@ -202,14 +237,31 @@ class DogDetector(nn.Module):
                 align_corners=False
             )
         
-        # Detection head processing
-        features = self.det_conv1(features)
-        features = self.det_conv2(features)
+        # Process features with initial detection head
+        features_det = self.det_conv1(features)
         
-        # Predict bounding boxes and confidence scores
-        bbox_pred = self.bbox_head(features)
-        conf_pred = self.cls_head(features)
-        conf_pred = conf_pred * self.conf_scaling + self.conf_bias
+        # Inject global context to improve spatial feature understanding
+        # Reshape global context for proper fusion with spatial features
+        batch_size = features.shape[0]
+        global_context_spatial = global_context.view(batch_size, -1, 1, 1).expand(
+            -1, -1, features_det.shape[2], features_det.shape[3]
+        ) 
+        
+        # Concatenate global context with spatial features
+        features_with_context = torch.cat([features_det, global_context_spatial], dim=1)
+        
+        # Continue processing features with enhanced context
+        features_det = self.det_conv2(features_with_context)
+        
+        # Process features for bbox prediction
+        bbox_pred = self.bbox_head(features_det)
+        
+        # Process features for classification with enhanced architecture
+        cls_features = self.cls_features(features_det)
+        conf_pred_raw = self.cls_head(cls_features) 
+        
+        # Apply learnable confidence calibration for better confidence scores
+        conf_pred = conf_pred_raw * self.conf_scaling + self.conf_bias
         conf_pred = torch.sigmoid(conf_pred)
         
         # Get shapes
