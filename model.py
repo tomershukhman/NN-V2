@@ -17,15 +17,18 @@ class DogDetector(nn.Module):
         # Load pretrained ResNet18 backbone
         backbone = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
         
-        # Remove the last two layers (avg pool and fc)
-        self.backbone = nn.Sequential(*list(backbone.children())[:-2])
+        # Store intermediate layers for FPN
+        self.layer1 = backbone.layer1  # 64 channels
+        self.layer2 = backbone.layer2  # 128 channels
+        self.layer3 = backbone.layer3  # 256 channels
+        self.layer4 = backbone.layer4  # 512 channels
         
         # Store feature map size and input size
         self.feature_map_size = feature_map_size
         self.input_size = (224, 224)  # Standard input size
         
-        # Freeze only the first few layers of ResNet18 for better feature extraction
-        for param in list(self.backbone.parameters())[:-8]:  # Unfreeze more layers
+        # Freeze only the first few layers for better feature extraction
+        for param in list(self.layer1.parameters()) + list(self.layer2.parameters())[:-4]:
             param.requires_grad = False
         
         # Enhanced FPN with multi-scale features
@@ -134,15 +137,18 @@ class DogDetector(nn.Module):
         return torch.tensor(anchors, dtype=torch.float32)
         
     def forward(self, x, targets=None):
-        # Extract features using backbone
-        features = self.backbone(x)
+        # Extract features using backbone layers
+        x = self.layer1(x)
+        c3 = self.layer2(x)      # 128 channels
+        c4 = self.layer3(c3)     # 256 channels
+        c5 = self.layer4(c4)     # 512 channels
         
         # FPN-like feature processing with fixed pooling
-        p5 = self.fpn_convs['p5'](features)
+        p5 = self.fpn_convs['p5'](c5)
         p5 = self.fpn_bns['p5'](p5)
-        p4 = self.fpn_convs['p4'](features)
+        p4 = self.fpn_convs['p4'](c4)
         p4 = self.fpn_bns['p4'](p4)
-        p3 = self.fpn_convs['p3'](features)
+        p3 = self.fpn_convs['p3'](c3)
         p3 = self.fpn_bns['p3'](p3)
         
         p5 = self.smooth_convs['p5'](p5)
