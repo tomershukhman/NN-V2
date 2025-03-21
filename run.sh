@@ -8,5 +8,5 @@ if env | grep -q '^LIGHTNING_TEAMSPACE='; then
     git pull
 fi
 
-rm -rf output
+rm -rf outputs
 python3 trainer.py
