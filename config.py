@@ -3,7 +3,6 @@ import torch
 from device import get_device
 
 DEVICE = get_device()
-
 # Dataset parameters
 DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
 OUTPUT_ROOT = "outputs"
@@ -58,6 +57,6 @@ CONF_LOSS_WEIGHT = 1.0
 TENSORBOARD_TRAIN_IMAGES = 20
 TENSORBOARD_VAL_IMAGES = 20
 
-if DEVICE == "cuda":
+if DEVICE == torch.device("cuda"):
     DATA_SET_TO_USE = 1.0
     #BATCH_SIZE = 32  # Reduced from 64 for more stable training
