@@ -260,8 +260,9 @@ class DogDetector(nn.Module):
         cls_features = self.cls_features(features_det)
         conf_pred_raw = self.cls_head(cls_features) 
         
-        # Apply learnable confidence calibration for better confidence scores
-        conf_pred = conf_pred_raw * self.conf_scaling + self.conf_bias
+        # Apply confidence calibration with softplus instead of raw scaling+bias
+        # This ensures smoother and always positive confidence scores
+        conf_pred = F.softplus(conf_pred_raw) * self.conf_scaling
         conf_pred = torch.sigmoid(conf_pred)
         
         # Get shapes
@@ -332,15 +333,22 @@ class DogDetector(nn.Module):
         anchor_centers = (anchors[:, :2] + anchors[:, 2:]) / 2
         anchor_sizes = anchors[:, 2:] - anchors[:, :2]
         
-        # Decode predictions
-        pred_centers = box_pred[:, :, :2] * anchor_sizes + anchor_centers
-        pred_sizes = torch.exp(box_pred[:, :, 2:]) * anchor_sizes
+        # Clamp box predictions to prevent exponential overflow
+        box_pred = torch.clamp(box_pred, min=-10.0, max=10.0)
         
-        # Convert back to [x1, y1, x2, y2] format
+        # Decode predictions with safer operations
+        pred_centers = torch.tanh(box_pred[:, :, :2]) * 0.5 + anchor_centers  # ensures centers are between anchor±0.5
+        pred_sizes = torch.sigmoid(box_pred[:, :, 2:]) * anchor_sizes * 2  # ensures sizes are positive and reasonably scaled
+        
+        # Convert back to [x1, y1, x2, y2] format more carefully
+        half_sizes = pred_sizes * 0.5
         boxes = torch.cat([
-            pred_centers - pred_sizes/2,
-            pred_centers + pred_sizes/2
+            pred_centers - half_sizes,
+            pred_centers + half_sizes
         ], dim=-1)
+        
+        # Final safety clamp to valid range [0, 1]
+        boxes = torch.clamp(boxes, min=0.0, max=1.0)
         
         return boxes
 
