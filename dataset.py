@@ -289,66 +289,24 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     os.makedirs(root, exist_ok=True)
     print(f"Using data root directory: {os.path.abspath(root)}")
     
-    # Define Albumentations transforms for training with enhanced multi-dog detection
+    # Optimize memory usage during data loading
+    torch.backends.cudnn.benchmark = True
+    
+    # Define Albumentations transforms with memory-efficient operations
     train_transform = A.Compose([
-        # Less aggressive random crop to preserve multiple dogs
+        A.SmallestMaxSize(max_size=256),  # Resize to slightly larger for better cropping
         A.RandomResizedCrop(
             size=(224, 224), 
-            scale=(0.7, 1.0),  # Increased min scale to keep more dogs in frame
-            ratio=(0.8, 1.25),  # Adjusted for better group captures
+            scale=(0.7, 1.0),
+            ratio=(0.8, 1.25),
             interpolation=1,
             p=1.0
         ),
-        # Add grid distortion to help with dog clusters
-        A.GridDistortion(
-            num_steps=5,
-            distort_limit=0.3,
-            p=0.3
-        ),
         A.HorizontalFlip(p=0.5),
-        A.Rotate(limit=15, p=0.3),
-        # Enhanced color augmentations with regional variations
         A.OneOf([
-            A.RandomBrightnessContrast(
-                brightness_limit=0.3,
-                contrast_limit=0.3,
-                brightness_by_max=True,  # This helps distinguish overlapping dogs
-                p=1.0
-            ),
-            # Add regional contrast variation
-            A.CoarseDropout(
-                max_holes=8,
-                max_height=30,
-                max_width=30,
-                min_holes=2,
-                min_height=10,
-                min_width=10,
-                fill_value=0,
-                mask_fill_value=None,
-                p=1.0
-            ),
-            A.HueSaturationValue(
-                hue_shift_limit=10, 
-                sat_shift_limit=20, 
-                val_shift_limit=10, 
-                p=1.0
-            ),
-        ], p=0.6),  # Increased probability
-        # Multi-scale augmentations for better group detection
-        A.OneOf([
-            # Added more scale variations
-            A.RandomScale(scale_limit=(-0.3, 0.5), p=1.0),  # Increased upper limit
-            A.RandomScale(scale_limit=(0.2, 0.7), p=1.0),   # Added larger scale option
-            # Add perspective variation
-            A.Perspective(scale=(0.05, 0.1), p=1.0),
-        ], p=0.5),  # Increased probability
-        # Add blur variations to help with overlapping dogs
-        A.OneOf([
-            A.GaussianBlur(blur_limit=(3, 7), p=1.0),
-            A.MotionBlur(blur_limit=(3, 7), p=1.0),
-            A.MedianBlur(blur_limit=5, p=1.0),
-        ], p=0.2),
-        # Normalize and convert to tensor
+            A.RandomBrightnessContrast(p=1.0),
+            A.HueSaturationValue(p=1.0),
+        ], p=0.6),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ToTensorV2()
     ], bbox_params=A.BboxParams(
@@ -357,7 +315,7 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         min_visibility=0.3
     ))
     
-    # Keep validation transform simple but ensure consistent sizing
+    # Simplified validation transform for faster processing
     val_transform = A.Compose([
         A.Resize(height=224, width=224),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -392,9 +350,10 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     print(f"Train set: {len(train_dataset)} images with dogs")
     print(f"Val set: {len(val_dataset)} images with dogs")
     
-    # Adjust dataloader settings for better multi-dog handling
+    # Optimize num_workers based on CPU cores and memory
     num_workers = min(8, NUM_WORKERS)
     
+    # Create data loaders with memory-efficient settings
     train_loader = DataLoader(
         train_dataset, 
         batch_size=batch_size,
@@ -411,7 +370,7 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         val_dataset, 
         batch_size=batch_size, 
         shuffle=False, 
-        num_workers=num_workers // 2,
+        num_workers=max(1, num_workers // 2),  # Use fewer workers for validation
         pin_memory=True,
         persistent_workers=True,
         prefetch_factor=2,

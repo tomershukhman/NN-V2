@@ -9,10 +9,14 @@ from config import (
     TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD
 )
 import math
+import torch.utils.checkpoint as checkpoint
 
 class DogDetector(nn.Module):
     def __init__(self, num_anchors_per_cell=12, feature_map_size=7):
         super(DogDetector, self).__init__()
+        
+        # Enable gradient checkpointing for backbone
+        self.gradient_checkpointing = True
         
         # Load pretrained ResNet18 backbone
         backbone = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
@@ -146,17 +150,41 @@ class DogDetector(nn.Module):
         return torch.tensor(anchors, dtype=torch.float32)
         
     def forward(self, x, targets=None):
-        # Initial convolution layers
-        x = self.backbone_conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
-        x = self.maxpool(x)
-        
-        # Extract features using backbone layers
-        x = self.layer1(x)
-        c3 = self.layer2(x)      # 128 channels
-        c4 = self.layer3(c3)     # 256 channels
-        c5 = self.layer4(c4)     # 512 channels
+        # Use torch.cuda.amp.autocast for mixed precision training
+        if torch.cuda.is_available():
+            with torch.cuda.amp.autocast():
+                return self._forward_impl(x, targets)
+        return self._forward_impl(x, targets)
+    
+    def _forward_impl(self, x, targets=None):
+        # Initial convolution layers with gradient checkpointing
+        if self.gradient_checkpointing and self.training:
+            def create_custom_forward(module):
+                def custom_forward(*inputs):
+                    return module(*inputs)
+                return custom_forward
+
+            x = checkpoint.checkpoint(create_custom_forward(self.backbone_conv1), x)
+            x = checkpoint.checkpoint(create_custom_forward(self.bn1), x)
+            x = self.relu(x)
+            x = self.maxpool(x)
+            
+            # Layer checkpointing
+            x = checkpoint.checkpoint(create_custom_forward(self.layer1), x)
+            c3 = checkpoint.checkpoint(create_custom_forward(self.layer2), x)
+            c4 = checkpoint.checkpoint(create_custom_forward(self.layer3), c3)
+            c5 = checkpoint.checkpoint(create_custom_forward(self.layer4), c4)
+        else:
+            # Standard forward pass without checkpointing for inference
+            x = self.backbone_conv1(x)
+            x = self.bn1(x)
+            x = self.relu(x)
+            x = self.maxpool(x)
+            
+            x = self.layer1(x)
+            c3 = self.layer2(x)
+            c4 = self.layer3(c3)
+            c5 = self.layer4(c4)
         
         # FPN-like feature processing
         p5 = self.fpn_convs['p5'](c5)

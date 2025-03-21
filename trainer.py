@@ -117,12 +117,16 @@ class Trainer:
         self.visualization_logger = visualization_logger
         self.checkpoints_dir = checkpoints_dir
         
-        # Refined learning rate scheduler
+        # Enable gradient checkpointing for memory efficiency
+        if hasattr(self.model, 'layer4'):
+            self.model.layer4.apply(lambda m: setattr(m, 'gradient_checkpointing', True))
+        
+        # Refined learning rate scheduler with memory-efficient warmup
         self.lr_scheduler = LRWarmupCosineAnnealing(
             optimizer=optimizer,
-            warmup_epochs=3,  # Reduced warmup period
+            warmup_epochs=3,
             total_epochs=num_epochs,
-            min_lr=LEARNING_RATE * 0.001  # More aggressive LR decay
+            min_lr=LEARNING_RATE * 0.001
         )
         
         # Add weight decay scheduler with more gentle decay
@@ -434,24 +438,31 @@ class Trainer:
         
         train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
         
-        # Implement gradient accumulation
-        self.optimizer.zero_grad()
+        # More efficient memory handling for gradients
+        self.optimizer.zero_grad(set_to_none=True)  # More efficient than zero_grad()
         accumulated_steps = 0
         
         for step, (images, _, boxes) in enumerate(train_loader_bar):
-            images = torch.stack([image.to(self.device) for image in images])
+            # Move data to device efficiently
+            images = torch.stack([image.to(self.device, non_blocking=True) for image in images])
             targets = []
             for boxes_per_image in boxes:
                 target = {
-                    'boxes': boxes_per_image.to(self.device),
+                    'boxes': boxes_per_image.to(self.device, non_blocking=True),
                     'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
                 }
                 targets.append(target)
             
-            # Forward pass and loss calculation
-            predictions = self.model(images, targets)
-            loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
-            loss = loss_dict['total_loss']
+            # Forward pass with gradient checkpointing if available
+            if hasattr(self.model, 'gradient_checkpointing') and self.model.gradient_checkpointing:
+                with torch.cuda.amp.autocast(enabled=True):
+                    predictions = self.model(images, targets)
+                    loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
+                    loss = loss_dict['total_loss']
+            else:
+                predictions = self.model(images, targets)
+                loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
+                loss = loss_dict['total_loss']
             
             # Scale loss for gradient accumulation
             loss = loss / self.gradient_accumulation_steps
@@ -468,8 +479,12 @@ class Trainer:
                 
                 # Optimizer step
                 self.optimizer.step()
-                self.optimizer.zero_grad()
+                self.optimizer.zero_grad(set_to_none=True)
                 accumulated_steps = 0
+                
+                # Explicitly clear memory after optimizer step
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
                 # Update EMA model after optimizer step
                 self._update_ema_model()
