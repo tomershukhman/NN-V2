@@ -14,6 +14,10 @@ import math
 from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
 from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
 import random
+import logging
+
+# Use the same logger as in dataset.py
+logger = logging.getLogger('dog_detector')
 
 class LRWarmupCosineAnnealing:
     """Custom learning rate scheduler with warmup followed by cosine annealing"""
@@ -62,14 +66,16 @@ def train():
     tensorboard_dir = os.path.join(OUTPUT_ROOT, 'tensorboard')
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
-
+    
+    logger.info("Starting training process...")
+    
     # Initialize visualization logger
     vis_logger = VisualizationLogger(tensorboard_dir)
-
+    
     # Get model and criterion
     model = get_model(DEVICE)
     criterion = DetectionLoss().to(DEVICE)
-
+    
     # Setup optimizer with weight decay
     optimizer = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad],
@@ -77,12 +83,12 @@ def train():
         weight_decay=0.02,  # Increased weight decay for more regularization
         betas=(0.9, 0.999)
     )
-
+    
     # Add learning rate scheduler with more gradual decay
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.6, patience=8, verbose=True, min_lr=5e-7
+        optimizer, mode='min', factor=0.6, patience=8, verbose=False, min_lr=5e-7
     )
-
+    
     # Get data loaders
     train_loader, val_loader = get_data_loaders()
     
@@ -178,6 +184,19 @@ class Trainer:
         np.random.seed(42)
         random.seed(42)
         
+        # Add tracking for multi-dog performance
+        self.multi_dog_metrics = {
+            'single_dog_precision': [],
+            'multi_dog_precision': [],
+            'single_dog_recall': [],
+            'multi_dog_recall': []
+        }
+        
+        # Additional loss weights specifically for multi-dog cases
+        self.multi_dog_conf_weight = 1.2  # Slightly higher confidence weight for multi-dog cases
+        
+        logger.info("Trainer initialized with custom learning rate and weight decay schedulers")
+        
     def train(self):
         # Initialize tracking variables
         best_val_loss = float('inf')
@@ -199,7 +218,9 @@ class Trainer:
         # Initialize SWA model
         self.swa_model = AveragedModel(self.model)
         self.swa_scheduler = SWALR(self.optimizer, swa_lr=1e-5)
-
+        
+        logger.info(f"Starting training for {self.num_epochs} epochs")
+        
         for epoch in range(self.num_epochs):
             # Update learning rate and weight decay
             current_lr = self.lr_scheduler.step(epoch)
@@ -213,6 +234,8 @@ class Trainer:
             
             # Update loss weights
             conf_weight, bbox_weight = self._update_loss_weights(epoch)
+            
+            logger.info(f"Epoch {epoch+1}/{self.num_epochs}: LR={current_lr:.6f}, WD={current_wd:.6f}")
             
             # Train for one epoch
             train_metrics, val_metrics = self.train_epoch(epoch, conf_weight, bbox_weight)
@@ -231,6 +254,9 @@ class Trainer:
             ema_val_loss = self._update_ema_val_loss(val_loss)
             ema_val_losses.append(ema_val_loss)
             
+            # Log basic epoch results
+            logger.info(f"Train loss: {train_loss:.6f}, Val loss: {val_loss:.6f}, EMA Val loss: {ema_val_loss:.6f}")
+            
             # Check if we should activate SWA
             if epoch >= self.swa_start:
                 # Update SWA model
@@ -248,12 +274,16 @@ class Trainer:
                     swa_val_loss = swa_val_metrics['total_loss']
                     swa_val_losses.append(swa_val_loss)
                     
-                    print(f"SWA Model Metrics - Precision: {swa_val_metrics['precision']:.4f}, "
-                          f"Recall: {swa_val_metrics['recall']:.4f}, F1: {swa_val_metrics['f1_score']:.4f}")
-                    print(f"                  - Mean IoU: {swa_val_metrics['mean_iou']:.4f}, "
-                          f"Count Match %: {swa_val_metrics['count_match_percentage']:.1f}%")
-                    print(f"                  - Avg Count Diff: {swa_val_metrics['avg_count_diff']:.2f}, "
-                          f"Loss: {swa_val_loss:.4f}")
+                    logger.info(f"SWA Model - Loss: {swa_val_loss:.4f}, Precision: {swa_val_metrics['precision']:.4f}, Recall: {swa_val_metrics['recall']:.4f}")
+                    
+                    # Only log detailed metrics in debug mode
+                    if logger.isEnabledFor(logging.DEBUG):
+                        logger.debug(f"SWA Model - F1: {swa_val_metrics['f1_score']:.4f}, Mean IoU: {swa_val_metrics['mean_iou']:.4f}")
+                        logger.debug(f"SWA Model - Count Match: {swa_val_metrics['count_match_percentage']:.1f}%, Avg Count Diff: {swa_val_metrics['avg_count_diff']:.2f}")
+                        
+                        # Print multi-dog specific metrics if available
+                        if 'multi_dog_precision' in swa_val_metrics:
+                            logger.debug(f"SWA Model - Multi-dog Precision: {swa_val_metrics['multi_dog_precision']:.4f}, Recall: {swa_val_metrics['multi_dog_recall']:.4f}")
                     
                     # Check if SWA model is the best one so far
                     if swa_val_loss < best_swa_val_loss:
@@ -264,44 +294,29 @@ class Trainer:
                             'model_state_dict': self.swa_model.state_dict(),
                             'val_loss': swa_val_loss
                         }, os.path.join(self.checkpoints_dir, 'best_swa_model.pth'))
-                        print(f"Saved new best SWA model with val_loss: {swa_val_loss:.4f}")
+                        logger.info(f"Saved new best SWA model with val_loss: {swa_val_loss:.4f}")
             
-            # Print detailed loss information
-            print(f"\n{'='*80}")
-            print(f"Epoch {epoch+1}/{self.num_epochs} Results:")
-            print(f"Learning Rate: {current_lr:.6f}, Weight Decay: {current_wd:.6f}")
-            print(f"Loss Weights - Confidence: {conf_weight:.2f}, BBox: {bbox_weight:.2f}")
+            # Log validation metrics in more detail including IoU and over/under detections
+            logger.info(f"Val metrics - Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
+            logger.info(f"Val metrics - Mean IoU: {val_metrics['mean_iou']:.4f}, Median IoU: {val_metrics['median_iou']:.4f}")
+            logger.info(f"Val metrics - Over/Under detections: {val_metrics['over_detections']}/{val_metrics['under_detections']}, Count Match: {val_metrics['count_match_percentage']:.1f}%")
             
-            # Print train metrics
-            print(f"Training   - Total Loss: {train_loss:.6f}")
-            if 'count_loss' in train_metrics:
-                print(f"            Count Loss: {train_metrics['count_loss']:.6f}, "
-                      f"Count Match %: {train_metrics['count_match_percentage']:.1f}%")
-            
-            # Print validation metrics
-            print(f"Validation - Total Loss: {val_loss:.6f}")
-            print(f"Smoothed Val Loss: {smoothed_val_loss:.6f}, EMA Val Loss: {ema_val_loss:.6f}")
-            
-            # Print validation metrics with new count-related information
-            print(f"Validation Metrics - Precision: {val_metrics['precision']:.4f}, "
-                  f"Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
-            print(f"                  - Mean IoU: {val_metrics['mean_iou']:.4f}, "
-                  f"Mean Confidence: {val_metrics['mean_confidence']:.4f}")
-            print(f"                  - Count Match %: {val_metrics['count_match_percentage']:.1f}%, "
-                  f"Avg Count Diff: {val_metrics['avg_count_diff']:.2f}")
-            print(f"                  - Over Detect: {val_metrics['over_detections']}, "
-                  f"Under Detect: {val_metrics['under_detections']}")
-            
-            # Print loss changes from previous epoch
-            if epoch > 0:
-                train_loss_change = train_losses[-1] - train_losses[-2]
-                val_loss_change = val_losses[-1] - val_losses[-2]
-                ema_val_loss_change = ema_val_losses[-1] - ema_val_losses[-2]
+            # Log additional metrics only in debug mode
+            if logger.isEnabledFor(logging.DEBUG):
+                # Log multi-dog specific metrics if available
+                if 'multi_dog_precision' in val_metrics:
+                    logger.debug(f"Multi-dog - Precision: {val_metrics['multi_dog_precision']:.4f}, Recall: {val_metrics['multi_dog_recall']:.4f}")
+                    logger.debug(f"Single-dog - Precision: {val_metrics['single_dog_precision']:.4f}, Recall: {val_metrics['single_dog_recall']:.4f}")
                 
-                print(f"Loss Changes - Train: {train_loss_change:.6f} ({'↓' if train_loss_change < 0 else '↑'}), "
-                      f"Val: {val_loss_change:.6f} ({'↓' if val_loss_change < 0 else '↑'}), "
-                      f"EMA Val: {ema_val_loss_change:.6f} ({'↓' if ema_val_loss_change < 0 else '↑'})")
-            print(f"{'='*80}\n")
+                # Log loss changes from previous epoch
+                if epoch > 0:
+                    train_loss_change = train_losses[-1] - train_losses[-2]
+                    val_loss_change = val_losses[-1] - val_losses[-2]
+                    ema_val_loss_change = ema_val_losses[-1] - ema_val_losses[-2]
+                    
+                    logger.debug(f"Loss Changes - Train: {train_loss_change:.6f} ({'↓' if train_loss_change < 0 else '↑'}), "
+                          f"Val: {val_loss_change:.6f} ({'↓' if val_loss_change < 0 else '↑'}), "
+                          f"EMA Val: {ema_val_loss_change:.6f} ({'↓' if ema_val_loss_change < 0 else '↑'})")
             
             # Update learning rate based on smoothed validation loss to avoid zigzag pattern triggering LR changes
             self.scheduler.step(smoothed_val_loss)
@@ -335,11 +350,11 @@ class Trainer:
                     save_dict['swa_model_state_dict'] = self.swa_model.state_dict()
                 
                 torch.save(save_dict, os.path.join(self.checkpoints_dir, 'best_model.pth'))
-                print(f"Saved new best model with val_loss: {val_loss:.4f} (EMA: {ema_val_loss:.4f})")
+                logger.info(f"Saved new best model with val_loss: {val_loss:.4f} (EMA: {ema_val_loss:.4f})")
             else:
                 epochs_without_improvement += 1
-                if epochs_without_improvement >= 25:  # Increased from 20
-                    print("Early stopping triggered")
+                if epochs_without_improvement >= self.early_stopping_patience:
+                    logger.info(f"Early stopping triggered after {epochs_without_improvement} epochs without improvement")
                     break
         
         # Final update of SWA model if needed
@@ -356,7 +371,7 @@ class Trainer:
                 'model_state_dict': self.swa_model.state_dict(),
                 'val_loss': swa_val_loss
             }, os.path.join(self.checkpoints_dir, 'final_swa_model.pth'))
-            print(f"Saved final SWA model with val_loss: {swa_val_loss:.4f}")
+            logger.info(f"Saved final SWA model with val_loss: {swa_val_loss:.4f}")
             
             # Report which model is best
             best_model_type = "Regular"
@@ -370,10 +385,10 @@ class Trainer:
                 best_model_type = "SWA"
                 best_loss = best_swa_val_loss
                 
-            print(f"\nTraining complete. Best model: {best_model_type} with val_loss: {best_loss:.4f}")
+            logger.info(f"Training complete. Best model: {best_model_type} with val_loss: {best_loss:.4f}")
         
         self.visualization_logger.close()
-    
+
     def _update_loss_weights(self, epoch):
         """Update loss component weights according to schedule"""
         progress = min(1.0, epoch / self.num_epochs)
@@ -421,8 +436,10 @@ class Trainer:
         else:
             self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * val_loss
         return self.ema_val_loss
-
+        
     def train_epoch(self, epoch, conf_weight, bbox_weight):
+        """Train for one epoch and return metrics"""
+        logger.info("Starting training epoch")
         self.model.train()
         total_loss = 0
         all_predictions = []
@@ -432,105 +449,148 @@ class Trainer:
         total_conf_loss = 0
         total_bbox_loss = 0
         
-        train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}")
-        
-        # Implement gradient accumulation
-        self.optimizer.zero_grad()
-        accumulated_steps = 0
-        
-        for step, (images, _, boxes) in enumerate(train_loader_bar):
-            images = torch.stack([image.to(self.device) for image in images])
-            targets = []
-            for boxes_per_image in boxes:
-                target = {
-                    'boxes': boxes_per_image.to(self.device),
-                    'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
-                }
-                targets.append(target)
+        try:
+            train_loader_bar = tqdm(self.train_loader, desc=f"Training epoch {epoch + 1}/{self.num_epochs}", 
+                                    ncols=100, leave=False)  # Make tqdm less verbose
             
-            # Forward pass and loss calculation
-            predictions = self.model(images, targets)
-            loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
-            loss = loss_dict['total_loss']
+            # Implement gradient accumulation
+            self.optimizer.zero_grad()
+            accumulated_steps = 0
             
-            # Scale loss for gradient accumulation
-            loss = loss / self.gradient_accumulation_steps
-            
-            # Backward pass with gradient clipping
-            loss.backward()
-            
-            accumulated_steps += 1
-            
-            # Only perform optimization step after accumulating gradients
-            if accumulated_steps == self.gradient_accumulation_steps or step == len(self.train_loader) - 1:
-                # Gradient clipping
-                torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=3.0)
+            for step, (images, num_dogs, boxes) in enumerate(train_loader_bar):
+                images = torch.stack([image.to(self.device) for image in images])
+                targets = []
                 
-                # Optimizer step
-                self.optimizer.step()
-                self.optimizer.zero_grad()
-                accumulated_steps = 0
+                # Create targets with dog count information included
+                for i, boxes_per_image in enumerate(boxes):
+                    target = {
+                        'boxes': boxes_per_image.to(self.device),
+                        'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device),
+                        'dog_count': num_dogs[i].item()  # Include dog count
+                    }
+                    targets.append(target)
                 
-                # Update EMA model after optimizer step
-                self._update_ema_model()
+                # Forward pass with dynamic loss weights based on dog count
+                predictions = self.model(images, targets)
+                
+                # Apply different weights for multi-dog vs single-dog images
+                batch_conf_weights = []
+                batch_bbox_weights = []
+                
+                for target in targets:
+                    if target['dog_count'] > 1:
+                        # For multi-dog images, use slightly higher confidence weight
+                        batch_conf_weights.append(conf_weight * self.multi_dog_conf_weight)
+                        batch_bbox_weights.append(bbox_weight)
+                    else:
+                        # For single-dog images, use standard weights
+                        batch_conf_weights.append(conf_weight)
+                        batch_bbox_weights.append(bbox_weight)
+                
+                # Calculate average weights for the batch
+                avg_conf_weight = sum(batch_conf_weights) / len(batch_conf_weights) if batch_conf_weights else conf_weight
+                avg_bbox_weight = sum(batch_bbox_weights) / len(batch_bbox_weights) if batch_bbox_weights else bbox_weight
+                
+                # Calculate loss with adjusted weights
+                loss_dict = self.criterion(predictions, targets, conf_weight=avg_conf_weight, bbox_weight=avg_bbox_weight)
+                loss = loss_dict['total_loss']
+                
+                # Scale loss for gradient accumulation
+                loss = loss / self.gradient_accumulation_steps
+                
+                # Backward pass with gradient clipping
+                loss.backward()
+                
+                accumulated_steps += 1
+                
+                # Only perform optimization step after accumulating gradients
+                if accumulated_steps == self.gradient_accumulation_steps or step == len(self.train_loader) - 1:
+                    # Gradient clipping
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=3.0)
+                    
+                    # Optimizer step
+                    self.optimizer.step()
+                    self.optimizer.zero_grad()
+                    accumulated_steps = 0
+                    
+                    # Update EMA model after optimizer step
+                    self._update_ema_model()
+                
+                # Update progress
+                total_loss += loss.item() * self.gradient_accumulation_steps  # Scale back for tracking
+                total_conf_loss += loss_dict['conf_loss']
+                total_bbox_loss += loss_dict['bbox_loss']
+                
+                # Only update tqdm bar with basic info to reduce log verbosity
+                train_loader_bar.set_postfix({
+                    'loss': f"{total_loss / (step + 1):.4f}"
+                })
+                
+                # Collect predictions and targets for epoch-level metrics
+                with torch.no_grad():
+                    inference_preds = self.model(images, None)
+                    all_predictions.extend(inference_preds)
+                    all_targets.extend(targets)
+                
+                # Log sample images periodically (less frequently)
+                if step % 100 == 0:
+                    try:
+                        self.visualization_logger.log_images('Train', images[-4:], inference_preds[-4:], targets[-4:], epoch)
+                    except Exception as e:
+                        logger.warning(f"Error logging images: {e}")
+                    
+            logger.info("Finished training loop, calculating metrics")
             
-            # Update progress
-            total_loss += loss.item() * self.gradient_accumulation_steps  # Scale back for tracking
-            total_conf_loss += loss_dict['conf_loss']
-            total_bbox_loss += loss_dict['bbox_loss']
-            train_loader_bar.set_postfix({
-                'train_loss': total_loss / (step + 1),
-                'lr': self.optimizer.param_groups[0]['lr']
+            # Calculate average loss and metrics
+            avg_loss = total_loss / len(self.train_loader)
+            avg_conf_loss = total_conf_loss / len(self.train_loader)
+            avg_bbox_loss = total_bbox_loss / len(self.train_loader)
+            
+            # Calculate epoch-level metrics with separate metrics for multi-dog cases
+            logger.info("Calculating epoch metrics")
+            metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
+            metrics.update({
+                'total_loss': avg_loss,
+                'conf_loss': avg_conf_loss,
+                'bbox_loss': avg_bbox_loss
             })
             
-            # Collect predictions and targets for epoch-level metrics
-            with torch.no_grad():
-                inference_preds = self.model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
+            # Log epoch metrics
+            logger.info("Logging epoch metrics")
+            self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
             
-            # Log sample images periodically
-            if step % 50 == 0:
-                self.visualization_logger.log_images('Train', images[-8:], inference_preds[-8:], targets[-8:], epoch)
-
-        # Calculate average loss and metrics
-        avg_loss = total_loss / len(self.train_loader)
-        avg_conf_loss = total_conf_loss / len(self.train_loader)
-        avg_bbox_loss = total_bbox_loss / len(self.train_loader)
-        
-        # Calculate epoch-level metrics
-        metrics = self.calculate_epoch_metrics(all_predictions, all_targets)
-        metrics.update({
-            'total_loss': avg_loss,
-            'conf_loss': avg_conf_loss,
-            'bbox_loss': avg_bbox_loss
-        })
-        
-        # Log epoch metrics
-        self.visualization_logger.log_epoch_metrics('train', metrics, epoch)
-        
-        # Run validation
-        val_metrics = None
-        if self.val_loader:
-            # Run validation using cycle strategy to reduce zigzag pattern
-            val_metrics_list = []
-            for _ in range(self.validation_cycle):
-                # Run validation with different random seeds
-                seed = random.randint(0, 10000) 
-                torch.manual_seed(seed)
-                np.random.seed(seed)
-                random.seed(seed)
+            # Run validation
+            val_metrics = None
+            if self.val_loader:
+                logger.info("Starting validation")
+                # Run validation using cycle strategy to reduce zigzag pattern
+                val_metrics_list = []
+                for i in range(self.validation_cycle):
+                    logger.info(f"Validation cycle {i+1}/{self.validation_cycle}")
+                    # Run validation with different random seeds
+                    seed = random.randint(0, 10000) 
+                    torch.manual_seed(seed)
+                    np.random.seed(seed)
+                    random.seed(seed)
+                    
+                    curr_val_metrics = self.validate(epoch, conf_weight, bbox_weight)
+                    val_metrics_list.append(curr_val_metrics)
                 
-                curr_val_metrics = self.validate(epoch, conf_weight, bbox_weight)
-                val_metrics_list.append(curr_val_metrics)
+                # Average the validation metrics to reduce variance
+                logger.info("Averaging validation metrics")
+                val_metrics = self._average_validation_metrics(val_metrics_list)
+                
+                # Log the averaged validation metrics
+                logger.info("Logging averaged validation metrics")
+                self.visualization_logger.log_epoch_metrics('val_avg', val_metrics, epoch)
             
-            # Average the validation metrics to reduce variance
-            val_metrics = self._average_validation_metrics(val_metrics_list)
-            
-            # Log the averaged validation metrics
-            self.visualization_logger.log_epoch_metrics('val_avg', val_metrics, epoch)
-        
-        return metrics, val_metrics
+            logger.info("Completed epoch successfully")
+            return metrics, val_metrics
+        except Exception as e:
+            logger.error(f"Error in train_epoch: {e}", exc_info=True)
+            # Return default metrics to prevent further crashes
+            empty_metrics = {'total_loss': 999.0, 'conf_loss': 0.0, 'bbox_loss': 0.0, 'precision': 0.0, 'recall': 0.0, 'f1_score': 0.0}
+            return empty_metrics, empty_metrics
     
     def _average_validation_metrics(self, metrics_list):
         """Average multiple validation runs to reduce variance"""
@@ -546,10 +606,22 @@ class Trainer:
                     avg_metrics[key] = torch.cat(tensors)
                 else:
                     avg_metrics[key] = torch.zeros(0)
+            elif key in ['single_dog_metrics', 'multi_dog_metrics']:
+                # Handle nested dictionaries specially
+                avg_metrics[key] = {}
+                # Get all the nested keys
+                nested_keys = metrics_list[0][key].keys()
+                for nested_key in nested_keys:
+                    avg_metrics[key][nested_key] = sum(metrics[key][nested_key] for metrics in metrics_list) / len(metrics_list)
             else:
                 # For scalar metrics, average them
-                avg_metrics[key] = sum(metrics[key] for metrics in metrics_list) / len(metrics_list)
-                
+                try:
+                    avg_metrics[key] = sum(metrics[key] for metrics in metrics_list) / len(metrics_list)
+                except TypeError:
+                    # If we get here, it means the metric couldn't be summed - log it for debugging
+                    logger.warning(f"Could not average metric '{key}', using first value instead")
+                    avg_metrics[key] = metrics_list[0][key]
+                    
         return avg_metrics
     
     def validate(self, epoch, conf_weight, bbox_weight):
@@ -560,13 +632,11 @@ class Trainer:
         # Validate EMA model
         ema_val_metrics = self.validate_model(self.model_ema, epoch, prefix="val_ema", conf_weight=conf_weight, bbox_weight=bbox_weight)
         
-        # Print EMA model metrics
-        print(f"EMA Model Metrics - Precision: {ema_val_metrics['precision']:.4f}, "
-              f"Recall: {ema_val_metrics['recall']:.4f}, F1: {ema_val_metrics['f1_score']:.4f}")
-        print(f"                  - Mean IoU: {ema_val_metrics['mean_iou']:.4f}")
+        # Log EMA model metrics (less verbose)
+        logger.info(f"EMA Model - Precision: {ema_val_metrics['precision']:.4f}, Recall: {ema_val_metrics['recall']:.4f}, F1: {ema_val_metrics['f1_score']:.4f}")
         
         return val_metrics
-
+        
     def validate_model(self, model, epoch, prefix="val", conf_weight=1.0, bbox_weight=1.0):
         """Run validation on a specific model instance using consistent batches"""
         model.eval()
@@ -652,16 +722,16 @@ class Trainer:
         if prefix != "swa_val" and prefix != "final_swa":
             self.visualization_logger.log_epoch_metrics(prefix, metrics, epoch)
             
-            # Log sample validation images (only for regular validation)
+            # Log sample validation images (only for regular validation, and less of them)
             if prefix == "val":
-                self.visualization_logger.log_images(prefix, all_images[:16], all_predictions[:16], all_targets[:16], epoch)
+                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
             elif prefix == "val_ema":
-                self.visualization_logger.log_images(prefix, all_images[:16], all_predictions[:16], all_targets[:16], epoch)
+                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
         
         return metrics
-
+        
     def calculate_epoch_metrics(self, predictions, targets):
-        """Calculate comprehensive epoch-level metrics"""
+        """Calculate comprehensive epoch-level metrics with multi-dog specific metrics"""
         total_images = len(predictions)
         correct_count = 0
         over_detections = 0
@@ -671,6 +741,23 @@ class Trainer:
         total_detections = 0
         total_ground_truth = 0
         true_positives = 0
+        
+        # Multi-dog specific tracking
+        single_dog_metrics = {
+            'true_positives': 0,
+            'false_positives': 0, 
+            'false_negatives': 0,
+            'total_gt': 0,
+            'total_pred': 0
+        }
+        
+        multi_dog_metrics = {
+            'true_positives': 0,
+            'false_positives': 0, 
+            'false_negatives': 0,
+            'total_gt': 0,
+            'total_pred': 0
+        }
         
         # New metrics for count mismatch
         count_match_percentage = 0
@@ -683,12 +770,26 @@ class Trainer:
             pred_scores = pred['scores']
             gt_boxes = target['boxes']
             
+            # Get dog count for the image (if available)
+            is_multi_dog = False
+            if 'dog_count' in target:
+                dog_count = target['dog_count']
+                is_multi_dog = dog_count > 1
+            else:
+                dog_count = len(gt_boxes)
+                is_multi_dog = dog_count > 1
+            
             # Count statistics
             num_pred = len(pred_boxes)
             num_gt = len(gt_boxes)
             detections_per_image.append(num_pred)
             total_detections += num_pred
             total_ground_truth += num_gt
+            
+            # Update the appropriate metrics tracker based on single/multi-dog
+            metrics_tracker = multi_dog_metrics if is_multi_dog else single_dog_metrics
+            metrics_tracker['total_gt'] += num_gt
+            metrics_tracker['total_pred'] += num_pred
             
             # Track count differences
             count_diff_sum += abs(num_pred - num_gt)
@@ -722,7 +823,22 @@ class Trainer:
                     all_ious.extend(max_ious_per_gt.cpu().tolist())
                     
                     # Count true positives (IoU > 0.5)
-                    true_positives += (max_ious_per_gt > 0.5).sum().item()
+                    image_true_positives = (max_ious_per_gt > 0.5).sum().item()
+                    true_positives += image_true_positives
+                    metrics_tracker['true_positives'] += image_true_positives
+                    
+                    # Count false positives (predictions without a matching GT box with IoU > 0.5)
+                    # Get predicted boxes that were matched with IoU > 0.5
+                    matched_preds = set()
+                    for gt_idx, pred_idx in enumerate(matched_pred_indices):
+                        if max_ious_per_gt[gt_idx] > 0.5:
+                            matched_preds.add(pred_idx.item())
+                    
+                    # Count predictions not matched to any GT box with IoU > 0.5
+                    metrics_tracker['false_positives'] += (num_pred - len(matched_preds))
+                    
+                    # Count false negatives (GT boxes without a matching prediction with IoU > 0.5)
+                    metrics_tracker['false_negatives'] += (num_gt - image_true_positives)
                     
                     # For any missing boxes (when num_pred < num_gt), add zero IoU values
                     if num_pred < num_gt:
@@ -731,6 +847,7 @@ class Trainer:
                 else:
                     # If no predictions but we have GT boxes, add zeros for all missing boxes
                     all_ious.extend([0.0] * num_gt)
+                    metrics_tracker['false_negatives'] += num_gt
         
         # Convert lists to tensors for histogram logging
         iou_distribution = torch.tensor(all_ious) if all_ious else torch.zeros(0)
@@ -757,6 +874,33 @@ class Trainer:
         recall = true_positives / total_ground_truth if total_ground_truth > 0 else 0
         f1_score = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
         
+        # Calculate single-dog and multi-dog specific metrics
+        single_dog_precision = (
+            single_dog_metrics['true_positives'] / single_dog_metrics['total_pred'] 
+            if single_dog_metrics['total_pred'] > 0 else 0
+        )
+        
+        single_dog_recall = (
+            single_dog_metrics['true_positives'] / single_dog_metrics['total_gt'] 
+            if single_dog_metrics['total_gt'] > 0 else 0
+        )
+        
+        multi_dog_precision = (
+            multi_dog_metrics['true_positives'] / multi_dog_metrics['total_pred'] 
+            if multi_dog_metrics['total_pred'] > 0 else 0
+        )
+        
+        multi_dog_recall = (
+            multi_dog_metrics['true_positives'] / multi_dog_metrics['total_gt'] 
+            if multi_dog_metrics['total_gt'] > 0 else 0
+        )
+        
+        # Update the multi-dog tracking metrics
+        self.multi_dog_metrics['single_dog_precision'].append(single_dog_precision)
+        self.multi_dog_metrics['single_dog_recall'].append(single_dog_recall)
+        self.multi_dog_metrics['multi_dog_precision'].append(multi_dog_precision)
+        self.multi_dog_metrics['multi_dog_recall'].append(multi_dog_recall)
+        
         return {
             'correct_count_percent': correct_count_percent,
             'count_match_percentage': count_match_percentage,
@@ -774,9 +918,15 @@ class Trainer:
             'f1_score': f1_score,
             'detections_per_image': detections_per_image,
             'iou_distribution': iou_distribution,
-            'confidence_distribution': confidence_distribution
+            'confidence_distribution': confidence_distribution,
+            'single_dog_precision': single_dog_precision,
+            'single_dog_recall': single_dog_recall,
+            'multi_dog_precision': multi_dog_precision,
+            'multi_dog_recall': multi_dog_recall,
+            'single_dog_metrics': single_dog_metrics,
+            'multi_dog_metrics': multi_dog_metrics
         }
-
+        
     def _calculate_single_iou(self, box1, box2):
         """Calculate IoU between two boxes"""
         # Calculate intersection area
@@ -795,7 +945,7 @@ class Trainer:
         # Calculate IoU
         iou = intersection / (union + 1e-6)
         return iou
-
+        
     def _calculate_box_iou(self, boxes1, boxes2):
         """Calculate IoU between two sets of boxes"""
         # Convert to x1y1x2y2 format if normalized
