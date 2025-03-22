@@ -5,15 +5,15 @@ import torchvision
 from torchvision.models import ResNet18_Weights
 from torchvision.ops import nms
 from config import (
-    TRAIN_CONFIDENCE_THRESHOLD, TRAIN_NMS_THRESHOLD, ANCHOR_SCALES, ANCHOR_RATIOS,
+    ANCHOR_SCALES, ANCHOR_RATIOS,
     NUM_CLASSES, CLASS_CONFIDENCE_THRESHOLDS, CLASS_NMS_THRESHOLDS, CLASS_MAX_DETECTIONS,
     CLASS_NAMES
 )
 import math
 
-class DogDetector(nn.Module):
+class ObjectDetector(nn.Module):
     def __init__(self, num_anchors_per_cell=12, feature_map_size=7):
-        super(DogDetector, self).__init__()
+        super(ObjectDetector, self).__init__()
         
         # Load pretrained ResNet18 backbone
         backbone = torchvision.models.resnet18(weights=ResNet18_Weights.DEFAULT)
@@ -321,6 +321,6 @@ class DogDetector(nn.Module):
         return boxes
 
 def get_model(device):
-    model = DogDetector()
+    model = ObjectDetector()
     model = model.to(device)
     return model

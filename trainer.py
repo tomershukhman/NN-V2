@@ -807,7 +807,8 @@ class Trainer:
                     ious, pred_labels, gt_labels)
                 
                 # Update class-specific metrics
-                for pred_idx, (gt_idx, iou) in enumerate(matches.items()):
+                for pred_idx, (gt_idx, iou) in matches.items():
+                    # Now correctly unpacking the tuple
                     if iou > 0.5:  # Successful match
                         pred_class = CLASS_NAMES[pred_labels[pred_idx].item()]
                         gt_class = CLASS_NAMES[gt_labels[gt_idx].item()]
