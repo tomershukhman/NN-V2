@@ -183,27 +183,37 @@ class DogDetectionDataset(Dataset):
             except fo.core.dataset.DatasetNotFoundError:
                 if download:
                     logger.info("Downloading Open Images dataset with dog and person classes...")
+                    # Download full dataset first
                     dataset = foz.load_zoo_dataset(
                         "open-images-v7",
                         splits=["train", "validation"],
                         label_types=["detections"],
                         classes=["Dog", "Person"],
                         dataset_name=dataset_name,
-                        max_samples=25000  # Add max_samples parameter to limit download
+                        max_samples=25000
                     )
                     logger.info(f"Downloaded dataset to {fo.config.dataset_zoo_dir}")
                 else:
                     raise RuntimeError(f"Dataset {dataset_name} not found and download=False")
             
-            # Process all samples from the dataset
+            # Now filter dataset for the correct split
             if dataset is not None:
-                logger.info(f"Processing {dataset.name} with {len(dataset)} samples")
+                # Filter for the requested split
+                split_dataset = dataset.match({"split": self.split})
+                logger.info(f"Processing {split_dataset.name} split with {len(split_dataset)} samples")
+                
+                if len(split_dataset) == 0:
+                    logger.error(f"No samples found for split: {self.split}")
+                    raise RuntimeError(f"No samples found for split: {self.split}")
+                    
                 dog_samples = []
                 person_samples = []
                 dog_object_counts = []
                 person_object_counts = []
-                
-                for sample in dataset.iter_samples():
+                skipped_labels = Counter()
+
+                # Process samples from the filtered dataset
+                for sample in split_dataset.iter_samples():
                     if hasattr(sample, 'ground_truth') and sample.ground_truth is not None:
                         detections = sample.ground_truth.detections
                         if detections:
@@ -215,19 +225,28 @@ class DogDetectionDataset(Dataset):
                                 has_person = False
                                 
                                 for det in detections:
-                                    class_idx = CLASS_NAMES.index(det.label.lower())
-                                    if class_idx > 0:  # Skip background class
-                                        boxes.append([
-                                            det.bounding_box[0],
-                                            det.bounding_box[1],
-                                            det.bounding_box[0] + det.bounding_box[2],
-                                            det.bounding_box[1] + det.bounding_box[3]
-                                        ])
-                                        labels.append(class_idx)
-                                        if class_idx == 1:  # Dog
-                                            has_dog = True
-                                        elif class_idx == 2:  # Person
-                                            has_person = True
+                                    try:
+                                        # Only add detections for labels we care about
+                                        if det.label.lower() in [c.lower() for c in CLASS_NAMES]:
+                                            class_idx = CLASS_NAMES.index(det.label.lower())
+                                            if class_idx > 0:  # Skip background class
+                                                boxes.append([
+                                                    det.bounding_box[0],
+                                                    det.bounding_box[1],
+                                                    det.bounding_box[0] + det.bounding_box[2],
+                                                    det.bounding_box[1] + det.bounding_box[3]
+                                                ])
+                                                labels.append(class_idx)
+                                                if class_idx == 1:  # Dog
+                                                    has_dog = True
+                                                elif class_idx == 2:  # Person
+                                                    has_person = True
+                                        else:
+                                            skipped_labels[det.label.lower()] += 1
+                                    except ValueError:
+                                        # Should not happen now, but keep track just in case
+                                        skipped_labels[det.label.lower()] += 1
+                                        continue
                                 
                                 if boxes:  # Only add if we have valid detections
                                     sample_data = (img_path, boxes, labels)
@@ -238,6 +257,10 @@ class DogDetectionDataset(Dataset):
                                     elif has_person and not has_dog:
                                         person_samples.append(sample_data)
                                         person_object_counts.append(num_objects)
+                
+                # Log skipped labels if there are any (at debug level)
+                if skipped_labels and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(f"Skipped labels: {dict(skipped_labels)}")
                 
                 # Balance the dataset between dogs and people
                 min_class_size = min(len(dog_samples), len(person_samples))
@@ -279,13 +302,16 @@ class DogDetectionDataset(Dataset):
                     'objects_per_image': all_objects_per_image
                 }, self.cache_file)
                 
+                # Assign samples to this instance
+                self.samples = list(all_samples)
+                self.objects_per_image = list(all_objects_per_image)
+                
                 # Continue processing as in the cached case
                 if logger.isEnabledFor(logging.DEBUG):
                     object_count_distribution = Counter(all_objects_per_image)
                     logger.debug(f"Original object count distribution: {dict(object_count_distribution)}")
                 
-                # Stratified sampling with the same logic as above
-                # (Same code as in the cached branch)
+                logger.info(f"Loaded {len(self.samples)} samples for {self.split} split")
                 
         except Exception as e:
             logger.error(f"Error initializing dataset: {e}")

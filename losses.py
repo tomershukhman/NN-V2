@@ -120,19 +120,24 @@ class DetectionLoss(nn.Module):
                     neg_ratio = min(3, int(num_anchors / num_positive))
                     max_neg = neg_ratio * num_positive
                     
-                    if negative_mask.sum() > max_neg:
+                    if negative_mask.sum() > max_neg and negative_mask.sum() > 0:
                         # Sort negative anchors by loss value
                         neg_losses = focal_loss[negative_mask]
-                        neg_values, neg_indices = torch.topk(neg_losses, k=max_neg)
-                        
-                        # Create a new mask with only the selected negatives
-                        selected_neg_mask = torch.zeros_like(negative_mask)
-                        selected_neg_indices = torch.where(negative_mask)[0][neg_indices]
-                        selected_neg_mask[selected_neg_indices] = True
-                        
-                        # Only compute loss on positives and selected negatives
-                        loss_mask = positive_mask | selected_neg_mask
-                        conf_loss = focal_loss[loss_mask].mean()
+                        k = min(max_neg, neg_losses.size(0))  # Ensure k is not larger than tensor size
+                        if k > 0:  # Only proceed if we have valid negatives
+                            neg_values, neg_indices = torch.topk(neg_losses, k=k)
+                            
+                            # Create a new mask with only the selected negatives
+                            selected_neg_mask = torch.zeros_like(negative_mask)
+                            selected_neg_indices = torch.where(negative_mask)[0][neg_indices]
+                            selected_neg_mask[selected_neg_indices] = True
+                            
+                            # Only compute loss on positives and selected negatives
+                            loss_mask = positive_mask | selected_neg_mask
+                            conf_loss = focal_loss[loss_mask].mean()
+                        else:
+                            # If no valid negatives, just use positives
+                            conf_loss = focal_loss[positive_mask].mean()
                     else:
                         # If we don't have too many negatives, use all of them
                         loss_mask = positive_mask | negative_mask
@@ -140,8 +145,13 @@ class DetectionLoss(nn.Module):
                 else:
                     # If no positives, just use the hardest negatives
                     num_neg = min(num_anchors // 4, 100)  # Cap at a reasonable number
-                    neg_values, neg_indices = torch.topk(focal_loss[negative_mask], k=min(num_neg, negative_mask.sum().item()))
-                    conf_loss = neg_values.mean()
+                    if negative_mask.sum() > 0:  # Only if we have any negatives
+                        neg_values, neg_indices = torch.topk(focal_loss[negative_mask], 
+                                                           k=min(num_neg, negative_mask.sum().item()))
+                        conf_loss = neg_values.mean()
+                    else:
+                        # If no negatives either, use all anchors
+                        conf_loss = focal_loss.mean()
                 
                 # Calculate bbox loss only for positive samples with better scaling
                 if positive_mask.sum() > 0:
