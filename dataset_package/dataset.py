@@ -5,34 +5,39 @@ import numpy as np
 import torch
 import fiftyone as fo
 import fiftyone.zoo as foz
+import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger('dog_detector')
 
 # Mapping from class name to numerical label
 LABEL_MAP = {"Person": 0, "Dog": 1}
 
-class ObjectDetectionDataset(torch.utils.data.Dataset):
+class ObjectDetectionDataset(torch  .utils.data.Dataset):
     """
     Custom Dataset for object detection.
     Expects a list of FiftyOne samples.
     Loads images, converts normalized bounding boxes to absolute Pascal VOC format,
     and applies provided augmentations.
     """
-    def __init__(self, samples, transforms, label_map):
+    def __init__(self, samples_data, transforms, label_map):
         """
         Args:
-            samples: List of FiftyOne sample objects.
+            samples_data: List of dictionaries containing sample data (filepath and annotations)
             transforms: Albumentations transform.
             label_map: Dictionary mapping class names to numeric labels.
         """
-        self.samples = samples
+        self.samples_data = samples_data
         self.transforms = transforms
         self.label_map = label_map
 
     def __len__(self):
-        return len(self.samples)
+        return len(self.samples_data)
 
     def __getitem__(self, idx):
-        sample = self.samples[idx]
-        image_path = sample.filepath
+        sample_data = self.samples_data[idx]
+        image_path = sample_data["filepath"]
         
         # Load image using cv2 (BGR) and convert to RGB
         image = cv2.imread(image_path)
@@ -41,33 +46,40 @@ class ObjectDetectionDataset(torch.utils.data.Dataset):
         image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
         h, w, _ = image.shape
         
-        # Retrieve detections (assumes detections are stored in the 'detections' field)
+        # Use pre-extracted annotations
+        normalized_bboxes = sample_data["bboxes"]
+        category_ids = sample_data["category_ids"]
+        
+        # Convert normalized bboxes to absolute coordinates for Pascal VOC format
         bboxes = []
-        category_ids = []
-        detections = sample.get_field("detections")
-        if detections is not None:
-            for det in detections.detections:
-                label = det.label
-                if label not in self.label_map:
-                    continue  # skip labels not in our mapping
-                # Convert normalized bbox [x, y, w, h] to absolute Pascal VOC [x_min, y_min, x_max, y_max]
-                x, y, bw, bh = det.bounding_box
-                x_min = x * w
-                y_min = y * h
-                x_max = (x + bw) * w
-                y_max = (y + bh) * h
-                bboxes.append([x_min, y_min, x_max, y_max])
-                category_ids.append(self.label_map[label])
+        for x, y, bw, bh in normalized_bboxes:
+            x_min = x * w
+            y_min = y * h
+            x_max = (x + bw) * w
+            y_max = (y + bh) * h
+            bboxes.append([x_min, y_min, x_max, y_max])
         
-        transformed = self.transforms(image=image, bboxes=bboxes, category_ids=category_ids)
-        image = transformed["image"]
-        bboxes = transformed["bboxes"]
-        labels = transformed["category_ids"]
+        # Process with transforms
+        if len(bboxes) == 0:
+            # Handle case with no valid bounding boxes
+            transformed = self.transforms(image=image)
+            image = transformed["image"]
+            target = {
+                "boxes": torch.zeros((0, 4), dtype=torch.float32),
+                "labels": torch.zeros(0, dtype=torch.int64)
+            }
+        else:
+            # Use "labels" instead of "category_ids" to match the label_fields in transforms
+            transformed = self.transforms(image=image, bboxes=bboxes, labels=category_ids)
+            image = transformed["image"]
+            bboxes = transformed["bboxes"]
+            labels = transformed["labels"]
+            
+            target = {
+                "boxes": torch.as_tensor(bboxes, dtype=torch.float32),
+                "labels": torch.as_tensor(labels, dtype=torch.int64)
+            }
         
-        target = {
-            "boxes": torch.as_tensor(bboxes, dtype=torch.float32),
-            "labels": torch.as_tensor(labels, dtype=torch.int64)
-        }
         return image, target
 
 def download_and_prepare_dataset(max_samples=500):
@@ -75,55 +87,122 @@ def download_and_prepare_dataset(max_samples=500):
     Downloads a subset of the Open Images dataset (v6) using FiftyOne,
     filtered to include only "Person" and "Dog" detections.
     """
-    dataset = foz.load_zoo_dataset(
-        "open-images-v6",
-        split="train",
-        label_types="detections",
-        classes=["Person", "Dog"],
-        max_samples=max_samples,
-        shuffle=True,
-        dataset_name="open-images-person-dog"
-    )
+    dataset_name = "open-images-person-dog"
+    
+    try:
+        # Try to load existing dataset
+        dataset = fo.load_dataset(dataset_name)
+        logger.info(f"Loaded existing dataset '{dataset_name}' with {len(dataset)} samples")
+    except ValueError:
+        # If dataset doesn't exist, download it
+        logger.info(f"Downloading Open Images dataset with max_samples={max_samples}")
+        dataset = foz.load_zoo_dataset(
+            "open-images-v6",
+            split="train",
+            label_types="detections",
+            classes=["Person", "Dog"],
+            max_samples=max_samples,
+            shuffle=True,
+            dataset_name=dataset_name
+        )
+        logger.info(f"Downloaded dataset with {len(dataset)} samples")
+    
     return dataset
 
 def create_balanced_samples(foset):
     """
     Create a balanced list of samples based on the presence of each class.
     Computes per-sample weights inversely proportional to class frequency.
-    Returns a list of samples and a corresponding list of weights.
+    Returns a list of sample data dictionaries and a corresponding list of weights.
     """
-    samples = list(foset.iter_samples())  # Convert samples iterator to list
+    logger.info(f"Creating balanced samples from {len(foset)} FiftyOne samples")
+    
+    if len(foset) == 0:
+        logger.warning("Empty dataset provided to create_balanced_samples")
+        return [], []
+    
+    valid_samples_data = []  # Will store dictionaries instead of FiftyOne sample objects
+    valid_sample_flags = []  # Each element is a tuple (has_person, has_dog)
     n_person = 0
     n_dog = 0
-    sample_flags = []  # Each element is a tuple (has_person, has_dog)
     
-    # Count how many images contain each class.
-    for sample in samples:
-        detections = sample.get_field("detections")
+    # First pass: identify valid samples and count classes
+    for sample in foset:
         has_person = False
         has_dog = False
-        if detections is not None:
-            for det in detections.detections:
-                if det.label == "Person":
-                    has_person = True
-                elif det.label == "Dog":
-                    has_dog = True
-        if has_person:
-            n_person += 1
-        if has_dog:
-            n_dog += 1
-        sample_flags.append((has_person, has_dog))
+        is_valid = False
+        
+        # Extract bounding boxes and category IDs for this sample
+        sample_bboxes = []
+        sample_category_ids = []
+        
+        # For Open Images dataset, detections may be in the ground_truth field
+        if hasattr(sample, 'ground_truth'):
+            detections = sample.ground_truth
+            
+            # Ensure detections has the expected structure
+            if hasattr(detections, 'detections'):
+                for det in detections.detections:
+                    if hasattr(det, 'label'):
+                        label = det.label
+                        if label in LABEL_MAP:
+                            # Convert normalized bbox [x, y, w, h] to absolute Pascal VOC [x_min, y_min, x_max, y_max]
+                            try:
+                                x, y, bw, bh = det.bounding_box
+                                # Store bbox in normalized format, will convert to absolute in __getitem__
+                                sample_bboxes.append([x, y, bw, bh])
+                                sample_category_ids.append(LABEL_MAP[label])
+                                
+                                if label == "Person":
+                                    has_person = True
+                                    is_valid = True
+                                elif label == "Dog":
+                                    has_dog = True
+                                    is_valid = True
+                            except (ValueError, TypeError, AttributeError) as e:
+                                logger.warning(f"Error processing bbox: {e}")
+                                continue
+            
+            # Only include samples with at least one valid detection
+            if is_valid:
+                # Create a serializable dictionary instead of using the FiftyOne sample
+                sample_data = {
+                    "filepath": sample.filepath,
+                    "bboxes": sample_bboxes,
+                    "category_ids": sample_category_ids,
+                    "id": str(sample.id) if hasattr(sample, "id") else "unknown"
+                }
+                valid_samples_data.append(sample_data)
+                valid_sample_flags.append((has_person, has_dog))
+                if has_person:
+                    n_person += 1
+                if has_dog:
+                    n_dog += 1
     
-    w_person = 1.0 / n_person if n_person > 0 else 0.0
-    w_dog = 1.0 / n_dog if n_dog > 0 else 0.0
-
+    logger.info(f"Found {len(valid_samples_data)} valid samples with detections")
+    logger.info(f"Class distribution: Person: {n_person}, Dog: {n_dog}")
+    
+    # Handle the case where no valid samples are found
+    if len(valid_samples_data) == 0:
+        logger.error("No valid samples found with the required detections!")
+        return [], []
+    
+    # Calculate weights based on class frequency
+    w_person = 1.0 / max(n_person, 1)
+    w_dog = 1.0 / max(n_dog, 1)
+    
     sample_weights = []
-    for has_person, has_dog in sample_flags:
-        weights = []
+    for has_person, has_dog in valid_sample_flags:
+        weight = 0.0
         if has_person:
-            weights.append(w_person)
+            weight = max(weight, w_person)
         if has_dog:
-            weights.append(w_dog)
-        sample_weights.append(max(weights) if weights else 0.0)
+            weight = max(weight, w_dog)
+        sample_weights.append(weight)
     
-    return samples, sample_weights
+    # If all weights are zero (unlikely), use uniform weights
+    if all(w == 0 for w in sample_weights):
+        logger.warning("All sample weights are zero. Using uniform weights.")
+        sample_weights = [1.0 / len(valid_samples_data)] * len(valid_samples_data)
+    
+    return valid_samples_data, sample_weights

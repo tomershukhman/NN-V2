@@ -10,8 +10,8 @@ def get_train_transform():
     """Basic transform pipeline for training that preserves detection quality"""
     return A.Compose([
         A.Resize(
-            height=640,
-            width=640,
+            height=320,
+            width=320,
             always_apply=True
         ),
         A.HorizontalFlip(p=0.5),
@@ -28,8 +28,8 @@ def get_val_transform():
     """Simple validation transform pipeline"""
     return A.Compose([
         A.Resize(
-            height=640,
-            width=640,
+            height=320,
+            width=320,
             always_apply=True
         ),
         A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
@@ -49,7 +49,7 @@ def get_multi_dog_transform():
     """
     return A.Compose([
         A.RandomResizedCrop(
-            size=(640,640),
+            size=(320, 320),
             scale=(0.8, 1.0),  # Less aggressive scaling
             ratio=(0.85, 1.15),  # Less variation in aspect ratio
             interpolation=1,

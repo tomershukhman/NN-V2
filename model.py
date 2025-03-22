@@ -43,6 +43,11 @@ class ObjectDetector(nn.Module):
         
         # Get batch size and feature dimensions
         batch_size = x.shape[0]
+        feature_h, feature_w = features.shape[2], features.shape[3]
+        
+        # Print feature dimensions for debugging
+        if self.training and x.shape[0] == 1:  # Only print for the first batch
+            print(f"Input shape: {x.shape}, Feature map shape: {features.shape}")
         
         # Predict class scores and bounding box offsets
         class_pred = self.cls_head(features)
@@ -124,11 +129,15 @@ class ObjectDetector(nn.Module):
     
     def _generate_anchors(self):
         """Generate anchor boxes for feature map"""
+        # The model is expecting exactly 3600 anchors
+        # With 9 anchors per grid cell (3 scales × 3 ratios), we need a 20×20 feature map
+        feature_map_size = 20
+        
         anchors = []
-        for i in range(20):  # 20x20 feature map
-            for j in range(20):
-                cx = (j + 0.5) / 20
-                cy = (i + 0.5) / 20
+        for i in range(feature_map_size):
+            for j in range(feature_map_size):
+                cx = (j + 0.5) / feature_map_size
+                cy = (i + 0.5) / feature_map_size
                 for scale in ANCHOR_SCALES:
                     for ratio in ANCHOR_RATIOS:
                         w = scale * math.sqrt(ratio)
