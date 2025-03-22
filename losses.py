@@ -13,7 +13,7 @@ class DetectionLoss(nn.Module):
         self.alpha = 0.5  # Increased from 0.25 for better balance
         self.gamma = 1.5  # Reduced from 2.0 to prevent over-suppression
         
-    def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
+    def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0, cls_weight=1.0):
         # Handle both training and validation outputs
         if isinstance(predictions, list):
             # Convert validation format to training format
@@ -35,22 +35,26 @@ class DetectionLoss(nn.Module):
             # Create tensors in training format
             bbox_pred = torch.zeros((batch_size, num_anchors, 4), device=device)
             conf_pred = torch.zeros((batch_size, num_anchors), device=device)
+            cls_pred = torch.zeros((batch_size, num_anchors, NUM_CLASSES-1), device=device)
             
             for i, pred in enumerate(predictions):
                 valid_preds = pred['boxes'].shape[0]
                 if valid_preds > 0:
                     bbox_pred[i, :valid_preds] = pred['boxes']
                     conf_pred[i, :valid_preds] = pred['scores']
+                    cls_pred[i, :valid_preds] = pred['classes']
             
             predictions = {
                 'bbox_pred': bbox_pred,
                 'conf_pred': conf_pred,
+                'cls_pred': cls_pred,
                 'anchors': default_anchors
             }
 
         # Extract predictions
         bbox_pred = predictions['bbox_pred']
         conf_pred = predictions['conf_pred']
+        cls_pred = predictions['cls_pred']
         default_anchors = predictions['anchors']
         
         batch_size = bbox_pred.shape[0]
@@ -59,14 +63,17 @@ class DetectionLoss(nn.Module):
         # Initialize losses
         conf_losses = []
         bbox_losses = []
+        cls_losses = []
         
         for i in range(batch_size):
             target_boxes = targets[i]['boxes']
+            target_labels = targets[i]['labels']
             
             if len(target_boxes) == 0:
                 # Handle empty targets
                 conf_loss = -torch.log(1 - conf_pred[i] + 1e-6).mean()
                 bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
+                cls_loss = torch.tensor(0.0, device=bbox_pred.device)
             else:
                 # Calculate IoU between anchors and target boxes
                 ious = self._calculate_box_iou(default_anchors, target_boxes)
@@ -112,21 +119,37 @@ class DetectionLoss(nn.Module):
                     bbox_loss = (iou_loss + 0.5 * l1_loss).mean()
                 else:
                     bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
+                
+                # Classification loss only for positive samples
+                if positive_mask.sum() > 0:
+                    matched_target_labels = target_labels[best_target_idx[positive_mask]]
+                    pred_classes = cls_pred[i][positive_mask]
+                    
+                    # Convert target labels to one-hot (subtract 1 to match prediction indices)
+                    target_one_hot = F.one_hot(matched_target_labels - 1, num_classes=NUM_CLASSES-1)
+                    cls_loss = F.binary_cross_entropy_with_logits(
+                        pred_classes, target_one_hot.float()
+                    )
+                else:
+                    cls_loss = torch.tensor(0.0, device=bbox_pred.device)
             
             conf_losses.append(conf_loss)
             bbox_losses.append(bbox_loss)
+            cls_losses.append(cls_loss)
         
         # Average losses across batch
         conf_loss = torch.stack(conf_losses).mean()
         bbox_loss = torch.stack(bbox_losses).mean()
+        cls_loss = torch.stack(cls_losses).mean()
         
         # Apply weights and combine
-        total_loss = conf_weight * conf_loss + bbox_weight * bbox_loss
+        total_loss = conf_weight * conf_loss + bbox_weight * bbox_loss + cls_weight * cls_loss
         
         return {
             'total_loss': total_loss,
             'conf_loss': conf_loss.item(),
-            'bbox_loss': bbox_loss.item()
+            'bbox_loss': bbox_loss.item(),
+            'cls_loss': cls_loss.item()
         }
     
     def _calculate_box_iou(self, boxes1, boxes2):

@@ -11,7 +11,7 @@ from config import (
 import math
 
 class DogDetector(nn.Module):
-    def __init__(self, num_anchors_per_cell=12, feature_map_size=7):
+    def __init__(self, num_classes=3, num_anchors_per_cell=12, feature_map_size=7):
         super(DogDetector, self).__init__()
         
         # Load pretrained ResNet18 backbone
@@ -112,7 +112,7 @@ class DogDetector(nn.Module):
             nn.BatchNorm2d(128),
             nn.GELU(),
             nn.Dropout(0.2),
-            nn.Conv2d(128, self.num_anchors_per_cell, kernel_size=3, padding=1)
+            nn.Conv2d(128, self.num_anchors_per_cell * (num_classes-1), kernel_size=3, padding=1)
         )
         
         self.bbox_head = nn.Conv2d(256, self.num_anchors_per_cell * 4, kernel_size=3, padding=1)
@@ -242,47 +242,58 @@ class DogDetector(nn.Module):
         conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
         conf_pred = conf_pred.view(batch_size, total_anchors)
         
+        # Update classification head output shape
+        cls_pred = self.cls_head(conf_pred)
+        cls_pred = cls_pred.permute(0, 2, 3, 1).contiguous()
+        cls_pred = cls_pred.view(batch_size, total_anchors, -1)  # Shape: [batch_size, total_anchors, num_classes-1]
+        
         # Return predictions based on training/inference mode
         if self.training and targets is not None:
             return {
                 'bbox_pred': bbox_pred,
-                'conf_pred': conf_pred,
+                'cls_pred': cls_pred,
                 'anchors': default_anchors
             }
         
         # Process each image in the batch for inference
         results = []
-        for boxes, scores in zip(bbox_pred, conf_pred):
-            # Filter by confidence
+        for boxes, classes, scores in zip(bbox_pred, cls_pred, conf_pred):
+            # Get class predictions
+            class_scores, class_ids = torch.max(classes, dim=1)
+            class_ids = class_ids + 1  # Shift to match class indices (1=dog, 2=person)
+            
+            # Filter and create detection dict
             mask = scores > (TRAIN_CONFIDENCE_THRESHOLD if self.training else CONFIDENCE_THRESHOLD)
             boxes = boxes[mask]
             scores = scores[mask]
+            class_ids = class_ids[mask]
             
             if len(boxes) > 0:
-                # Apply NMS
-                keep_idx = nms(
-                    boxes, 
-                    scores, 
-                    TRAIN_NMS_THRESHOLD if self.training else NMS_THRESHOLD
-                )
+                # Apply NMS per class
+                final_boxes = []
+                final_scores = []
+                final_classes = []
                 
-                # Limit detections
-                if len(keep_idx) > MAX_DETECTIONS:
-                    scores_for_topk = scores[keep_idx]
-                    _, topk_indices = torch.topk(scores_for_topk, k=MAX_DETECTIONS)
-                    keep_idx = keep_idx[topk_indices]
+                for class_id in range(1, num_classes):
+                    class_mask = class_ids == class_id
+                    if class_mask.any():
+                        cls_boxes = boxes[class_mask]
+                        cls_scores = scores[class_mask]
+                        keep_idx = nms(cls_boxes, cls_scores, NMS_THRESHOLD)
+                        
+                        final_boxes.append(cls_boxes[keep_idx])
+                        final_scores.append(cls_scores[keep_idx])
+                        final_classes.append(torch.full((len(keep_idx),), class_id, device=boxes.device))
                 
-                boxes = boxes[keep_idx]
-                scores = scores[keep_idx]
-            
-            # Ensure at least one prediction
-            if len(boxes) == 0:
-                boxes = torch.tensor([[0.3, 0.3, 0.7, 0.7]], device=bbox_pred.device)
-                scores = torch.tensor([CONFIDENCE_THRESHOLD], device=bbox_pred.device)
+                if final_boxes:
+                    boxes = torch.cat(final_boxes)
+                    scores = torch.cat(final_scores)
+                    class_ids = torch.cat(final_classes)
             
             results.append({
                 'boxes': boxes,
                 'scores': scores,
+                'labels': class_ids,
                 'anchors': default_anchors
             })
         

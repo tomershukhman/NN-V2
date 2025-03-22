@@ -31,8 +31,9 @@ ROTATION_MAX = 15  # Reduced rotation range
 TRANSLATION_FRAC = 0.1  # Reduced translation
 
 # Model parameters
-NUM_CLASSES = 2  # Background and Dog
-FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
+NUM_CLASSES = 3  # Background (0), Dog (1), Person (2)
+CLASSES = ['background', 'dog', 'person']
+FEATURE_MAP_SIZE = 7  # Keep the same feature map size
 
 # Anchor box configuration - use original settings which work
 ANCHOR_SCALES = [0.5, 1.0, 2.0]
@@ -56,6 +57,7 @@ MAX_DETECTIONS = 5  # Reduced from 10 to prevent spurious detections
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0
 CONF_LOSS_WEIGHT = 1.0
+CLS_LOSS_WEIGHT = 1.0  # Add classification loss weight
 
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20

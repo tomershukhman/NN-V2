@@ -42,28 +42,35 @@ class DogDetectionDataset(Dataset):
         if (os.path.exists(self.cache_file)):
             print(f"Loading combined dataset from cache: {self.cache_file}")
             cache_data = torch.load(self.cache_file)
-            all_samples = cache_data['samples']
-            all_dogs_per_image = cache_data['dogs_per_image']
-            
-            # First apply DATA_SET_TO_USE to reduce total dataset size
-            total_samples = len(all_samples)
-            num_samples_to_use = int(total_samples * DATA_SET_TO_USE)
-            all_samples = all_samples[:num_samples_to_use]
-            all_dogs_per_image = all_dogs_per_image[:num_samples_to_use]
-            
-            # Now split into train/val using TRAIN_VAL_SPLIT
-            train_size = int(len(all_samples) * TRAIN_VAL_SPLIT)
-            
-            if self.split == 'train':
-                self.samples = all_samples[:train_size]
-                self.dogs_per_image = all_dogs_per_image[:train_size]
-            else:  # validation split
-                self.samples = all_samples[train_size:]
-                self.dogs_per_image = all_dogs_per_image[train_size:]
-            
-            print(f"Successfully loaded {len(self.samples)} samples for {self.split} split")
-            print(f"Using {DATA_SET_TO_USE*100:.1f}% of total data with {TRAIN_VAL_SPLIT*100:.1f}% train split")
-            return
+            # Check if cache format is old (pre-multiclass)
+            if 'labels' not in cache_data:
+                print("Found old cache format, deleting and recreating...")
+                os.remove(self.cache_file)
+            else:
+                all_samples = cache_data['samples']
+                all_labels = cache_data['labels']
+                all_instances = cache_data['instances']
+                
+                # First apply DATA_SET_TO_USE to reduce total dataset size
+                total_samples = len(all_samples)
+                num_samples_to_use = int(total_samples * DATA_SET_TO_USE)
+                all_samples = all_samples[:num_samples_to_use]
+                all_labels = all_labels[:num_samples_to_use]
+                all_instances = all_instances[:num_samples_to_use]
+                
+                # Now split into train/val using TRAIN_VAL_SPLIT
+                train_size = int(len(all_samples) * TRAIN_VAL_SPLIT)
+                
+                if self.split == 'train':
+                    self.samples = list(zip(all_samples[:train_size], all_labels[:train_size]))
+                    self.instances = all_instances[:train_size]
+                else:  # validation split
+                    self.samples = list(zip(all_samples[train_size:], all_labels[train_size:]))
+                    self.instances = all_instances[train_size:]
+                
+                print(f"Successfully loaded {len(self.samples)} samples for {self.split} split")
+                print(f"Using {DATA_SET_TO_USE*100:.1f}% of total data with {TRAIN_VAL_SPLIT*100:.1f}% train split")
+                return
         
         # If cache doesn't exist, load from dataset
         original_dir = fo.config.dataset_zoo_dir
@@ -77,12 +84,12 @@ class DogDetectionDataset(Dataset):
                 print(f"Successfully loaded existing dataset: {dataset_name}")
             except fo.core.dataset.DatasetNotFoundError:
                 if download:
-                    print("Downloading Open Images dataset with dog class...")
+                    print("Downloading Open Images dataset with dog and person classes...")
                     dataset = foz.load_zoo_dataset(
                         "open-images-v7",
-                        splits=["train", "validation"],  # Load both splits
+                        splits=["train", "validation"],
                         label_types=["detections"],
-                        classes=["Dog"],
+                        classes=["Dog", "Person"],  # Add Person class
                         dataset_name=dataset_name
                     )
                     print(f"Successfully downloaded dataset to {fo.config.dataset_zoo_dir}")
@@ -97,25 +104,37 @@ class DogDetectionDataset(Dataset):
                 
                 for sample in dataset.iter_samples():
                     if hasattr(sample, 'ground_truth') and sample.ground_truth is not None:
-                        dog_detections = [det for det in sample.ground_truth.detections if det.label == "Dog"]
-                        if dog_detections:
+                        detections = sample.ground_truth.detections
+                        if detections:
                             img_path = sample.filepath
                             if os.path.exists(img_path):
-                                boxes = [[det.bounding_box[0], det.bounding_box[1], 
-                                        det.bounding_box[0] + det.bounding_box[2],
-                                        det.bounding_box[1] + det.bounding_box[3]] for det in dog_detections]
-                                all_samples.append((img_path, boxes))
-                                all_dogs_per_image.append(len(dog_detections))
+                                boxes = []
+                                labels = []
+                                for det in detections:
+                                    if det.label in ["Dog", "Person"]:
+                                        boxes.append([
+                                            det.bounding_box[0], 
+                                            det.bounding_box[1],
+                                            det.bounding_box[0] + det.bounding_box[2],
+                                            det.bounding_box[1] + det.bounding_box[3]
+                                        ])
+                                        # Map labels to indices: Dog -> 1, Person -> 2
+                                        labels.append(1 if det.label == "Dog" else 2)
+                                
+                                if boxes:  # Only add if there are valid detections
+                                    all_samples.append((img_path, boxes, labels))
+                                    all_dogs_per_image.append(len(boxes))
                 
                 total_samples = len(all_samples)
                 if total_samples == 0:
                     raise RuntimeError("No valid dog images found in the dataset")
                 
-                # Save combined dataset to cache
+                # Save combined dataset to cache with new format
                 print(f"Saving combined dataset to cache: {self.cache_file}")
                 torch.save({
-                    'samples': all_samples,
-                    'dogs_per_image': all_dogs_per_image
+                    'samples': [path for path, _, _ in all_samples],
+                    'labels': [labels for _, _, labels in all_samples],
+                    'instances': all_dogs_per_image
                 }, self.cache_file)
                 
                 # Apply DATA_SET_TO_USE
@@ -128,10 +147,10 @@ class DogDetectionDataset(Dataset):
                 
                 if self.split == 'train':
                     self.samples = all_samples[:train_size]
-                    self.dogs_per_image = all_dogs_per_image[:train_size]
+                    self.instances = all_dogs_per_image[:train_size]
                 else:
                     self.samples = all_samples[train_size:]
-                    self.dogs_per_image = all_dogs_per_image[train_size:]
+                    self.instances = all_dogs_per_image[train_size:]
                 
                 print(f"Successfully processed {len(self.samples)} samples for {self.split} split")
                 print(f"Using {DATA_SET_TO_USE*100:.1f}% of total data with {TRAIN_VAL_SPLIT*100:.1f}% train split")
@@ -149,7 +168,7 @@ class DogDetectionDataset(Dataset):
         return len(self.samples)
 
     def __getitem__(self, index):
-        img_path, boxes = self.samples[index]
+        img_path, boxes, labels = self.samples[index]
         
         try:
             # Open image and convert to RGB (as NumPy array)
@@ -175,7 +194,6 @@ class DogDetectionDataset(Dataset):
             for box in normalized_boxes:
                 x_min, y_min, x_max, y_max = box
                 boxes_abs.append([x_min * w, y_min * h, x_max * w, y_max * h])
-            labels = [1] * len(boxes_abs)  # All dogs get label "1"
             
             # Apply Albumentations transform if provided
             if self.transform:
@@ -203,8 +221,8 @@ class DogDetectionDataset(Dataset):
                 boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
                 target = {
                     'boxes': boxes_tensor,
-                    'labels': torch.ones(len(normalized_boxes), dtype=torch.long),
-                    'scores': torch.ones(len(normalized_boxes))
+                    'labels': torch.tensor(labels, dtype=torch.long),
+                    'scores': torch.ones(len(labels))
                 }
             
             return img, target
