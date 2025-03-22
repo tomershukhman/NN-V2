@@ -295,22 +295,44 @@ class DogDetectionDataset(Dataset):
         if skipped_labels and logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Skipped labels: {dict(skipped_labels)}")
         return all_samples, all_object_counts
-
+    
     def get_sample_weights(self):
         """
-        Generate sample weights to balance single and multi-object examples during training.
+        Compute sample weights to balance dog and person classes.
+        Each sample weight is the sum of contributions from each class,
+        where each contribution is computed as (number of instances in sample) × (inverse frequency of that class).
         """
         if self.split != 'train':
             return None
-            
-        object_counts = Counter(self.objects_per_image)
-        total_samples = len(self.objects_per_image)
+
+        # First, count total occurrences across the dataset
+        total_dogs = 0
+        total_persons = 0
+        dog_counts = []
+        person_counts = []
+        for _, boxes, labels in self.samples:
+            # Count occurrences in the sample
+            dog_count = labels.count(CLASS_NAMES.index('dog'))
+            person_count = labels.count(CLASS_NAMES.index('person'))
+            dog_counts.append(dog_count)
+            person_counts.append(person_count)
+            total_dogs += dog_count
+            total_persons += person_count
+
+        # Avoid division by zero
+        total_dogs = total_dogs if total_dogs > 0 else 1
+        total_persons = total_persons if total_persons > 0 else 1
+
+        # Inverse frequency for each class
+        inv_freq_dog = 1.0 / total_dogs
+        inv_freq_person = 1.0 / total_persons
+
         weights = []
-        for count in self.objects_per_image:
-            weight = total_samples / (object_counts[count] * len(object_counts))
-            if count > 1:
-                weight *= 1.5
+        for d_count, p_count in zip(dog_counts, person_counts):
+            # Weight can be a linear combination of class contributions
+            weight = d_count * inv_freq_dog + p_count * inv_freq_person
             weights.append(weight)
+
         return weights
 
     def print_stats(self):
