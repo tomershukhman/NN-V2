@@ -82,18 +82,18 @@ def train():
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
-        weight_decay=0.02
+        weight_decay=0.01  # Reduced from 0.02 for more stable initial training
     )
     
-    # Learning rate scheduler with warmup
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    # Learning rate scheduler with gentler warmup
+    scheduler = torch.optim.OneCycleLR(
         optimizer,
         max_lr=LEARNING_RATE,
         epochs=NUM_EPOCHS,
         steps_per_epoch=total_steps,
-        pct_start=0.1,
-        div_factor=25,
-        final_div_factor=1000
+        pct_start=0.3,  # Longer warmup period (30% of training)
+        div_factor=10,  # Less aggressive division of initial learning rate
+        final_div_factor=100  # Less aggressive final learning rate reduction
     )
     
     # Training loop

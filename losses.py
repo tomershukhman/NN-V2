@@ -6,18 +6,18 @@ from config import NUM_CLASSES, CLASS_NAMES
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Dynamic class weights based on dataset statistics
-        # background=1.0, person=1.0, dog=4.93 (inverse frequency weights)
-        self.class_weights = torch.tensor([1.0, 1.0, 4.93])
+        # More balanced initial class weights
+        # Gradually increase dog weight over epochs instead of starting high
+        self.class_weights = torch.tensor([1.0, 1.0, 2.0])  # Reduced from 4.93 for dogs
         
         # Size-based weights based on average areas
         self.person_size_mean = 0.093  # 9.30% average area
         self.dog_size_mean = 0.1767    # 17.67% average area
         
-        # Multiple instance weights - higher weight for rare multiple dog cases
+        # Reduced multiple instance weights for stability
         self.multi_instance_weights = {
-            1: 1.0,    # Person (common: 52.3% have multiple)
-            2: 2.0     # Dog (rare: only 5.0% have multiple)
+            1: 1.0,    # Person
+            2: 1.5     # Dog (reduced from 2.0)
         }
     
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
