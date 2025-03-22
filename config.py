@@ -75,7 +75,7 @@ CONF_LOSS_WEIGHT = 1.2  # Slightly increased to emphasize confidence accuracy
 
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 20
-TENSORBOARD_VAL_IMAGES = 20
+TENSORBOARD_VAL_IMAGES = 50  # Increased from 20 to show more validation images
 
 if DEVICE == torch.device("cuda"):
     DATA_SET_TO_USE = 1.0

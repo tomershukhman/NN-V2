@@ -10,7 +10,7 @@ from config import (
 
 class VisualizationLogger:
     def __init__(self, tensorboard_dir):
-        self.writer = SummaryWriter(tensorboard_dir)
+        self.writer = SummaryWriter(tensorboard_dir, max_queue=100)  # Increased buffer size
         self.denormalize = Denormalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
         # Class-specific colors for visualization
         self.class_colors = {
@@ -21,20 +21,30 @@ class VisualizationLogger:
     def log_images(self, prefix, images, predictions, targets, epoch):
         """Log a sample of images with predictions for visual inspection"""
         num_images = TENSORBOARD_TRAIN_IMAGES if prefix == 'train' else TENSORBOARD_VAL_IMAGES
-        for img_idx in range(min(num_images, len(images))):
-            image = images[img_idx].cpu()
-            pred_boxes = predictions[img_idx]['boxes'].cpu()
-            pred_scores = predictions[img_idx]['scores'].cpu()
-            pred_labels = predictions[img_idx]['labels'].cpu()
-            gt_boxes = targets[img_idx]['boxes'].cpu()
-            gt_labels = targets[img_idx]['labels'].cpu()
+        # Process images in smaller batches to avoid memory issues
+        batch_size = 10
+        for start_idx in range(0, min(num_images, len(images)), batch_size):
+            end_idx = min(start_idx + batch_size, num_images, len(images))
+            batch_images = images[start_idx:end_idx]
+            batch_preds = predictions[start_idx:end_idx]
+            batch_targets = targets[start_idx:end_idx]
             
-            vis_img = self.draw_boxes(image, pred_boxes, pred_scores, gt_boxes, gt_labels, pred_labels)
-            self.writer.add_image(
-                f'{prefix}/Image_{img_idx}',
-                torch.tensor(np.array(vis_img)).permute(2, 0, 1),
-                epoch
-            )
+            for img_idx, (image, preds, target) in enumerate(zip(batch_images, batch_preds, batch_targets)):
+                image = image.cpu()
+                pred_boxes = preds['boxes'].cpu()
+                pred_scores = preds['scores'].cpu()
+                pred_labels = preds['labels'].cpu()
+                gt_boxes = target['boxes'].cpu()
+                gt_labels = target['labels'].cpu()
+                
+                vis_img = self.draw_boxes(image, pred_boxes, pred_scores, gt_boxes, gt_labels, pred_labels)
+                self.writer.add_image(
+                    f'{prefix}/Image_{start_idx + img_idx}',
+                    torch.tensor(np.array(vis_img)).permute(2, 0, 1),
+                    epoch
+                )
+            # Force a flush after each batch
+            self.writer.flush()
 
     def log_epoch_metrics(self, phase, metrics, epoch):
         """Log comprehensive epoch-level metrics"""

@@ -735,11 +735,17 @@ class Trainer:
         if prefix != "swa_val" and prefix != "final_swa":
             self.visualization_logger.log_epoch_metrics(prefix, metrics, epoch)
             
-            # Log sample validation images (only for regular validation, and less of them)
+            # Log sample validation images using the configured number from config
             if prefix == "val":
-                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
+                from config import TENSORBOARD_VAL_IMAGES
+                self.visualization_logger.log_images(prefix, all_images[:TENSORBOARD_VAL_IMAGES], 
+                                                  all_predictions[:TENSORBOARD_VAL_IMAGES], 
+                                                  all_targets[:TENSORBOARD_VAL_IMAGES], epoch)
             elif prefix == "val_ema":
-                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
+                from config import TENSORBOARD_VAL_IMAGES
+                self.visualization_logger.log_images(prefix, all_images[:TENSORBOARD_VAL_IMAGES], 
+                                                  all_predictions[:TENSORBOARD_VAL_IMAGES], 
+                                                  all_targets[:TENSORBOARD_VAL_IMAGES], epoch)
         
         return metrics
         
