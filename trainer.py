@@ -11,6 +11,7 @@ from losses import DetectionLoss
 from visualization import VisualizationLogger
 import math
 import logging
+from tqdm import tqdm
 
 # Use the same logger as in dataset.py
 logger = logging.getLogger('dog_detector')
@@ -114,8 +115,12 @@ def train():
         # Clear CUDA cache if using GPU
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            
+        # Create progress bar for training
+        train_pbar = tqdm(train_loader, desc=f'Epoch [{epoch+1}/{NUM_EPOCHS}]', 
+                         unit='batch', leave=True)
         
-        for batch_idx, (images, boxes, labels) in enumerate(train_loader):
+        for batch_idx, (images, boxes, labels) in enumerate(train_pbar):
             # Prepare batch
             images = images.to(DEVICE)
             targets = [{
@@ -124,13 +129,12 @@ def train():
             } for i in range(len(boxes))]
             
             # Forward pass
-            predictions = model(images, targets)  # This returns a dict with bbox_pred, conf_pred, and anchors
+            predictions = model(images, targets)
             
             # Convert predictions to list format if needed
             if isinstance(predictions, dict):
                 loss_dict = criterion(predictions, targets)
             else:
-                # Handle case where predictions are already in list format
                 loss_dict = criterion({'bbox_pred': predictions[0], 'conf_pred': predictions[1], 'anchors': predictions[2]}, targets)
             
             loss = loss_dict['total_loss']
@@ -147,19 +151,18 @@ def train():
             train_conf_loss += loss_dict['conf_loss']
             train_bbox_loss += loss_dict['bbox_loss']
             
-            # Calculate progress percentage
-            progress = (batch_idx + 1) / total_steps * 100
-            
-            # Update progress with percentage
-            if batch_idx % 20 == 0:
-                avg_loss = train_loss / (batch_idx + 1)
-                print(f"\rEpoch [{epoch+1}/{NUM_EPOCHS}] Progress: {progress:.1f}% ({batch_idx+1}/{total_steps}) Loss: {avg_loss:.4f}", end="", flush=True)
+            # Update progress bar
+            avg_loss = train_loss / (batch_idx + 1)
+            train_pbar.set_postfix({
+                'loss': f'{avg_loss:.4f}',
+                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+            })
             
             # Clear memory every few batches
             if batch_idx % 50 == 0:
                 torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
-        print()  # New line after training
+        train_pbar.close()
         
         # Calculate average training losses
         train_loss /= len(train_loader)
@@ -180,10 +183,11 @@ def train():
         all_predictions = []
         all_targets = []
         
-        print("Validating...", end="", flush=True)
+        # Create progress bar for validation
+        val_pbar = tqdm(val_loader, desc='Validating', unit='batch', leave=True)
         
         with torch.no_grad():
-            for val_idx, (images, boxes, labels) in enumerate(val_loader):
+            for val_idx, (images, boxes, labels) in enumerate(val_pbar):
                 images = images.to(DEVICE)
                 targets = [{
                     'boxes': box.to(DEVICE),
@@ -201,17 +205,19 @@ def train():
                 val_bbox_loss += loss_dict['bbox_loss']
                 
                 # Get inference predictions for metrics with model in eval mode
-                inference_preds = model(images, None)  # This returns a list of dicts with boxes, scores, and labels
+                inference_preds = model(images, None)
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
                 
-                # Show validation progress
-                val_progress = (val_idx + 1) / len(val_loader) * 100
-                print(f"\rValidating: {val_progress:.1f}%", end="", flush=True)
+                # Update validation progress bar
+                avg_val_loss = val_loss / (val_idx + 1)
+                val_pbar.set_postfix({'val_loss': f'{avg_val_loss:.4f}'})
                 
                 # Clear memory every few batches
                 if val_idx % 20 == 0:
                     torch.cuda.empty_cache() if torch.cuda.is_available() else None
+        
+        val_pbar.close()
         
         # Calculate average validation losses and metrics
         val_loss /= len(val_loader)
