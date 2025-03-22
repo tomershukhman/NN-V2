@@ -68,6 +68,9 @@ def train():
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
     
+    # Initialize visualization logger
+    vis_logger = VisualizationLogger(tensorboard_dir)
+    
     # Get data loaders and calculate steps
     train_loader, val_loader = create_dataloaders()
     total_steps = len(train_loader)
@@ -120,6 +123,10 @@ def train():
         train_pbar = tqdm(train_loader, desc=f'Epoch [{epoch+1}/{NUM_EPOCHS}]', 
                          unit='batch', leave=True)
         
+        all_train_predictions = []
+        all_train_images = []
+        all_train_targets = []
+
         for batch_idx, (images, boxes, labels) in enumerate(train_pbar):
             # Prepare batch
             images = images.to(DEVICE)
@@ -131,6 +138,17 @@ def train():
             # Forward pass
             predictions = model(images, targets)
             
+            # Store sample images and predictions for visualization
+            if batch_idx == 0:  # Store first batch for visualization
+                all_train_images.extend(images.cpu())
+                all_train_targets.extend(targets)
+                # Get inference predictions for visualization
+                model.eval()
+                with torch.no_grad():
+                    inference_preds = model(images, None)
+                model.train()
+                all_train_predictions.extend(inference_preds)
+
             # Convert predictions to list format if needed
             if isinstance(predictions, dict):
                 loss_dict = criterion(predictions, targets)
@@ -169,6 +187,15 @@ def train():
         train_conf_loss /= len(train_loader)
         train_bbox_loss /= len(train_loader)
         
+        # Log training metrics and images
+        train_metrics = {
+            'total_loss': train_loss,
+            'conf_loss': train_conf_loss,
+            'bbox_loss': train_bbox_loss
+        }
+        vis_logger.log_epoch_metrics('train', train_metrics, epoch)
+        vis_logger.log_images('train', all_train_images, all_train_predictions, all_train_targets, epoch)
+        
         # Clear cache before validation
         if hasattr(train_loader.dataset, 'clear_cache'):
             train_loader.dataset.clear_cache()
@@ -182,6 +209,7 @@ def train():
         val_bbox_loss = 0
         all_predictions = []
         all_targets = []
+        all_val_images = []
         
         # Create progress bar for validation
         val_pbar = tqdm(val_loader, desc='Validating', unit='batch', leave=True)
@@ -194,6 +222,11 @@ def train():
                     'labels': label.to(DEVICE)
                 } for box, label in zip(boxes, labels)]
                 
+                # Store validation images and targets
+                if val_idx == 0:  # Store first batch for visualization
+                    all_val_images.extend(images.cpu())
+                    all_targets.extend(targets)
+
                 # Get predictions for loss calculation with model in training mode temporarily
                 model.train()
                 train_predictions = model(images, targets)
@@ -204,10 +237,10 @@ def train():
                 val_conf_loss += loss_dict['conf_loss']
                 val_bbox_loss += loss_dict['bbox_loss']
                 
-                # Get inference predictions for metrics with model in eval mode
+                # Get inference predictions for metrics and visualization
                 inference_preds = model(images, None)
-                all_predictions.extend(inference_preds)
-                all_targets.extend(targets)
+                if val_idx == 0:  # Store predictions from first batch
+                    all_predictions.extend(inference_preds)
                 
                 # Update validation progress bar
                 avg_val_loss = val_loss / (val_idx + 1)
@@ -224,6 +257,16 @@ def train():
         val_conf_loss /= len(val_loader)
         val_bbox_loss /= len(val_loader)
         metrics = calculate_metrics(all_predictions, all_targets)
+        
+        # Log validation metrics and images
+        val_metrics = {
+            'total_loss': val_loss,
+            'conf_loss': val_conf_loss,
+            'bbox_loss': val_bbox_loss,
+            **metrics  # Include precision, recall, F1 score, etc.
+        }
+        vis_logger.log_epoch_metrics('val', val_metrics, epoch)
+        vis_logger.log_images('val', all_val_images, all_predictions, all_targets, epoch)
         
         # Print epoch summary
         print("\n" + "="*70)
@@ -263,6 +306,7 @@ def train():
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     
+    vis_logger.close()  # Close the TensorBoard writer
     print("\nTraining completed")
 
 def calculate_metrics(predictions, targets):
