@@ -37,6 +37,7 @@ class DogDetectionDataset(Dataset):
         self.samples = []
         self.objects_per_image = []
         self.max_samples = max_samples
+        self.stats = {'dog': 0, 'person': 0, 'total_images': 0}
         
         # We'll use a single cache file for all data
         self.cache_file = os.path.join(self.root, 'multiclass_detection_cache.pt')
@@ -51,9 +52,11 @@ class DogDetectionDataset(Dataset):
         """Initialize the dataset, either from cache or by downloading/processing the data"""
         if os.path.exists(self.cache_file):
             self._load_from_cache()
+            # Print stats right after loading
+            self.print_stats()
         else:
             self._load_from_source(download)
-        
+            
         if len(self.samples) == 0:
             raise RuntimeError("No valid images found in the dataset")
     
@@ -71,12 +74,24 @@ class DogDetectionDataset(Dataset):
             all_samples, all_objects_per_image
         )
         
+        # Reset stats before processing
+        self.stats = {'dog': 0, 'person': 0, 'total_images': 0}
+        
         if self.split == 'train':
             self.samples = list(train_samples)
             self.objects_per_image = list(train_counts)
         else:
             self.samples = list(val_samples)
             self.objects_per_image = list(val_counts)
+        
+        # Calculate stats for the current split
+        for _, _, labels in self.samples:
+            self.stats['total_images'] += 1
+            for label in labels:
+                if label == CLASS_NAMES.index('dog'):
+                    self.stats['dog'] += 1
+                elif label == CLASS_NAMES.index('person'):
+                    self.stats['person'] += 1
         
         if logger.isEnabledFor(logging.DEBUG):
             curr_distribution = Counter(self.objects_per_image)
@@ -237,6 +252,9 @@ class DogDetectionDataset(Dataset):
         skipped_labels = Counter()
         valid_labels = [c.lower() for c in CLASS_NAMES]
         
+        # Reset stats for this split
+        self.stats = {'dog': 0, 'person': 0, 'total_images': 0}
+        
         for sample in dataset.iter_samples():
             if hasattr(sample, 'ground_truth') and sample.ground_truth is not None:
                 detections = sample.ground_truth.detections
@@ -245,6 +263,8 @@ class DogDetectionDataset(Dataset):
                     if os.path.exists(img_path):
                         boxes = []
                         labels = []
+                        has_valid_objects = False
+                        
                         for det in detections:
                             label_lower = det.label.lower()
                             if label_lower in valid_labels:
@@ -257,13 +277,20 @@ class DogDetectionDataset(Dataset):
                                         det.bounding_box[1] + det.bounding_box[3]
                                     ])
                                     labels.append(class_idx)
+                                    has_valid_objects = True
+                                    if label_lower == 'dog':
+                                        self.stats['dog'] += 1
+                                    elif label_lower == 'person':
+                                        self.stats['person'] += 1
                             else:
                                 skipped_labels[label_lower] += 1
-                        if boxes:
+                                
+                        if has_valid_objects:
                             sample_data = (img_path, boxes, labels)
                             num_objects = len(boxes)
                             all_samples.append(sample_data)
                             all_object_counts.append(num_objects)
+                            self.stats['total_images'] += 1
         
         if skipped_labels and logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"Skipped labels: {dict(skipped_labels)}")
@@ -285,6 +312,18 @@ class DogDetectionDataset(Dataset):
                 weight *= 1.5
             weights.append(weight)
         return weights
+
+    def print_stats(self):
+        """Print statistics about the dataset split"""
+        logger.info("=" * 50)
+        logger.info(f"Dataset Statistics for {self.split} split:")
+        logger.info("-" * 50)
+        logger.info(f"Total images: {self.stats['total_images']}")
+        logger.info(f"Total dogs: {self.stats['dog']}")
+        logger.info(f"Total persons: {self.stats['person']}")
+        logger.info(f"Average dogs per image: {self.stats['dog'] / self.stats['total_images']:.2f}")
+        logger.info(f"Average persons per image: {self.stats['person'] / self.stats['total_images']:.2f}")
+        logger.info("=" * 50)
 
     def __len__(self):
         return len(self.samples)

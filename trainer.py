@@ -121,6 +121,8 @@ class Trainer:
         self.num_epochs = num_epochs
         self.visualization_logger = visualization_logger
         self.checkpoints_dir = checkpoints_dir
+        self.train_dataset = train_loader.dataset
+        self.val_dataset = val_loader.dataset
         
         # Refined learning rate scheduler
         self.lr_scheduler = LRWarmupCosineAnnealing(
@@ -195,6 +197,11 @@ class Trainer:
         self.multi_dog_conf_weight = 1.2  # Slightly higher confidence weight for multi-dog cases
         
         logger.info("Trainer initialized with custom learning rate and weight decay schedulers")
+        
+        # Print dataset statistics
+        logger.info("\nDataset Statistics:")
+        self.train_dataset.print_stats()
+        self.val_dataset.print_stats()
         
     def train(self):
         # Initialize tracking variables

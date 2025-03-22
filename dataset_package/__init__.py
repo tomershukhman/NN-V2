@@ -5,6 +5,18 @@ This package provides the dataset, transforms, and loaders for multi-class objec
 using the Open Images dataset. It includes tools for data loading, augmentation, and batching.
 """
 
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    datefmt='%H:%M:%S'
+)
+
+logger = logging.getLogger('dog_detector')
+logger.setLevel(logging.INFO)
+
 # Import main components for easy access
 from dataset_package.dataset import DogDetectionDataset, CLASS_NAMES
 from dataset_package.transforms import (
