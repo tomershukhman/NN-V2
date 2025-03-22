@@ -1,6 +1,4 @@
 from typing import Literal
-
-
 import os
 import torch
 from device import get_device
@@ -31,7 +29,8 @@ ROTATION_MAX = 15  # Reduced rotation range
 TRANSLATION_FRAC = 0.1  # Reduced translation
 
 # Model parameters
-NUM_CLASSES = 2  # Background and Dog
+NUM_CLASSES = 3  # Background (0), Dog (1), and Person (2)
+CLASS_NAMES = ['background', 'dog', 'person']
 FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
 
 # Anchor box configuration - expanded to better handle multi-dog cases
@@ -52,6 +51,23 @@ TRAIN_NMS_THRESHOLD = 0.6  # Increased for better multi-dog detection during tra
 CONFIDENCE_THRESHOLD = 0.2  # Lowered to catch more valid detections in multi-dog scenarios
 NMS_THRESHOLD = 0.5  # Increased to better handle overlapping dogs
 MAX_DETECTIONS = 8  # Increased from 5 to allow more detections per image
+
+# Detection parameters for each class
+CLASS_CONFIDENCE_THRESHOLDS = {
+    'dog': CONFIDENCE_THRESHOLD,
+    'person': 0.25  # Slightly lower threshold for person detection
+}
+
+CLASS_NMS_THRESHOLDS = {
+    'dog': NMS_THRESHOLD,
+    'person': 0.45  # Slightly lower NMS threshold for person detection
+}
+
+# Per-class maximum detections
+CLASS_MAX_DETECTIONS = {
+    'dog': MAX_DETECTIONS,
+    'person': 8  # Allow more person detections per image
+}
 
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0

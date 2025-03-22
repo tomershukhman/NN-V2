@@ -26,11 +26,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger('dog_detector')
 
+CLASS_NAMES = ["background", "dog", "person"]
 
 class DogDetectionDataset(Dataset):
     def __init__(self, root=DATA_ROOT, split='train', transform=None, download=False):
         """
-        Dog Detection Dataset using Open Images
+        Multi-class Object Detection Dataset using Open Images
         Args:
             root (str): Root directory for the dataset
             split (str): 'train' or 'validation'
@@ -41,51 +42,51 @@ class DogDetectionDataset(Dataset):
         self.root = os.path.abspath(root)
         self.split = "validation" if split == "val" else split
         self.samples = []
-        self.dogs_per_image = []
+        self.objects_per_image = []
         
         # We'll use a single cache file for all data
-        self.cache_file = os.path.join(self.root, 'dog_detection_combined_cache.pt')
+        self.cache_file = os.path.join(self.root, 'multiclass_detection_cache.pt')
         
         # Ensure data directory exists
         os.makedirs(self.root, exist_ok=True)
         
         # Try to load from cache first
-        if (os.path.exists(self.cache_file)):
+        if os.path.exists(self.cache_file):
             logger.info(f"Loading dataset from cache: {self.cache_file}")
             cache_data = torch.load(self.cache_file)
             all_samples = cache_data['samples']
-            all_dogs_per_image = cache_data['dogs_per_image']
+            all_objects_per_image = cache_data['objects_per_image']
             
             # First apply DATA_SET_TO_USE to reduce total dataset size
             total_samples = len(all_samples)
             
-            # Sort samples by number of dogs to analyze distribution
-            samples_with_count = list(zip(all_samples, all_dogs_per_image))
+            # Sort samples by number of objects to analyze distribution
+            samples_with_count = list(zip(all_samples, all_objects_per_image))
             # Shuffle with fixed seed for reproducibility before selecting subset
             random.seed(42)
             random.shuffle(samples_with_count)
             
-            # Count distribution of dog counts before filtering (only in debug level)
+            # Count distribution of object counts before filtering (only in debug level)
             if logger.isEnabledFor(logging.DEBUG):
-                dog_count_distribution = Counter(all_dogs_per_image)
-                logger.debug(f"Original dog count distribution: {dict(dog_count_distribution)}")
+                object_count_distribution = Counter(all_objects_per_image)
+                logger.debug(f"Original object count distribution: {dict(object_count_distribution)}")
             
-            # Stratified sampling to ensure we keep multi-dog images
+            # Stratified sampling to ensure we keep multi-object images
             if DATA_SET_TO_USE < 1.0:
                 logger.info(f"Performing stratified sampling (DATA_SET_TO_USE={DATA_SET_TO_USE:.2f})")
-                # Group samples by dog count
+                # Group samples by object count
                 samples_by_count = {}
-                for sample, count in zip(all_samples, all_dogs_per_image):
+                for sample, count in zip(all_samples, all_objects_per_image):
                     if count not in samples_by_count:
                         samples_by_count[count] = []
                     samples_by_count[count].append((sample, count))
                 
                 # Select DATA_SET_TO_USE percentage from each group, but ensure we keep
-                # at least 80% of multi-dog samples if available
+                # at least 80% of multi-object samples if available
                 selected_samples = []
                 for count, samples in samples_by_count.items():
                     num_to_select = int(len(samples) * DATA_SET_TO_USE)
-                    # For multi-dog images, ensure we keep more samples
+                    # For multi-object images, ensure we keep more samples
                     if count > 1:
                         num_to_select = max(num_to_select, int(len(samples) * 0.8))
                     # Don't select more than we have
@@ -97,12 +98,12 @@ class DogDetectionDataset(Dataset):
                 
                 # Unpack the samples and counts
                 all_samples = [s[0] for s in selected_samples]
-                all_dogs_per_image = [s[1] for s in selected_samples]
+                all_objects_per_image = [s[1] for s in selected_samples]
             
             # Report distribution after filtering (only in debug level)
             if logger.isEnabledFor(logging.DEBUG):
-                filtered_dog_distribution = Counter(all_dogs_per_image)
-                logger.debug(f"Filtered dog count distribution: {dict(filtered_dog_distribution)}")
+                filtered_object_distribution = Counter(all_objects_per_image)
+                logger.debug(f"Filtered object count distribution: {dict(filtered_object_distribution)}")
             
             logger.info(f"Using {len(all_samples)} samples ({len(all_samples)/total_samples:.1%} of original data)")
             
@@ -112,9 +113,9 @@ class DogDetectionDataset(Dataset):
             val_samples = []
             val_counts = []
             
-            # Group by dog count for stratified split
+            # Group by object count for stratified split
             samples_by_count = {}
-            for sample, count in zip(all_samples, all_dogs_per_image):
+            for sample, count in zip(all_samples, all_objects_per_image):
                 if count not in samples_by_count:
                     samples_by_count[count] = []
                 samples_by_count[count].append((sample, count))
@@ -142,15 +143,15 @@ class DogDetectionDataset(Dataset):
             # Assign to the appropriate split
             if self.split == 'train':
                 self.samples = list(train_samples)
-                self.dogs_per_image = list(train_counts)
+                self.objects_per_image = list(train_counts)
             else:  # validation split
                 self.samples = list(val_samples)
-                self.dogs_per_image = list(val_counts)
+                self.objects_per_image = list(val_counts)
             
             # Show distribution for current split (only in debug level)
             if logger.isEnabledFor(logging.DEBUG):
-                curr_distribution = Counter(self.dogs_per_image)
-                logger.debug(f"Dog count distribution for {self.split} split: {dict(curr_distribution)}")
+                curr_distribution = Counter(self.objects_per_image)
+                logger.debug(f"Object count distribution for {self.split} split: {dict(curr_distribution)}")
             
             logger.info(f"Loaded {len(self.samples)} samples for {self.split} split")
             return
@@ -167,12 +168,12 @@ class DogDetectionDataset(Dataset):
                 logger.info(f"Loaded existing dataset: {dataset_name}")
             except fo.core.dataset.DatasetNotFoundError:
                 if download:
-                    logger.info("Downloading Open Images dataset with dog class...")
+                    logger.info("Downloading Open Images dataset with dog and person classes...")
                     dataset = foz.load_zoo_dataset(
                         "open-images-v7",
-                        splits=["train", "validation"],  # Load both splits
+                        splits=["train", "validation"],
                         label_types=["detections"],
-                        classes=["Dog"],
+                        classes=["Dog", "Person"],
                         dataset_name=dataset_name
                     )
                     logger.info(f"Downloaded dataset to {fo.config.dataset_zoo_dir}")
@@ -183,35 +184,47 @@ class DogDetectionDataset(Dataset):
             if dataset is not None:
                 logger.info(f"Processing {dataset.name} with {len(dataset)} samples")
                 all_samples = []
-                all_dogs_per_image = []
+                all_objects_per_image = []
                 
                 for sample in dataset.iter_samples():
                     if hasattr(sample, 'ground_truth') and sample.ground_truth is not None:
-                        dog_detections = [det for det in sample.ground_truth.detections if det.label == "Dog"]
-                        if dog_detections:
+                        detections = sample.ground_truth.detections
+                        if detections:
                             img_path = sample.filepath
                             if os.path.exists(img_path):
-                                boxes = [[det.bounding_box[0], det.bounding_box[1], 
-                                        det.bounding_box[0] + det.bounding_box[2],
-                                        det.bounding_box[1] + det.bounding_box[3]] for det in dog_detections]
-                                all_samples.append((img_path, boxes))
-                                all_dogs_per_image.append(len(dog_detections))
+                                boxes = []
+                                labels = []
+                                for det in detections:
+                                    # Convert class names to indices
+                                    class_idx = CLASS_NAMES.index(det.label.lower())
+                                    if class_idx > 0:  # Skip background class
+                                        boxes.append([
+                                            det.bounding_box[0],
+                                            det.bounding_box[1],
+                                            det.bounding_box[0] + det.bounding_box[2],
+                                            det.bounding_box[1] + det.bounding_box[3]
+                                        ])
+                                        labels.append(class_idx)
+                                
+                                if boxes:  # Only add if we have valid detections
+                                    all_samples.append((img_path, boxes, labels))
+                                    all_objects_per_image.append(len(boxes))
                 
                 total_samples = len(all_samples)
                 if total_samples == 0:
-                    raise RuntimeError("No valid dog images found in the dataset")
+                    raise RuntimeError("No valid images found in the dataset")
                 
                 # Save combined dataset to cache
                 logger.info(f"Saving dataset to cache: {self.cache_file}")
                 torch.save({
                     'samples': all_samples,
-                    'dogs_per_image': all_dogs_per_image
+                    'objects_per_image': all_objects_per_image
                 }, self.cache_file)
                 
                 # Continue processing as in the cached case
                 if logger.isEnabledFor(logging.DEBUG):
-                    dog_count_distribution = Counter(all_dogs_per_image)
-                    logger.debug(f"Original dog count distribution: {dict(dog_count_distribution)}")
+                    object_count_distribution = Counter(all_objects_per_image)
+                    logger.debug(f"Original object count distribution: {dict(object_count_distribution)}")
                 
                 # Stratified sampling with the same logic as above
                 # (Same code as in the cached branch)
@@ -223,28 +236,28 @@ class DogDetectionDataset(Dataset):
             fo.config.dataset_zoo_dir = original_dir
         
         if len(self.samples) == 0:
-            raise RuntimeError("No valid dog images found in the dataset")
+            raise RuntimeError("No valid images found in the dataset")
 
     def get_sample_weights(self):
         """
-        Generate sample weights to balance single and multi-dog examples during training.
-        This helps ensure the model sees enough multi-dog examples.
+        Generate sample weights to balance single and multi-object examples during training.
+        This helps ensure the model sees enough multi-object examples.
         """
         if self.split != 'train':
             return None
             
-        # Count occurrences of each dog count
-        dog_counts = Counter(self.dogs_per_image)
-        total_samples = len(self.dogs_per_image)
+        # Count occurrences of each object count
+        object_counts = Counter(self.objects_per_image)
+        total_samples = len(self.objects_per_image)
         
         # Calculate inverse frequency for each count
         weights = []
-        for count in self.dogs_per_image:
-            # Weight inversely proportional to frequency, with additional boost for multi-dog images
-            weight = total_samples / (dog_counts[count] * len(dog_counts))
-            # Additional boost for multi-dog cases
+        for count in self.objects_per_image:
+            # Weight inversely proportional to frequency, with additional boost for multi-object images
+            weight = total_samples / (object_counts[count] * len(object_counts))
+            # Additional boost for multi-object cases
             if count > 1:
-                weight *= 1.5  # Boost multi-dog samples
+                weight *= 1.5  # Boost multi-object samples
             weights.append(weight)
             
         return weights
@@ -253,8 +266,8 @@ class DogDetectionDataset(Dataset):
         return len(self.samples)
         
     def __getitem__(self, index):
-        img_path, boxes = self.samples[index]
-        dog_count = self.dogs_per_image[index]
+        img_path, boxes, labels = self.samples[index]
+        object_count = self.objects_per_image[index]
         
         try:
             # Open image and convert to RGB (as NumPy array)
@@ -280,35 +293,35 @@ class DogDetectionDataset(Dataset):
             for box in normalized_boxes:
                 x_min, y_min, x_max, y_max = box
                 boxes_abs.append([x_min * w, y_min * h, x_max * w, y_max * h])
-            labels = [1] * len(boxes_abs)  # All dogs get label "1"
             
-            # Apply Albumentations transform if provided, with special handling for multi-dog cases
+            # Apply Albumentations transform if provided
             if self.transform:
-                # For multi-dog images, we might need to adjust the transform to preserve all dogs
-                if dog_count > 1 and self.split == 'train':
-                    # Get special multi-dog transform or use default one
-                    transform = get_multi_dog_transform() if random.random() < 0.7 else self.transform
-                else:
-                    transform = self.transform
-                    
-                transformed = transform(image=img, bboxes=boxes_abs, labels=labels)
+                transformed = self.transform(
+                    image=img,
+                    bboxes=boxes_abs,
+                    labels=labels
+                )
                 img = transformed['image']
                 boxes_abs = transformed['bboxes']
                 labels = transformed['labels']
                 
                 # After transformation, convert absolute coordinates back to normalized values
-                # (img from ToTensorV2() is a torch.Tensor of shape [C, H, W])
                 _, new_h, new_w = img.shape
                 normalized_boxes = []
                 for box in boxes_abs:
                     x_min, y_min, x_max, y_max = box
-                    normalized_boxes.append([x_min / new_w, y_min / new_h, x_max / new_w, y_max / new_h])
+                    normalized_boxes.append([
+                        x_min / new_w,
+                        y_min / new_h,
+                        x_max / new_w,
+                        y_max / new_h
+                    ])
                 boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
                 target = {
                     'boxes': boxes_tensor,
                     'labels': torch.tensor(labels, dtype=torch.long),
                     'scores': torch.ones(len(labels)),
-                    'dog_count': dog_count  # Include the dog count in the target
+                    'object_count': object_count
                 }
             else:
                 # If no transform, manually convert image to tensor and boxes to normalized values
@@ -316,22 +329,22 @@ class DogDetectionDataset(Dataset):
                 boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
                 target = {
                     'boxes': boxes_tensor,
-                    'labels': torch.ones(len(normalized_boxes), dtype=torch.long),
-                    'scores': torch.ones(len(normalized_boxes)),
-                    'dog_count': dog_count  # Include the dog count in the target
+                    'labels': torch.tensor(labels, dtype=torch.long),
+                    'scores': torch.ones(len(labels)),
+                    'object_count': object_count
                 }
             
             return img, target
             
         except Exception as e:
             logger.warning(f"Error loading image {img_path}: {e}")
-            # Instead of raising, return a dummy sample
+            # Return a dummy sample
             img = torch.zeros((3, 224, 224), dtype=torch.float32)
             target = {
                 'boxes': torch.zeros((0, 4), dtype=torch.float32),
                 'labels': torch.zeros(0, dtype=torch.long),
                 'scores': torch.zeros(0),
-                'dog_count': 0
+                'object_count': 0
             }
             return img, target
             
@@ -381,7 +394,7 @@ def collate_fn(batch):
     Makes sure all images are consistently sized to 224x224.
     """
     images = []
-    num_dogs = []
+    num_objects = []
     all_bboxes = []
     valid_batch = []
     
@@ -403,7 +416,7 @@ def collate_fn(batch):
         valid_batch.append((img, target))
         images.append(img)
         boxes = target['boxes']
-        num_dogs.append(len(boxes))
+        num_objects.append(len(boxes))
         
         # Check if boxes are normalized and swap coordinates if needed
         if len(boxes) > 0:
@@ -445,21 +458,21 @@ def collate_fn(batch):
     # resized everything to the target size
     if len(images) > 0:
         images = torch.stack(images)
-        num_dogs = torch.tensor(num_dogs)
+        num_objects = torch.tensor(num_objects)
         
         # Periodically log batch statistics (at debug level only and much less frequently)
         if logger.isEnabledFor(logging.DEBUG) and random.random() < 0.01:  # Log roughly 1% of batches
             means = images.view(images.size(0), images.size(1), -1).mean(dim=2).mean(dim=0)
             stds = images.view(images.size(0), images.size(1), -1).std(dim=2).mean(dim=0)
-            logger.debug(f"Batch stats: {len(images)} images, dogs per image: {num_dogs.tolist()}")
+            logger.debug(f"Batch stats: {len(images)} images, objects per image: {num_objects.tolist()}")
             logger.debug(f"Image channel means: {means.tolist()}, stds: {stds.tolist()}")
             
-            # Log multi-dog percentage
-            multi_dog_count = sum(1 for n in num_dogs if n > 1)
-            if len(num_dogs) > 0:
-                logger.debug(f"Multi-dog percentage in batch: {multi_dog_count / len(num_dogs):.1%}")
+            # Log multi-object percentage
+            multi_object_count = sum(1 for n in num_objects if n > 1)
+            if len(num_objects) > 0:
+                logger.debug(f"Multi-object percentage in batch: {multi_object_count / len(num_objects):.1%}")
         
-        return images, num_dogs, all_bboxes
+        return images, num_objects, all_bboxes
     
     # Fallback for empty batch (should not happen often)
     dummy_img = torch.zeros((3, target_size[0], target_size[1]), dtype=torch.float32)
@@ -467,13 +480,13 @@ def collate_fn(batch):
     return torch.stack([dummy_img]), torch.tensor([0]), [dummy_boxes]
 
 def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
-    """Create data loaders for Open Images dog detection dataset using Albumentations for augmentation"""
+    """Create data loaders for Open Images multi-class detection dataset using Albumentations for augmentation"""
     os.makedirs(root, exist_ok=True)
     logger.info(f"Using data root directory: {os.path.abspath(root)}")
     
     # Define Albumentations transforms for training
     train_transform = A.Compose([
-        # Improved random crop to better handle single dogs
+        # Improved random crop to better handle single objects
         A.RandomResizedCrop(
             size=(224, 224), 
             scale=(0.7, 1.0),
@@ -554,10 +567,10 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
         logger.error(f"Error creating validation dataset: {e}")
         raise RuntimeError(f"Failed to create validation dataset: {e}")
     
-    logger.info(f"Train set: {len(train_dataset)} images with dogs")
-    logger.info(f"Val set: {len(val_dataset)} images with dogs")
+    logger.info(f"Train set: {len(train_dataset)} images with objects")
+    logger.info(f"Val set: {len(val_dataset)} images with objects")
     
-    # Create weighted sampler for training to balance single/multi-dog examples
+    # Create weighted sampler for training to balance single/multi-object examples
     sample_weights = train_dataset.get_sample_weights()
     train_sampler = None
     
@@ -567,7 +580,7 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
             num_samples=len(train_dataset),
             replacement=True
         )
-        logger.info("Using weighted sampler to balance single-dog and multi-dog examples")
+        logger.info("Using weighted sampler to balance single-object and multi-object examples")
     
     num_workers = min(8, NUM_WORKERS)
     
@@ -600,7 +613,7 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
 
 def get_total_samples():
     """Get the total number of samples in the dataset"""
-    cache_file = os.path.join(DATA_ROOT, 'dog_detection_combined_cache.pt')
+    cache_file = os.path.join(DATA_ROOT, 'multiclass_detection_cache.pt')
     if os.path.exists(cache_file):
         cache_data = torch.load(cache_file)
         return len(cache_data['samples'])

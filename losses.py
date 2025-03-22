@@ -1,17 +1,15 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # Added missing import
+import torch.nn.functional as F
+from config import NUM_CLASSES, CLASS_NAMES
 
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Better thresholds for multi-object detection
-        self.positive_threshold = 0.5  # Keep at 0.5 for high quality matches
-        self.negative_threshold = 0.4  # Increase from 0.3 to reduce ambiguous regions
-        
-        # Adjusted focal loss parameters for multi-object detection
-        self.alpha = 0.25  # Balanced alpha for multi-object detection
-        self.gamma = 2.0   # Increased gamma to better focus on hard examples
+        self.positive_threshold = 0.5
+        self.negative_threshold = 0.4
+        self.alpha = 0.25
+        self.gamma = 2.0
         
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs

@@ -1,8 +1,11 @@
-torch
-torchvision
-numpy
-Pillow
-albumentations
-tqdm
-fiftyone
-tensorboard
+torch>=1.10.0
+torchvision>=0.11.0
+numpy>=1.19.0
+Pillow>=8.0.0
+albumentations>=1.0.0
+tqdm>=4.50.0
+fiftyone>=0.15.0
+tensorboard>=2.4.0
+opencv-python>=4.5.0  # For video processing
+scikit-learn>=0.24.0  # For metrics calculation
+scipy>=1.7.0  # For various mathematical operations
