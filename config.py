@@ -1,19 +1,18 @@
-from typing import Literal
 import os
 import torch
 from device import get_device
 
-# Dataset parameters
-DATA_ROOT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data/open-images")
-OUTPUT_ROOT = "outputs"
-DATA_SET_TO_USE = 0.1  # Use 10% of available data for faster iteration
+# Dataset configuration
+DATA_ROOT = os.path.join(os.path.dirname(__file__), 'data', 'open-images')
+OUTPUT_ROOT = os.path.join(os.path.dirname(__file__), 'outputs')
+DATA_SET_TO_USE = 1  # Use 10% of available data for faster iteration
 TRAIN_VAL_SPLIT = 0.85  # Slightly increased training data proportion
 
 DEVICE = get_device()
 
-# Training parameters
+# Training configuration
 BATCH_SIZE = 16
-NUM_WORKERS = min(8, os.cpu_count() or 1)
+NUM_WORKERS = 4
 LEARNING_RATE = 1e-4  # Slightly reduced
 NUM_EPOCHS = 100
 WEIGHT_DECAY = 0.01  # Added L2 regularization
@@ -28,14 +27,14 @@ MAX_SCALE = 1.2  # Reduced maximum scale
 ROTATION_MAX = 15  # Reduced rotation range
 TRANSLATION_FRAC = 0.1  # Reduced translation
 
-# Model parameters
+# Model configuration
 NUM_CLASSES = 3  # Background (0), Dog (1), and Person (2)
-CLASS_NAMES = ['background', 'dog', 'person']
+CLASS_NAMES = ["background", "dog", "person"]
 FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
 
 # Anchor box configuration - expanded to better handle multi-dog cases
-ANCHOR_SCALES = [0.3, 0.5, 0.8, 1.2]
-ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5]
+ANCHOR_SCALES = [0.1, 0.2, 0.4]  # Small to medium objects
+ANCHOR_RATIOS = [0.5, 1.0, 2.0]  # Handle different aspect ratios
 NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
@@ -54,19 +53,19 @@ MAX_DETECTIONS = 8  # Increased from 5 to allow more detections per image
 
 # Detection parameters for each class
 CLASS_CONFIDENCE_THRESHOLDS = {
-    'dog': CONFIDENCE_THRESHOLD,
-    'person': 0.25  # Slightly lower threshold for person detection
+    "dog": 0.3,      # Lower threshold for dogs to catch more instances
+    "person": 0.4    # Higher threshold for persons to reduce false positives
 }
 
 CLASS_NMS_THRESHOLDS = {
-    'dog': NMS_THRESHOLD,
-    'person': 0.45  # Slightly lower NMS threshold for person detection
+    "dog": 0.45,     # More permissive NMS for dogs
+    "person": 0.5    # Stricter NMS for persons
 }
 
 # Per-class maximum detections
 CLASS_MAX_DETECTIONS = {
-    'dog': MAX_DETECTIONS,
-    'person': 8  # Allow more person detections per image
+    "dog": 10,       # Allow more dog detections per image
+    "person": 20     # Allow many person detections for crowd scenes
 }
 
 # Loss function parameters
@@ -74,8 +73,8 @@ BBOX_LOSS_WEIGHT = 1.0
 CONF_LOSS_WEIGHT = 1.2  # Slightly increased to emphasize confidence accuracy
 
 # Visualization parameters
-TENSORBOARD_TRAIN_IMAGES = 20
-TENSORBOARD_VAL_IMAGES = 50  # Increased from 20 to show more validation images
+TENSORBOARD_TRAIN_IMAGES = 8
+TENSORBOARD_VAL_IMAGES = 16  # Increased from 20 to show more validation images
 
 if DEVICE == torch.device("cuda"):
     DATA_SET_TO_USE = 1.0

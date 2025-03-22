@@ -1,117 +1,55 @@
-"""
-DataLoader creation and configuration for the dataset.
-"""
-import os
-import logging
+# loaders.py
+import random
+import numpy as np
 import torch
 from torch.utils.data import DataLoader, WeightedRandomSampler
 
-from config import BATCH_SIZE, NUM_WORKERS, DATA_ROOT, TRAIN_VAL_SPLIT
-from dataset_package.dataset import DogDetectionDataset
-from dataset_package.transforms import get_train_transform, get_val_transform
-from dataset_package.collate import collate_fn
+from .dataset import download_and_prepare_dataset, create_balanced_samples, ObjectDetectionDataset, LABEL_MAP
+from .transforms import get_augmentations
+from .collate import collate_fn
 
-logger = logging.getLogger('dog_detector')
+# Set random seeds for reproducibility
+random.seed(42)
+np.random.seed(42)
+torch.manual_seed(42)
 
-def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True, max_samples=25000):
+def create_dataloaders(batch_size=8, num_workers=4, max_samples=500, train_split=0.8):
     """
-    Create data loaders for Open Images multi-class detection dataset.
-    
-    Args:
-        root (str): Root directory for the dataset
-        batch_size (int): Batch size for dataloaders
-        download (bool): If True, downloads the dataset if not available
-        max_samples (int): Maximum number of samples to load
-        
-    Returns:
-        tuple: (train_loader, val_loader) - PyTorch DataLoader instances
+    Creates training and validation DataLoaders.
+    1. Downloads dataset using FiftyOne.
+    2. Balances the dataset using sample weights.
+    3. Splits samples into training and validation sets.
+    4. Constructs dataset objects with proper augmentations.
+    5. Returns DataLoaders, using a WeightedRandomSampler for training.
     """
-    os.makedirs(root, exist_ok=True)
-    logger.info(f"Using data root directory: {os.path.abspath(root)}")
+    foset = download_and_prepare_dataset(max_samples=max_samples)
+    samples, sample_weights = create_balanced_samples(foset)
     
-    # Get transforms for training and validation
-    train_transform = get_train_transform()
-    val_transform = get_val_transform()
+    num_train = int(len(samples) * train_split)
+    train_samples = samples[:num_train]
+    val_samples = samples[num_train:]
+    train_weights = sample_weights[:num_train]
     
-    # Create the training and validation datasets
-    logger.info("Creating training dataset...")
-    try:
-        train_dataset = DogDetectionDataset(
-            root=root,
-            split='train',
-            transform=train_transform,
-            download=download,
-            max_samples=int(max_samples * TRAIN_VAL_SPLIT)  # Adjust for train split
-        )
-    except Exception as e:
-        logger.error(f"Error creating training dataset: {e}")
-        raise RuntimeError(f"Failed to create training dataset: {e}")
+    train_transforms = get_augmentations(train=True)
+    val_transforms = get_augmentations(train=False)
     
-    logger.info("Creating validation dataset...")
-    try:
-        val_dataset = DogDetectionDataset(
-            root=root,
-            split='validation',
-            transform=val_transform,
-            download=download,
-            max_samples=int(max_samples * (1 - TRAIN_VAL_SPLIT))  # Adjust for validation split
-        )
-    except Exception as e:
-        logger.error(f"Error creating validation dataset: {e}")
-        raise RuntimeError(f"Failed to create validation dataset: {e}")
+    train_dataset = ObjectDetectionDataset(train_samples, train_transforms, LABEL_MAP)
+    val_dataset = ObjectDetectionDataset(val_samples, val_transforms, LABEL_MAP)
     
-    logger.info(f"Train set: {len(train_dataset)} images with objects")
-    logger.info(f"Val set: {len(val_dataset)} images with objects")
+    sampler = WeightedRandomSampler(train_weights, num_samples=len(train_weights), replacement=True)
     
-    # Create weighted sampler for training to balance single/multi-object examples
-    sample_weights = train_dataset.get_sample_weights()
-    train_sampler = None
-    
-    if sample_weights is not None:
-        train_sampler = WeightedRandomSampler(
-            weights=sample_weights,
-            num_samples=len(train_dataset),
-            replacement=True
-        )
-        logger.info("Using weighted sampler to balance single-object and multi-object examples")
-    
-    num_workers = min(8, NUM_WORKERS)
-    
-    train_loader = DataLoader(
-        train_dataset, 
-        batch_size=batch_size,
-        shuffle=(train_sampler is None),
-        sampler=train_sampler,
-        num_workers=num_workers,
-        pin_memory=True,  # Ensure pinned memory
-        persistent_workers=True,  # Keep workers alive between epochs
-        prefetch_factor=2,  # Prefetch 2 batches per worker
-        collate_fn=collate_fn,
-        drop_last=True
-    )
-    
-    val_loader = DataLoader(
-        val_dataset, 
-        batch_size=batch_size, 
-        shuffle=False, 
-        num_workers=num_workers // 2,
-        pin_memory=True,
-        persistent_workers=True,
-        prefetch_factor=2,
-        collate_fn=collate_fn
-    )
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, sampler=sampler,
+                              num_workers=num_workers, collate_fn=collate_fn)
+    val_loader = DataLoader(val_dataset, batch_size=batch_size, shuffle=False,
+                            num_workers=num_workers, collate_fn=collate_fn)
     
     return train_loader, val_loader
 
-def get_total_samples():
-    """
-    Get the total number of samples in the dataset
+if __name__ == "__main__":
+    train_loader, val_loader = create_dataloaders(batch_size=8, max_samples=500)
     
-    Returns:
-        int: Total number of samples in the dataset cache
-    """
-    cache_file = os.path.join(DATA_ROOT, 'multiclass_detection_cache.pt')
-    if os.path.exists(cache_file):
-        cache_data = torch.load(cache_file)
-        return len(cache_data['samples'])
-    return 0
+    # Example: iterate over one batch from train_loader
+    for images, targets in train_loader:
+        print("Batch of images shape:", images.shape)
+        print("Example target:", targets[0])
+        break

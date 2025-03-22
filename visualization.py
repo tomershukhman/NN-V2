@@ -2,7 +2,7 @@ import torch
 import torchvision.transforms.functional as F
 from torch.utils.tensorboard import SummaryWriter
 import numpy as np
-from PIL import ImageDraw, ImageFont
+from PIL import ImageDraw
 from config import (
     TENSORBOARD_TRAIN_IMAGES, TENSORBOARD_VAL_IMAGES,
     CLASS_NAMES
