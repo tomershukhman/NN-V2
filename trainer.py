@@ -82,18 +82,15 @@ def train():
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=LEARNING_RATE,
-        weight_decay=0.01  # Reduced from 0.02 for more stable initial training
+        weight_decay=0.01
     )
     
-    # Learning rate scheduler with gentler warmup
-    scheduler = torch.optim.OneCycleLR(
+    # Use custom learning rate scheduler with warmup
+    scheduler = LRWarmupCosineAnnealing(
         optimizer,
-        max_lr=LEARNING_RATE,
-        epochs=NUM_EPOCHS,
-        steps_per_epoch=total_steps,
-        pct_start=0.3,  # Longer warmup period (30% of training)
-        div_factor=10,  # Less aggressive division of initial learning rate
-        final_div_factor=100  # Less aggressive final learning rate reduction
+        warmup_epochs=int(NUM_EPOCHS * 0.3),  # 30% warmup
+        total_epochs=NUM_EPOCHS,
+        min_lr=LEARNING_RATE / 1000
     )
     
     # Training loop
@@ -162,7 +159,7 @@ def train():
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             optimizer.step()
-            scheduler.step()
+            scheduler.step(epoch)
             
             # Update metrics
             train_loss += loss.item()
@@ -171,9 +168,10 @@ def train():
             
             # Update progress bar
             avg_loss = train_loss / (batch_idx + 1)
+            current_lr = optimizer.param_groups[0]['lr']
             train_pbar.set_postfix({
                 'loss': f'{avg_loss:.4f}',
-                'lr': f'{scheduler.get_last_lr()[0]:.6f}'
+                'lr': f'{current_lr:.6f}'
             })
             
             # Clear memory every few batches
@@ -273,9 +271,24 @@ def train():
         print(f"Epoch {epoch+1}/{NUM_EPOCHS} Summary:")
         print(f"Training Loss: {train_loss:.4f}")
         print(f"Validation Loss: {val_loss:.4f}")
+        print("\nOverall Metrics:")
         print(f"Precision: {metrics['precision']:.4f}")
         print(f"Recall: {metrics['recall']:.4f}")
         print(f"F1 Score: {metrics['f1_score']:.4f}")
+        
+        print("\nPer-Class Statistics:")
+        for class_name, class_metrics in metrics['class_metrics'].items():
+            print(f"\n{class_name}:")
+            print(f"  Precision: {class_metrics['precision']:.4f}")
+            print(f"  Recall: {class_metrics['recall']:.4f}")
+            print(f"  F1: {class_metrics['f1']:.4f}")
+            print(f"  Ground Truth Count: {class_metrics['ground_truth_count']}")
+            print(f"  Prediction Count: {class_metrics['prediction_count']}")
+            print(f"  Over-detections: {class_metrics['over_detections']}")
+            print(f"  Under-detections: {class_metrics['under_detections']}")
+            print(f"  True Positives: {class_metrics['true_positives']}")
+            print(f"  False Positives: {class_metrics['false_positives']}")
+            print(f"  False Negatives: {class_metrics['false_negatives']}")
         print("="*70)
         
         # Save best model
@@ -310,10 +323,12 @@ def train():
     print("\nTraining completed")
 
 def calculate_metrics(predictions, targets):
-    """Calculate precision, recall, and F1 score for object detection"""
-    total_true_positives = 0
-    total_false_positives = 0
-    total_false_negatives = 0
+    """Calculate precision, recall, and F1 score for object detection with detailed class statistics"""
+    # Initialize per-class counters
+    class_stats = {
+        1: {'tp': 0, 'fp': 0, 'fn': 0, 'gt_count': 0, 'pred_count': 0},  # Person
+        2: {'tp': 0, 'fp': 0, 'fn': 0, 'gt_count': 0, 'pred_count': 0}   # Dog
+    }
     
     for pred, target in zip(predictions, targets):
         pred_boxes = pred['boxes']
@@ -321,29 +336,44 @@ def calculate_metrics(predictions, targets):
         gt_boxes = target['boxes']
         gt_labels = target['labels']
         
+        # Count ground truth instances per class
+        for label in gt_labels:
+            class_stats[label.item()]['gt_count'] += 1
+        
+        # Count predicted instances per class
+        for label in pred_labels:
+            class_stats[label.item()]['pred_count'] += 1
+        
         # Skip if no predictions or ground truth
         if len(pred_boxes) == 0:
-            total_false_negatives += len(gt_boxes)
+            for label in gt_labels:
+                class_stats[label.item()]['fn'] += 1
             continue
+            
         if len(gt_boxes) == 0:
-            total_false_positives += len(pred_boxes)
+            for label in pred_labels:
+                class_stats[label.item()]['fp'] += 1
             continue
         
         # Calculate IoU between all predictions and ground truth
         ious = box_iou(pred_boxes, gt_boxes)
         
-        # For each ground truth box, find the best matching prediction
+        # Track matched predictions per class
         matched_preds = set()
+        
+        # For each ground truth box, find the best matching prediction
         for gt_idx, gt_label in enumerate(gt_labels):
+            gt_label_val = gt_label.item()
+            
             # Only consider predictions with matching class
             matching_class_mask = pred_labels == gt_label
             if not matching_class_mask.any():
-                total_false_negatives += 1
+                class_stats[gt_label_val]['fn'] += 1
                 continue
                 
             ious_for_gt = ious[matching_class_mask, gt_idx]
             if len(ious_for_gt) == 0:
-                total_false_negatives += 1
+                class_stats[gt_label_val]['fn'] += 1
                 continue
                 
             # Find best matching prediction
@@ -352,26 +382,60 @@ def calculate_metrics(predictions, targets):
             
             # If IoU is good enough and prediction hasn't been matched yet
             if best_iou >= 0.5 and best_pred_idx.item() not in matched_preds:
-                total_true_positives += 1
+                class_stats[gt_label_val]['tp'] += 1
                 matched_preds.add(best_pred_idx.item())
             else:
-                total_false_negatives += 1
+                class_stats[gt_label_val]['fn'] += 1
         
-        # Count unmatched predictions as false positives
-        total_false_positives += len(pred_boxes) - len(matched_preds)
+        # Count unmatched predictions as false positives per class
+        for pred_idx, pred_label in enumerate(pred_labels):
+            if pred_idx not in matched_preds:
+                class_stats[pred_label.item()]['fp'] += 1
     
-    # Calculate metrics
-    precision = total_true_positives / (total_true_positives + total_false_positives) if total_true_positives > 0 else 0
-    recall = total_true_positives / (total_true_positives + total_false_negatives) if total_true_positives > 0 else 0
+    # Calculate overall metrics
+    total_tp = sum(stats['tp'] for stats in class_stats.values())
+    total_fp = sum(stats['fp'] for stats in class_stats.values())
+    total_fn = sum(stats['fn'] for stats in class_stats.values())
+    
+    precision = total_tp / (total_tp + total_fp) if total_tp > 0 else 0
+    recall = total_tp / (total_tp + total_fn) if total_tp > 0 else 0
     f1_score = 2 * (precision * recall) / (precision + recall) if precision + recall > 0 else 0
+    
+    # Calculate per-class metrics
+    class_metrics = {}
+    for class_id, stats in class_stats.items():
+        class_name = 'Person' if class_id == 1 else 'Dog'
+        tp, fp, fn = stats['tp'], stats['fp'], stats['fn']
+        gt_count, pred_count = stats['gt_count'], stats['pred_count']
+        
+        class_precision = tp / (tp + fp) if (tp + fp) > 0 else 0
+        class_recall = tp / (tp + fn) if (tp + fn) > 0 else 0
+        class_f1 = 2 * (class_precision * class_recall) / (class_precision + class_recall) if (class_precision + class_recall) > 0 else 0
+        
+        over_detections = max(0, pred_count - gt_count)
+        under_detections = max(0, gt_count - pred_count)
+        
+        class_metrics[class_name] = {
+            'precision': class_precision,
+            'recall': class_recall,
+            'f1': class_f1,
+            'true_positives': tp,
+            'false_positives': fp,
+            'false_negatives': fn,
+            'ground_truth_count': gt_count,
+            'prediction_count': pred_count,
+            'over_detections': over_detections,
+            'under_detections': under_detections
+        }
     
     return {
         'precision': precision,
         'recall': recall,
         'f1_score': f1_score,
-        'true_positives': total_true_positives,
-        'false_positives': total_false_positives,
-        'false_negatives': total_false_negatives
+        'true_positives': total_tp,
+        'false_positives': total_fp,
+        'false_negatives': total_fn,
+        'class_metrics': class_metrics
     }
 
 if __name__ == "__main__":
