@@ -14,6 +14,11 @@ import math
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 import random
 import logging
+import torch.backends.cudnn as cudnn
+from torch.cuda.amp import GradScaler, autocast
+
+# Enable cuDNN autotuner
+cudnn.benchmark = True
 
 # Use the same logger as in dataset.py
 logger = logging.getLogger('dog_detector')
@@ -151,6 +156,9 @@ class Trainer:
         
         logger.info("Trainer initialized with weight decay scheduler")
         
+        # Initialize mixed precision training
+        self.scaler = GradScaler()
+        
     def train(self):
         # Initialize tracking variables
         best_val_loss = float('inf')
@@ -287,45 +295,48 @@ class Trainer:
                     targets.append(target)
                 
                 # Forward pass with dynamic loss weights based on dog count
-                predictions = self.model(images, targets)
+                with autocast():
+                    predictions = self.model(images, targets)
                 
-                # Apply different weights for multi-dog vs single-dog images
-                batch_conf_weights = []
-                batch_bbox_weights = []
-                
-                for target in targets:
-                    if target['dog_count'] > 1:
-                        # For multi-dog images, use slightly higher confidence weight
-                        batch_conf_weights.append(conf_weight * self.multi_dog_conf_weight)
-                        batch_bbox_weights.append(bbox_weight)
-                    else:
-                        # For single-dog images, use standard weights
-                        batch_conf_weights.append(conf_weight)
-                        batch_bbox_weights.append(bbox_weight)
-                
-                # Calculate average weights for the batch
-                avg_conf_weight = sum(batch_conf_weights) / len(batch_conf_weights) if batch_conf_weights else conf_weight
-                avg_bbox_weight = sum(batch_bbox_weights) / len(batch_bbox_weights) if batch_bbox_weights else bbox_weight
-                
-                # Calculate loss with adjusted weights
-                loss_dict = self.criterion(predictions, targets, conf_weight=avg_conf_weight, bbox_weight=avg_bbox_weight)
-                loss = loss_dict['total_loss']
+                    # Apply different weights for multi-dog vs single-dog images
+                    batch_conf_weights = []
+                    batch_bbox_weights = []
+                    
+                    for target in targets:
+                        if target['dog_count'] > 1:
+                            # For multi-dog images, use slightly higher confidence weight
+                            batch_conf_weights.append(conf_weight * self.multi_dog_conf_weight)
+                            batch_bbox_weights.append(bbox_weight)
+                        else:
+                            # For single-dog images, use standard weights
+                            batch_conf_weights.append(conf_weight)
+                            batch_bbox_weights.append(bbox_weight)
+                    
+                    # Calculate average weights for the batch
+                    avg_conf_weight = sum(batch_conf_weights) / len(batch_conf_weights) if batch_conf_weights else conf_weight
+                    avg_bbox_weight = sum(batch_bbox_weights) / len(batch_bbox_weights) if batch_bbox_weights else bbox_weight
+                    
+                    # Calculate loss with adjusted weights
+                    loss_dict = self.criterion(predictions, targets, conf_weight=avg_conf_weight, bbox_weight=avg_bbox_weight)
+                    loss = loss_dict['total_loss']
                 
                 # Scale loss for gradient accumulation
                 loss = loss / self.gradient_accumulation_steps
                 
                 # Backward pass with gradient clipping
-                loss.backward()
+                self.scaler.scale(loss).backward()
                 
                 accumulated_steps += 1
                 
                 # Only perform optimization step after accumulating gradients
                 if accumulated_steps == self.gradient_accumulation_steps or step == len(self.train_loader) - 1:
                     # Gradient clipping
+                    self.scaler.unscale_(self.optimizer)
                     torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=3.0)
                     
                     # Optimizer step
-                    self.optimizer.step()
+                    self.scaler.step(self.optimizer)
+                    self.scaler.update()
                     self.optimizer.zero_grad()
                     accumulated_steps = 0
                 
@@ -474,7 +485,8 @@ class Trainer:
                 # Get predictions in training format for loss calculation
                 if model == self.model:
                     model.train()  # Temporarily set to train mode
-                    predictions = model(images, targets)
+                    with autocast():
+                        predictions = model(images, targets)
                     model.eval()  # Set back to eval mode
                     
                     # Calculate loss

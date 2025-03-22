@@ -1,26 +1,76 @@
 import torch
 import torch.nn as nn
-import torch.nn.functional as F  # Added missing import
+import torch.nn.functional as F
+import torch.jit
+
+@torch.jit.script
+def calculate_box_iou(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """Vectorized IoU calculation with JIT compilation"""
+    x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
+    y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
+    x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
+    y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+    
+    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    union = area1[:, None] + area2 - intersection
+    
+    return intersection / (union + 1e-6)
+
+@torch.jit.script
+def focal_loss(pred: torch.Tensor, target: torch.Tensor, alpha: float, gamma: float) -> torch.Tensor:
+    """JIT-compiled focal loss calculation"""
+    pt = torch.where(target == 1.0, pred, 1 - pred)
+    alpha_factor = torch.where(target == 1.0, alpha, 1 - alpha)
+    focal_weight = (1 - pt).pow(gamma)
+    
+    return -alpha_factor * focal_weight * torch.log(torch.clamp(
+        torch.where(target == 1.0, pred, 1 - pred),
+        min=1e-6, max=1-1e-6
+    ))
+
+@torch.jit.script
+def giou_loss(boxes1: torch.Tensor, boxes2: torch.Tensor) -> torch.Tensor:
+    """JIT-compiled GIoU loss calculation"""
+    # Calculate IoU components
+    x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
+    y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
+    x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
+    y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+    
+    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+    area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+    area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+    union = area1 + area2 - intersection
+    iou = intersection / (union + 1e-6)
+    
+    # Calculate enclosing box
+    enc_x1 = torch.min(boxes1[:, 0], boxes2[:, 0])
+    enc_y1 = torch.min(boxes1[:, 1], boxes2[:, 1])
+    enc_x2 = torch.max(boxes1[:, 2], boxes2[:, 2])
+    enc_y2 = torch.max(boxes1[:, 3], boxes2[:, 3])
+    enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
+    
+    # Calculate GIoU
+    giou = iou - (enc_area - union) / (enc_area + 1e-6)
+    return 1 - giou
 
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Better thresholds for multi-object detection
-        self.positive_threshold = 0.5  # Keep at 0.5 for high quality matches
-        self.negative_threshold = 0.4  # Increase from 0.3 to reduce ambiguous regions
-        
-        # Adjusted focal loss parameters for multi-object detection
-        self.alpha = 0.25  # Balanced alpha for multi-object detection
-        self.gamma = 2.0   # Increased gamma to better focus on hard examples
+        self.register_buffer('positive_threshold', torch.tensor(0.5))
+        self.register_buffer('negative_threshold', torch.tensor(0.4))
+        self.register_buffer('alpha', torch.tensor(0.25))
+        self.register_buffer('gamma', torch.tensor(2.0))
         
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         # Handle both training and validation outputs
         if isinstance(predictions, list):
-            # Convert validation format to training format
             batch_size = len(predictions)
             device = predictions[0]['boxes'].device
             
-            # Get number of anchors from the first prediction that includes anchors
+            # Get number of anchors from the first prediction
             default_anchors = None
             for pred in predictions:
                 if 'anchors' in pred and pred['anchors'] is not None:
@@ -32,7 +82,7 @@ class DetectionLoss(nn.Module):
                 
             num_anchors = len(default_anchors)
             
-            # Create tensors in training format
+            # Create tensors in training format efficiently
             bbox_pred = torch.zeros((batch_size, num_anchors, 4), device=device)
             conf_pred = torch.zeros((batch_size, num_anchors), device=device)
             
@@ -54,118 +104,96 @@ class DetectionLoss(nn.Module):
         default_anchors = predictions['anchors']
         
         batch_size = bbox_pred.shape[0]
-        num_anchors = bbox_pred.shape[1]
         
-        # Initialize losses
-        conf_losses = []
-        bbox_losses = []
+        # Initialize losses with proper device and dtype
+        conf_losses = torch.zeros(batch_size, device=bbox_pred.device)
+        bbox_losses = torch.zeros(batch_size, device=bbox_pred.device)
         
         for i in range(batch_size):
             target_boxes = targets[i]['boxes']
             
             if len(target_boxes) == 0:
-                # Handle empty targets
-                conf_loss = -torch.log(1 - conf_pred[i] + 1e-6).mean()
-                bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
-            else:
-                # Calculate IoU between anchors and target boxes
-                ious = self._calculate_box_iou(default_anchors, target_boxes)
+                # Handle empty targets efficiently
+                conf_losses[i] = -torch.log(1 - conf_pred[i] + 1e-6).mean()
+                continue
                 
-                # For each anchor, get IoU with best matching target
-                max_ious, best_target_idx = ious.max(dim=1)
-                
-                # For each target, ensure at least one anchor is assigned
-                best_anchor_per_target = []
-                for t_idx in range(len(target_boxes)):
-                    # Get candidate anchors for this target (IoU > 0.3)
-                    target_ious = ious[:, t_idx]
-                    candidate_mask = target_ious > 0.3
-                    
-                    if candidate_mask.sum() > 0:
-                        # Take top-k anchors for each target to ensure multiple good matches
-                        # This helps with multi-object scenarios by providing more positive anchors
-                        k = min(3, candidate_mask.sum().item())  # Get up to 3 anchors per target
-                        topk_ious, topk_indices = torch.topk(target_ious, k=k)
-                        best_anchor_per_target.extend(topk_indices.tolist())
-                    else:
-                        # If no good candidates, force assign the best one
-                        best_idx = target_ious.argmax().item()
-                        best_anchor_per_target.append(best_idx)
-                
-                # Create masks for positive and negative anchors
-                positive_mask = max_ious >= self.positive_threshold
-                for idx in best_anchor_per_target:
-                    positive_mask[idx] = True  # Force-assigned anchors are positive
-                
-                negative_mask = max_ious < self.negative_threshold
-                negative_mask[positive_mask] = False  # Ensure no overlap
-                
-                # Calculate confidence target for focal loss
-                conf_target = torch.zeros_like(conf_pred[i])
-                conf_target[positive_mask] = 1.0
-                
-                # Apply focal loss with improved weighting for multi-object detection
-                pt = torch.where(conf_target == 1.0, conf_pred[i], 1 - conf_pred[i])
-                alpha_factor = torch.where(conf_target == 1.0, self.alpha, 1 - self.alpha)
-                focal_weight = (1 - pt).pow(self.gamma)
-                
-                focal_loss = -alpha_factor * focal_weight * torch.log(torch.clamp(
-                    torch.where(conf_target == 1.0, conf_pred[i], 1 - conf_pred[i]),
-                    min=1e-6, max=1-1e-6
-                ))
-                
-                # Balance positive and negative samples
-                num_positive = positive_mask.sum().item()
-                if num_positive > 0:
-                    # Sample negative examples to maintain a reasonable pos:neg ratio
-                    # For multi-object cases, we want more negative samples
-                    neg_ratio = min(3, int(num_anchors / num_positive))
-                    max_neg = neg_ratio * num_positive
-                    
-                    if negative_mask.sum() > max_neg:
-                        # Sort negative anchors by loss value
-                        neg_losses = focal_loss[negative_mask]
-                        neg_values, neg_indices = torch.topk(neg_losses, k=max_neg)
-                        
-                        # Create a new mask with only the selected negatives
-                        selected_neg_mask = torch.zeros_like(negative_mask)
-                        selected_neg_indices = torch.where(negative_mask)[0][neg_indices]
-                        selected_neg_mask[selected_neg_indices] = True
-                        
-                        # Only compute loss on positives and selected negatives
-                        loss_mask = positive_mask | selected_neg_mask
-                        conf_loss = focal_loss[loss_mask].mean()
-                    else:
-                        # If we don't have too many negatives, use all of them
-                        loss_mask = positive_mask | negative_mask
-                        conf_loss = focal_loss[loss_mask].mean()
-                else:
-                    # If no positives, just use the hardest negatives
-                    num_neg = min(num_anchors // 4, 100)  # Cap at a reasonable number
-                    neg_values, neg_indices = torch.topk(focal_loss[negative_mask], k=min(num_neg, negative_mask.sum().item()))
-                    conf_loss = neg_values.mean()
-                
-                # Calculate bbox loss only for positive samples with better scaling
-                if positive_mask.sum() > 0:
-                    # Multi-target assignment: each anchor might be associated with different GT boxes
-                    matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
-                    pred_boxes = bbox_pred[i][positive_mask]
-                    
-                    # Use combined IoU and L1 loss for better localization
-                    iou_loss = self._giou_loss(pred_boxes, matched_target_boxes)
-                    l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none').mean(dim=1)
-                    
-                    # Combine losses with adaptive weighting
-                    bbox_loss = (iou_loss + 0.5 * l1_loss).mean()
-                else:
-                    bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
+            # Calculate IoU between anchors and target boxes
+            ious = calculate_box_iou(default_anchors, target_boxes)
             
-            conf_losses.append(conf_loss)
-            bbox_losses.append(bbox_loss)
+            # Get best matching target for each anchor
+            max_ious, best_target_idx = ious.max(dim=1)
+            
+            # Find best anchors for each target
+            best_anchor_per_target = []
+            target_ious = ious.permute(1, 0)  # [num_targets, num_anchors]
+            
+            # Use vectorized operations for matching
+            candidate_mask = target_ious > 0.3
+            num_candidates = candidate_mask.sum(dim=1)
+            
+            for t_idx in range(len(target_boxes)):
+                if num_candidates[t_idx] > 0:
+                    # Get top-k anchors efficiently
+                    k = min(3, num_candidates[t_idx].item())
+                    topk_ious, topk_indices = torch.topk(target_ious[t_idx], k=k)
+                    best_anchor_per_target.extend(topk_indices.tolist())
+                else:
+                    best_idx = target_ious[t_idx].argmax().item()
+                    best_anchor_per_target.append(best_idx)
+            
+            # Create masks for positive and negative anchors
+            positive_mask = max_ious >= self.positive_threshold
+            positive_mask[best_anchor_per_target] = True
+            
+            negative_mask = max_ious < self.negative_threshold
+            negative_mask[positive_mask] = False
+            
+            # Calculate confidence target for focal loss
+            conf_target = torch.zeros_like(conf_pred[i])
+            conf_target[positive_mask] = 1.0
+            
+            # Apply focal loss with vectorized operations
+            focal_loss_result = focal_loss(conf_pred[i], conf_target, self.alpha, self.gamma)
+            
+            # Balance positive and negative samples efficiently
+            num_positive = positive_mask.sum().item()
+            if num_positive > 0:
+                neg_ratio = min(3, int(len(default_anchors) / num_positive))
+                max_neg = neg_ratio * num_positive
+                
+                if negative_mask.sum() > max_neg:
+                    neg_losses = focal_loss_result[negative_mask]
+                    neg_values, neg_indices = torch.topk(neg_losses, k=max_neg)
+                    
+                    selected_neg_mask = torch.zeros_like(negative_mask)
+                    selected_neg_indices = torch.where(negative_mask)[0][neg_indices]
+                    selected_neg_mask[selected_neg_indices] = True
+                    
+                    loss_mask = positive_mask | selected_neg_mask
+                    conf_losses[i] = focal_loss_result[loss_mask].mean()
+                else:
+                    loss_mask = positive_mask | negative_mask
+                    conf_losses[i] = focal_loss_result[loss_mask].mean()
+            else:
+                # Handle no positives case efficiently
+                num_neg = min(len(default_anchors) // 4, 100)
+                neg_values, _ = torch.topk(focal_loss_result[negative_mask], k=min(num_neg, negative_mask.sum().item()))
+                conf_losses[i] = neg_values.mean()
+            
+            # Calculate bbox loss only for positive samples
+            if positive_mask.sum() > 0:
+                matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
+                pred_boxes = bbox_pred[i][positive_mask]
+                
+                # Combined IoU and L1 loss with vectorized operations
+                box_giou_loss = giou_loss(pred_boxes, matched_target_boxes)
+                box_l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none').mean(dim=1)
+                
+                bbox_losses[i] = (box_giou_loss + 0.5 * box_l1_loss).mean()
         
         # Average losses across batch
-        conf_loss = torch.stack(conf_losses).mean()
-        bbox_loss = torch.stack(bbox_losses).mean()
+        conf_loss = conf_losses.mean()
+        bbox_loss = bbox_losses.mean()
         
         # Apply weights and combine
         total_loss = conf_weight * conf_loss + bbox_weight * bbox_loss
@@ -175,120 +203,3 @@ class DetectionLoss(nn.Module):
             'conf_loss': conf_loss.item(),
             'bbox_loss': bbox_loss.item()
         }
-    
-    def _calculate_box_iou(self, boxes1, boxes2):
-        """Calculate IoU between two sets of boxes with chunking for memory efficiency"""
-        # Convert to x1y1x2y2 format if normalized
-        boxes1 = boxes1.clone()
-        boxes2 = boxes2.clone()
-        
-        # Use chunking for large numbers of boxes
-        chunk_size = 512  # Reduced chunk size to prevent OOM
-        num_boxes1 = boxes1.size(0)
-        num_boxes2 = boxes2.size(0)
-        
-        if num_boxes1 * num_boxes2 > chunk_size * chunk_size:
-            # Initialize output matrix
-            ious = torch.zeros(num_boxes1, num_boxes2, device=boxes1.device)
-            
-            # Process in chunks
-            for i in range(0, num_boxes1, chunk_size):
-                end_i = min(i + chunk_size, num_boxes1)
-                boxes1_chunk = boxes1[i:end_i]
-                
-                for j in range(0, num_boxes2, chunk_size):
-                    end_j = min(j + chunk_size, num_boxes2)
-                    boxes2_chunk = boxes2[j:end_j]
-                    
-                    # Calculate intersection areas for chunk
-                    x1 = torch.max(boxes1_chunk[:, None, 0], boxes2_chunk[:, 0])
-                    y1 = torch.max(boxes1_chunk[:, None, 1], boxes2_chunk[:, 1])
-                    x2 = torch.min(boxes1_chunk[:, None, 2], boxes2_chunk[:, 2])
-                    y2 = torch.min(boxes1_chunk[:, None, 3], boxes2_chunk[:, 3])
-                    
-                    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-                    
-                    # Calculate areas for chunk
-                    area1 = (boxes1_chunk[:, 2] - boxes1_chunk[:, 0]) * (boxes1_chunk[:, 3] - boxes1_chunk[:, 1])
-                    area2 = (boxes2_chunk[:, 2] - boxes2_chunk[:, 0]) * (boxes2_chunk[:, 3] - boxes2_chunk[:, 1])
-                    union = area1[:, None] + area2 - intersection
-                    
-                    # Store results
-                    ious[i:end_i, j:end_j] = intersection / (union + 1e-6)
-            
-            return ious
-        else:
-            # For small number of boxes, calculate directly
-            x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
-            y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
-            x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
-            y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
-            
-            intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-            area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-            area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-            union = area1[:, None] + area2 - intersection
-            
-            return intersection / (union + 1e-6)
-            
-    def _giou_loss(self, boxes1, boxes2):
-        """Calculate GIoU loss between boxes with chunking for memory efficiency"""
-        # Use chunking for large numbers of boxes
-        chunk_size = 512
-        num_boxes = boxes1.size(0)
-        
-        if num_boxes > chunk_size:
-            giou_losses = []
-            # Process in chunks
-            for i in range(0, num_boxes, chunk_size):
-                end_i = min(i + chunk_size, num_boxes)
-                boxes1_chunk = boxes1[i:end_i]
-                boxes2_chunk = boxes2[i:end_i]
-                
-                # Calculate IoU components for chunk
-                x1 = torch.max(boxes1_chunk[:, 0], boxes2_chunk[:, 0])
-                y1 = torch.max(boxes1_chunk[:, 1], boxes2_chunk[:, 1])
-                x2 = torch.min(boxes1_chunk[:, 2], boxes2_chunk[:, 2])
-                y2 = torch.min(boxes1_chunk[:, 3], boxes2_chunk[:, 3])
-                
-                intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-                area1 = (boxes1_chunk[:, 2] - boxes1_chunk[:, 0]) * (boxes1_chunk[:, 3] - boxes1_chunk[:, 1])
-                area2 = (boxes2_chunk[:, 2] - boxes2_chunk[:, 0]) * (boxes2_chunk[:, 3] - boxes2_chunk[:, 1])
-                union = area1 + area2 - intersection
-                iou = intersection / (union + 1e-6)
-                
-                # Calculate enclosing box for chunk
-                enc_x1 = torch.min(boxes1_chunk[:, 0], boxes2_chunk[:, 0])
-                enc_y1 = torch.min(boxes1_chunk[:, 1], boxes2_chunk[:, 1])
-                enc_x2 = torch.max(boxes1_chunk[:, 2], boxes2_chunk[:, 2])
-                enc_y2 = torch.max(boxes1_chunk[:, 3], boxes2_chunk[:, 3])
-                enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
-                
-                # Calculate GIoU for chunk
-                giou = iou - (enc_area - union) / (enc_area + 1e-6)
-                giou_losses.append(1 - giou)
-            
-            return torch.cat(giou_losses)
-        else:
-            # For small number of boxes, calculate directly
-            x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
-            y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
-            x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
-            y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
-            
-            intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-            area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-            area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-            union = area1 + area2 - intersection
-            iou = intersection / (union + 1e-6)
-            
-            # Calculate enclosing box
-            enc_x1 = torch.min(boxes1[:, 0], boxes2[:, 0])
-            enc_y1 = torch.min(boxes1[:, 1], boxes2[:, 1])
-            enc_x2 = torch.max(boxes1[:, 2], boxes2[:, 2])
-            enc_y2 = torch.max(boxes1[:, 3], boxes2[:, 3])
-            enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
-            
-            # Calculate GIoU
-            giou = iou - (enc_area - union) / (enc_area + 1e-6)
-            return 1 - giou

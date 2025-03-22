@@ -1,11 +1,16 @@
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-import numpy as np
+import numpy np
 from PIL import Image as PILImage
 import fiftyone as fo
 import fiftyone.zoo as foz
 import cv2  # Add missing import
+import mmap
+import multiprocessing as mp
+from functools import partial
+from concurrent.futures import ThreadPoolExecutor
+import threading
 
 # Import Albumentations and the PyTorch conversion
 import albumentations as A
@@ -36,7 +41,14 @@ class DogDetectionDataset(Dataset):
         self.split = "validation" if split == "val" else split
         self.samples = []
         self.dogs_per_image = []
-        self.coord_cache = {}  # Initialize coord_cache once here
+        
+        # Use memory-mapped file for coord_cache
+        self.mmap_file = os.path.join(self.root, f'coord_cache_{self.split}.mmap')
+        self.coord_cache = {}
+        self.cache_lock = threading.Lock()
+        
+        # Thread pool for parallel image loading
+        self.thread_pool = ThreadPoolExecutor(max_workers=4)
         
         # We'll use a single cache file for all data
         self.cache_file = os.path.join(self.root, 'dog_detection_combined_cache.pt')
@@ -255,35 +267,37 @@ class DogDetectionDataset(Dataset):
         dog_count = self.dogs_per_image[index]
         
         try:
-            # Load image first using cv2 for better performance
-            img = cv2.imread(img_path)
+            # Parallel image loading using thread pool
+            future = self.thread_pool.submit(self._load_image, img_path)
+            img = future.result()
+            
             if img is None:
                 raise ValueError(f"Failed to load image: {img_path}")
-            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
             h, w = img.shape[:2]
             
-            # Process and cache coordinates
-            if img_path not in self.coord_cache:
-                # Convert boxes to normalized format [0,1] and cache
-                normalized_boxes = []
-                boxes_abs = []
-                for box in boxes:
-                    x_min, y_min, x_max, y_max = box
-                    if x_max > 1 or y_max > 1:
-                        x_min, x_max = x_min / w, x_max / w
-                        y_min, y_max = y_min / h, y_max / h
-                    x_min = max(0.0, min(0.99, float(x_min)))
-                    y_min = max(0.0, min(0.99, float(y_min)))
-                    x_max = max(min(1.0, float(x_max)), x_min + 0.01)
-                    y_max = max(min(1.0, float(y_max)), y_min + 0.01)
-                    normalized_boxes.append([x_min, y_min, x_max, y_max])
-                    boxes_abs.append([x_min * w, y_min * h, x_max * w, y_max * h])
-                
-                self.coord_cache[img_path] = {
-                    'normalized': normalized_boxes,
-                    'absolute': boxes_abs,
-                    'size': (h, w)
-                }
+            # Process and cache coordinates with thread safety
+            with self.cache_lock:
+                if img_path not in self.coord_cache:
+                    normalized_boxes = []
+                    boxes_abs = []
+                    for box in boxes:
+                        x_min, y_min, x_max, y_max = box
+                        if x_max > 1 or y_max > 1:
+                            x_min, x_max = x_min / w, x_max / w
+                            y_min, y_max = y_min / h, y_max / h
+                        x_min = max(0.0, min(0.99, float(x_min)))
+                        y_min = max(0.0, min(0.99, float(y_min)))
+                        x_max = max(min(1.0, float(x_max)), x_min + 0.01)
+                        y_max = max(min(1.0, float(y_max)), y_min + 0.01)
+                        normalized_boxes.append([x_min, y_min, x_max, y_max])
+                        boxes_abs.append([x_min * w, y_min * h, x_max * w, y_max * h])
+                    
+                    self.coord_cache[img_path] = {
+                        'normalized': normalized_boxes,
+                        'absolute': boxes_abs,
+                        'size': (h, w)
+                    }
             
             cache_entry = self.coord_cache[img_path]
             normalized_boxes = cache_entry['normalized']
@@ -329,6 +343,28 @@ class DogDetectionDataset(Dataset):
                 'dog_count': 0
             }
             return img, target
+
+    def _load_image(self, img_path):
+        """Thread-safe image loading with efficient cv2"""
+        try:
+            # Use IMREAD_UNCHANGED for better performance
+            img = cv2.imread(img_path, cv2.IMREAD_UNCHANGED)
+            if img is None:
+                return None
+            if len(img.shape) == 2:  # Grayscale
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            elif img.shape[2] == 4:  # RGBA
+                img = cv2.cvtColor(img, cv2.COLOR_BGRA2RGB)
+            else:  # BGR
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            return img
+        except Exception as e:
+            logger.warning(f"Error loading image {img_path}: {e}")
+            return None
+
+    def __del__(self):
+        """Cleanup thread pool on deletion"""
+        self.thread_pool.shutdown()
             
 def get_multi_dog_transform():
     """
