@@ -921,10 +921,9 @@ class Trainer:
                 # Combine IoU and class matching for scoring
                 scores = valid_pred_ious + class_match_bonus
                 best_pred_idx = valid_pred_indices[scores.argmax()]
-                
                 matches[best_pred_idx.item()] = (gt_idx, valid_pred_ious.max().item())
         
-        return matches
+        return max_ious, matches
 
     def _calculate_single_iou(self, box1, box2):
         """Calculate IoU between two boxes"""
