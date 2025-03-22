@@ -63,13 +63,32 @@ class VisualizationLogger:
             if loss_type in metrics:
                 safe_log(f'Loss/{loss_type.replace("_loss", "")}', metrics[loss_type])
 
-        # Detection quality metrics per class
+        # Per-class metrics
         for class_idx in range(1, len(CLASS_NAMES)):
             class_name = CLASS_NAMES[class_idx]
+            # Log standard metrics
             for metric in ['precision', 'recall', 'f1', 'mean_iou']:
                 key = f'{class_name}_{metric}'
                 if key in metrics:
-                    safe_log(f'{class_name}/{metric}', metrics[key])
+                    safe_log(f'Classes/{class_name}/{metric}', metrics[key])
+            
+            # Log detection counts
+            if f'{class_name}_total_gt' in metrics:
+                safe_log(f'Classes/{class_name}/ground_truth_count', metrics[f'{class_name}_total_gt'])
+            if f'{class_name}_total_pred' in metrics:
+                safe_log(f'Classes/{class_name}/prediction_count', metrics[f'{class_name}_total_pred'])
+
+        # Detection count metrics
+        detection_count_metrics = {
+            'OverDetections': 'over_detections',
+            'UnderDetections': 'under_detections',
+            'CorrectCount': 'correct_count_percent',
+            'CountMatchPercentage': 'count_match_percentage',
+            'AvgCountDiff': 'avg_count_diff'
+        }
+        for display_name, metric_key in detection_count_metrics.items():
+            if metric_key in metrics:
+                safe_log(f'DetectionCounts/{display_name}', metrics[metric_key])
 
         # Overall detection metrics
         detection_metrics = {
@@ -85,9 +104,7 @@ class VisualizationLogger:
         # Per-image statistics
         image_stats = {
             'AvgDetectionsPerImage': 'avg_detections',
-            'AvgGroundTruthPerImage': 'avg_ground_truth',
-            'CountMatchPercentage': 'count_match_percentage',
-            'AvgCountDiff': 'avg_count_diff'
+            'AvgGroundTruthPerImage': 'avg_ground_truth'
         }
         for display_name, metric_key in image_stats.items():
             if metric_key in metrics:
