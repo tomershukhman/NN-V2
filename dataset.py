@@ -1,7 +1,7 @@
 import os
 import torch
 from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
-import numpy np
+import numpy as np
 from PIL import Image as PILImage
 import fiftyone as fo
 import fiftyone.zoo as foz
