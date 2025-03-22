@@ -125,7 +125,14 @@ def train():
             
             # Forward pass
             predictions = model(images, targets)  # This returns a dict with bbox_pred, conf_pred, and anchors
-            loss_dict = criterion(predictions, targets)
+            
+            # Convert predictions to list format if needed
+            if isinstance(predictions, dict):
+                loss_dict = criterion(predictions, targets)
+            else:
+                # Handle case where predictions are already in list format
+                loss_dict = criterion({'bbox_pred': predictions[0], 'conf_pred': predictions[1], 'anchors': predictions[2]}, targets)
+            
             loss = loss_dict['total_loss']
             
             # Backward pass
@@ -183,15 +190,17 @@ def train():
                     'labels': label.to(DEVICE)
                 } for box, label in zip(boxes, labels)]
                 
-                # Get predictions for loss calculation
-                predictions = model(images, targets)
-                loss_dict = criterion(predictions, targets)
+                # Get predictions for loss calculation with model in training mode temporarily
+                model.train()
+                train_predictions = model(images, targets)
+                loss_dict = criterion(train_predictions, targets)
+                model.eval()
                 
                 val_loss += loss_dict['total_loss'].item()
                 val_conf_loss += loss_dict['conf_loss']
                 val_bbox_loss += loss_dict['bbox_loss']
                 
-                # Get inference predictions for metrics
+                # Get inference predictions for metrics with model in eval mode
                 inference_preds = model(images, None)  # This returns a list of dicts with boxes, scores, and labels
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)

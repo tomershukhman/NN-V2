@@ -135,23 +135,6 @@ def download_and_prepare_dataset(max_samples=500):
     dataset_name = "open-images-person-dog"
     cache_path = get_cache_path(max_samples, dataset_name)
     
-    # Try to load from cache first
-    if cache_path.exists():
-        try:
-            logger.info(f"Loading dataset from cache: {cache_path}")
-            with open(cache_path, 'rb') as f:
-                cache_data = pickle.load(f)
-                
-            # Validate cache
-            if (cache_data.get('max_samples') == max_samples and 
-                cache_data.get('dataset_name') == dataset_name):
-                logger.info("Cache validation successful")
-                return cache_data['dataset']
-            else:
-                logger.info("Cache parameters mismatch, downloading fresh dataset")
-        except Exception as e:
-            logger.warning(f"Failed to load cache: {e}")
-    
     # If cache doesn't exist or is invalid, download dataset
     try:
         dataset = fo.load_dataset(dataset_name)
@@ -169,25 +152,48 @@ def download_and_prepare_dataset(max_samples=500):
         )
         logger.info(f"Downloaded dataset with {len(dataset)} samples")
     
-    # Save to cache
+    # Extract essential data into a simpler, serializable format
     try:
-        cache_data = {
-            'dataset': dataset,
+        serializable_data = {
+            'samples': [],
             'max_samples': max_samples,
             'dataset_name': dataset_name,
-            'timestamp': np.datetime64('now')
+            'timestamp': str(np.datetime64('now'))
         }
-        logger.info(f"Saving dataset to cache: {cache_path}")
+        
+        for sample in dataset:
+            if hasattr(sample, 'ground_truth') and hasattr(sample.ground_truth, 'detections'):
+                sample_data = {
+                    'filepath': sample.filepath,
+                    'detections': []
+                }
+                
+                for det in sample.ground_truth.detections:
+                    if hasattr(det, 'label') and hasattr(det, 'bounding_box'):
+                        detection = {
+                            'label': det.label,
+                            'bounding_box': det.bounding_box.tolist() if hasattr(det.bounding_box, 'tolist') else det.bounding_box
+                        }
+                        sample_data['detections'].append(detection)
+                
+                serializable_data['samples'].append(sample_data)
+        
+        # Save to cache
+        logger.info(f"Saving serializable dataset to cache: {cache_path}")
         with open(cache_path, 'wb') as f:
-            pickle.dump(cache_data, f)
+            pickle.dump(serializable_data, f)
+            
+        return dataset
+        
     except Exception as e:
         logger.warning(f"Failed to save cache: {e}")
-    
-    return dataset
+        # Return the dataset even if caching fails
+        return dataset
 
 def create_balanced_samples(foset):
     """
     Create a balanced list of samples with caching support.
+    Handles both FiftyOne dataset objects and serialized dataset format.
     """
     cache_path = Path("cache/balanced_samples.pkl")
     cache_path.parent.mkdir(exist_ok=True)
@@ -206,169 +212,134 @@ def create_balanced_samples(foset):
         except Exception as e:
             logger.warning(f"Failed to load balanced samples cache: {e}")
     
-    logger.info(f"Creating balanced samples from {len(foset)} FiftyOne samples")
+    logger.info(f"Creating balanced samples from {len(foset)} samples")
     
     if len(foset) == 0:
         logger.warning("Empty dataset provided to create_balanced_samples")
         return [], []
     
-    # Analyze dataset composition before processing
-    logger.info("=== Dataset Statistics ===")
-    logger.info(f"Total samples in dataset: {len(foset)}")
-    
-    # Sample count per class
+    # Initialize counters and collectors
     class_counts = {"Person": 0, "Dog": 0}
-    # Images with both classes
     both_classes = 0
-    # Counts for images with multiple instances of each class
     multi_person = 0
     multi_dog = 0
-    # Collect bounding box sizes
     person_bbox_sizes = []
     dog_bbox_sizes = []
     
-    # First analyze dataset composition
-    for sample in foset:
-        has_person = False
-        has_dog = False
-        person_count = 0
-        dog_count = 0
-        
-        if hasattr(sample, 'ground_truth') and hasattr(sample.ground_truth, 'detections'):
-            for det in sample.ground_truth.detections:
-                if hasattr(det, 'label'):
-                    if det.label == "Person":
-                        has_person = True
-                        person_count += 1
-                        # Collect bbox size info (area as percentage of image)
-                        if hasattr(det, 'bounding_box'):
-                            x, y, w, h = det.bounding_box
-                            area = w * h  # Normalized area (0-1)
-                            person_bbox_sizes.append(area)
-                    elif det.label == "Dog":
-                        has_dog = True
-                        dog_count += 1
-                        # Collect bbox size info
-                        if hasattr(det, 'bounding_box'):
-                            x, y, w, h = det.bounding_box
-                            area = w * h  # Normalized area (0-1)
-                            dog_bbox_sizes.append(area)
-            
-            if has_person:
-                class_counts["Person"] += 1
-            if has_dog:
-                class_counts["Dog"] += 1
-            if has_person and has_dog:
-                both_classes += 1
-            if person_count > 1:
-                multi_person += 1
-            if dog_count > 1:
-                multi_dog += 1
-    
-    # Display statistics
-    logger.info(f"Images with Person: {class_counts['Person']} ({class_counts['Person']/len(foset)*100:.1f}%)")
-    logger.info(f"Images with Dog: {class_counts['Dog']} ({class_counts['Dog']/len(foset)*100:.1f}%)")
-    logger.info(f"Images with both Person and Dog: {both_classes} ({both_classes/len(foset)*100:.1f}%)")
-    logger.info(f"Images with multiple People: {multi_person} ({multi_person/len(foset)*100:.1f}%)")
-    logger.info(f"Images with multiple Dogs: {multi_dog} ({multi_dog/len(foset)*100:.1f}%)")
-    
-    # Calculate average bbox sizes
-    if person_bbox_sizes:
-        avg_person_size = sum(person_bbox_sizes) / len(person_bbox_sizes)
-        logger.info(f"Average Person bbox size: {avg_person_size*100:.2f}% of image area")
-    if dog_bbox_sizes:
-        avg_dog_size = sum(dog_bbox_sizes) / len(dog_bbox_sizes)
-        logger.info(f"Average Dog bbox size: {avg_dog_size*100:.2f}% of image area")
-    
-    logger.info("========================")
-    
-    valid_samples_data = []  # Will store dictionaries instead of FiftyOne sample objects
-    valid_sample_flags = []  # Each element is a tuple (has_person, has_dog)
+    valid_samples_data = []
+    valid_sample_flags = []
     n_person = 0
     n_dog = 0
     
-    # Now continue with the regular sample processing
+    # Handle both FiftyOne dataset and serialized format
     for sample in foset:
         has_person = False
         has_dog = False
-        is_valid = False
-        
-        # Extract bounding boxes and category IDs for this sample
         sample_bboxes = []
         sample_category_ids = []
         
-        # For Open Images dataset, detections may be in the ground_truth field
-        if hasattr(sample, 'ground_truth'):
-            detections = sample.ground_truth
+        # Handle serialized format
+        if isinstance(sample, dict) and 'detections' in sample:
+            detections = sample['detections']
+            filepath = sample['filepath']
             
-            # Ensure detections has the expected structure
-            if hasattr(detections, 'detections'):
-                for det in detections.detections:
-                    if hasattr(det, 'label'):
-                        label = det.label
-                        if label in LABEL_MAP:
-                            # Convert normalized bbox [x, y, w, h] to absolute Pascal VOC [x_min, y_min, x_max, y_max]
-                            try:
-                                x, y, bw, bh = det.bounding_box
-                                # Store bbox in normalized format, will convert to absolute in __getitem__
-                                sample_bboxes.append([x, y, bw, bh])
-                                sample_category_ids.append(LABEL_MAP[label])
-                                
-                                if label == "Person":
-                                    has_person = True
-                                    is_valid = True
-                                elif label == "Dog":
-                                    has_dog = True
-                                    is_valid = True
-                            except (ValueError, TypeError, AttributeError) as e:
-                                logger.warning(f"Error processing bbox: {e}")
-                                continue
+            for det in detections:
+                if 'label' in det and 'bounding_box' in det:
+                    label = det['label']
+                    bbox = det['bounding_box']
+                    
+                    if label in LABEL_MAP:
+                        sample_bboxes.append(bbox)
+                        sample_category_ids.append(LABEL_MAP[label])
+                        
+                        if label == "Person":
+                            has_person = True
+                            area = bbox[2] * bbox[3]  # w * h
+                            person_bbox_sizes.append(area)
+                        elif label == "Dog":
+                            has_dog = True
+                            area = bbox[2] * bbox[3]  # w * h
+                            dog_bbox_sizes.append(area)
             
-            # Only include samples with at least one valid detection
-            if is_valid:
-                # Create a serializable dictionary instead of using the FiftyOne sample
-                sample_data = {
-                    "filepath": sample.filepath,
-                    "bboxes": sample_bboxes,
-                    "category_ids": sample_category_ids,
-                    "id": str(sample.id) if hasattr(sample, "id") else "unknown"
-                }
-                valid_samples_data.append(sample_data)
-                valid_sample_flags.append((has_person, has_dog))
-                if has_person:
-                    n_person += 1
-                if has_dog:
-                    n_dog += 1
+        # Handle FiftyOne dataset format
+        elif hasattr(sample, 'ground_truth') and hasattr(sample.ground_truth, 'detections'):
+            filepath = sample.filepath
+            for det in sample.ground_truth.detections:
+                if hasattr(det, 'label') and hasattr(det, 'bounding_box'):
+                    label = det.label
+                    if label in LABEL_MAP:
+                        try:
+                            bbox = det.bounding_box
+                            if hasattr(bbox, 'tolist'):
+                                bbox = bbox.tolist()
+                            
+                            sample_bboxes.append(bbox)
+                            sample_category_ids.append(LABEL_MAP[label])
+                            
+                            if label == "Person":
+                                has_person = True
+                                area = bbox[2] * bbox[3]  # w * h
+                                person_bbox_sizes.append(area)
+                            elif label == "Dog":
+                                has_dog = True
+                                area = bbox[2] * bbox[3]  # w * h
+                                dog_bbox_sizes.append(area)
+                        except Exception as e:
+                            logger.warning(f"Error processing bbox: {e}")
+                            continue
+        
+        # Update statistics
+        if has_person:
+            class_counts["Person"] += 1
+        if has_dog:
+            class_counts["Dog"] += 1
+        if has_person and has_dog:
+            both_classes += 1
+        
+        # Only include samples with at least one valid detection
+        if len(sample_bboxes) > 0:
+            sample_data = {
+                "filepath": filepath,
+                "bboxes": sample_bboxes,
+                "category_ids": sample_category_ids
+            }
+            valid_samples_data.append(sample_data)
+            valid_sample_flags.append((has_person, has_dog))
+            if has_person:
+                n_person += 1
+            if has_dog:
+                n_dog += 1
     
-    logger.info(f"Found {len(valid_samples_data)} valid samples with detections")
-    logger.info(f"Class distribution: Person: {n_person}, Dog: {n_dog}")
+    # Display statistics
+    logger.info("=== Dataset Statistics ===")
+    total_samples = len(foset)
+    logger.info(f"Images with Person: {class_counts['Person']} ({class_counts['Person']/total_samples*100:.1f}%)")
+    logger.info(f"Images with Dog: {class_counts['Dog']} ({class_counts['Dog']/total_samples*100:.1f}%)")
+    logger.info(f"Images with both: {both_classes} ({both_classes/total_samples*100:.1f}%)")
+    logger.info(f"Found {len(valid_samples_data)} valid samples")
+    logger.info("========================")
     
-    # Handle the case where no valid samples are found
+    # Handle no valid samples case
     if len(valid_samples_data) == 0:
-        logger.error("No valid samples found with the required detections!")
+        logger.error("No valid samples found!")
         return [], []
     
-    # Calculate weights with more sophisticated approach
+    # Calculate sample weights
     total_samples = len(valid_samples_data)
     class_weights = {
-        "Person": total_samples / max(n_person, 1),  # ~1.06x
-        "Dog": total_samples / max(n_dog, 1)         # ~5.23x
+        "Person": total_samples / max(n_person, 1),
+        "Dog": total_samples / max(n_dog, 1)
     }
     
     sample_weights = []
     for has_person, has_dog in valid_sample_flags:
         weight = 0.0
-        # Higher weight for rare combinations
         if has_person and has_dog:
-            # Both classes are present - give highest weight
             weight = max(class_weights["Dog"] * 1.2, class_weights["Person"])
         elif has_dog:
-            # Only dog - high weight
             weight = class_weights["Dog"]
         elif has_person:
-            # Only person - base weight
             weight = class_weights["Person"]
-        
         sample_weights.append(weight)
     
     # Normalize weights
@@ -379,12 +350,12 @@ def create_balanced_samples(foset):
         logger.warning("All sample weights are zero. Using uniform weights.")
         sample_weights = [1.0] * len(valid_samples_data)
     
-    # Save processed samples to cache
+    # Save to cache
     try:
         cache_data = {
             'samples': valid_samples_data,
             'weights': sample_weights,
-            'timestamp': np.datetime64('now')
+            'timestamp': str(np.datetime64('now'))
         }
         logger.info("Saving balanced samples to cache")
         with open(cache_path, 'wb') as f:

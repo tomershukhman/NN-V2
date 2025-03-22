@@ -21,10 +21,13 @@ class DetectionLoss(nn.Module):
         }
     
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
-        # Predictions is already a dictionary containing 'bbox_pred', 'conf_pred', and 'anchors'
-        bbox_pred = predictions['bbox_pred']
-        conf_pred = predictions['conf_pred']
-        anchors = predictions['anchors']
+        # Handle predictions in both dictionary and list format
+        if isinstance(predictions, dict):
+            bbox_pred = predictions['bbox_pred']
+            conf_pred = predictions['conf_pred']
+            anchors = predictions['anchors']
+        else:
+            bbox_pred, conf_pred, anchors = predictions
         
         batch_size = bbox_pred.shape[0]
         total_loss = 0

@@ -43,11 +43,6 @@ class ObjectDetector(nn.Module):
         
         # Get batch size and feature dimensions
         batch_size = x.shape[0]
-        feature_h, feature_w = features.shape[2], features.shape[3]
-        
-        # Print feature dimensions for debugging
-        if self.training and x.shape[0] == 1:  # Only print for the first batch
-            print(f"Input shape: {x.shape}, Feature map shape: {features.shape}")
         
         # Predict class scores and bounding box offsets
         class_pred = self.cls_head(features)
@@ -68,14 +63,13 @@ class ObjectDetector(nn.Module):
                 'conf_pred': class_pred,
                 'anchors': self.default_anchors
             }
-        
-        # Process predictions for inference
-        results = []
-        for boxes, scores in zip(bbox_pred, class_pred):
-            result = self._process_single_image_predictions(boxes, scores)
-            results.append(result)
-        
-        return results
+        else:
+            # Process predictions for inference
+            results = []
+            for boxes, scores in zip(bbox_pred, class_pred):
+                result = self._process_single_image_predictions(boxes, scores)
+                results.append(result)
+            return results
     
     def _process_single_image_predictions(self, boxes, scores):
         """Process predictions for a single image"""
