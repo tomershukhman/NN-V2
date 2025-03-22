@@ -6,41 +6,17 @@ from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
     OUTPUT_ROOT
 )
-from dataset import get_data_loaders
+from dataset import get_data_loaders, get_multi_dog_transform
 from model import get_model
 from losses import DetectionLoss
 from visualization import VisualizationLogger
 import math
-from torch.optim.lr_scheduler import CosineAnnealingLR, ReduceLROnPlateau
-from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 import random
 import logging
 
 # Use the same logger as in dataset.py
 logger = logging.getLogger('dog_detector')
-
-class LRWarmupCosineAnnealing:
-    """Custom learning rate scheduler with warmup followed by cosine annealing"""
-    def __init__(self, optimizer, warmup_epochs, total_epochs, min_lr=1e-6):
-        self.optimizer = optimizer
-        self.warmup_epochs = warmup_epochs
-        self.total_epochs = total_epochs
-        self.min_lr = min_lr
-        self.base_lr = optimizer.param_groups[0]['lr']
-        
-    def step(self, epoch):
-        if epoch < self.warmup_epochs:
-            # Linear warmup
-            lr = self.base_lr * (epoch + 1) / self.warmup_epochs
-        else:
-            # Cosine annealing
-            progress = (epoch - self.warmup_epochs) / (self.total_epochs - self.warmup_epochs)
-            lr = self.min_lr + 0.5 * (self.base_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
-        
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-        
-        return lr
 
 class WeightDecayScheduler:
     """Dynamically adjust weight decay during training"""
@@ -123,14 +99,6 @@ class Trainer:
         self.visualization_logger = visualization_logger
         self.checkpoints_dir = checkpoints_dir
         
-        # Refined learning rate scheduler
-        self.lr_scheduler = LRWarmupCosineAnnealing(
-            optimizer=optimizer,
-            warmup_epochs=3,  # Reduced warmup period
-            total_epochs=num_epochs,
-            min_lr=LEARNING_RATE * 0.001  # More aggressive LR decay
-        )
-        
         # Add weight decay scheduler with more gentle decay
         self.wd_scheduler = WeightDecayScheduler(
             optimizer=optimizer,
@@ -142,20 +110,6 @@ class Trainer:
         # For validation loss smoothing
         self.val_loss_history = []
         self.smoothing_window = 5  # Increased window size
-        
-        # For exponential moving average (EMA) loss tracking with more bias toward recent values
-        self.ema_val_loss = None
-        self.ema_alpha = 0.8  # More responsive to recent changes
-        
-        # For model EMA (parameter averaging)
-        self.model_ema = None
-        self.ema_update_ratio = 0.9995  # Increased from 0.999
-        
-        # For Stochastic Weight Averaging (SWA)
-        self.swa_model = None
-        self.swa_start = int(num_epochs * 0.3)  # Start SWA at 30% of training
-        self.swa_scheduler = None
-        self.swa_model_updated = False
         
         # Add dropout scheduling
         self.initial_dropout = 0.1
@@ -195,37 +149,23 @@ class Trainer:
         # Additional loss weights specifically for multi-dog cases
         self.multi_dog_conf_weight = 1.2  # Slightly higher confidence weight for multi-dog cases
         
-        logger.info("Trainer initialized with custom learning rate and weight decay schedulers")
+        logger.info("Trainer initialized with weight decay scheduler")
         
     def train(self):
         # Initialize tracking variables
         best_val_loss = float('inf')
-        best_ema_val_loss = float('inf')
-        best_swa_val_loss = float('inf')
         epochs_without_improvement = 0
         
         # Track loss history
         train_losses = []
         val_losses = []
-        ema_val_losses = []
-        swa_val_losses = []
         learning_rates = []
         weight_decays = []
-        
-        # Initialize model EMA
-        self.model_ema = self._create_ema_model()
-        
-        # Initialize SWA model
-        self.swa_model = AveragedModel(self.model)
-        self.swa_scheduler = SWALR(self.optimizer, swa_lr=1e-5)
         
         logger.info(f"Starting training for {self.num_epochs} epochs")
         
         for epoch in range(self.num_epochs):
-            # Update learning rate and weight decay
-            current_lr = self.lr_scheduler.step(epoch)
-            learning_rates.append(current_lr)
-            
+            # Update weight decay
             current_wd = self.wd_scheduler.step(epoch)
             weight_decays.append(current_wd)
             
@@ -235,12 +175,12 @@ class Trainer:
             # Update loss weights
             conf_weight, bbox_weight = self._update_loss_weights(epoch)
             
-            logger.info(f"Epoch {epoch+1}/{self.num_epochs}: LR={current_lr:.6f}, WD={current_wd:.6f}")
+            logger.info(f"Epoch {epoch+1}/{self.num_epochs}")
             
             # Train for one epoch
             train_metrics, val_metrics = self.train_epoch(epoch, conf_weight, bbox_weight)
             train_loss = train_metrics['total_loss']
-            val_loss = val_metrics['total_loss'] if val_metrics else 0
+            val_loss = val_metrics['total_loss'] if val_metrics else float('inf')
             
             # Store loss values
             train_losses.append(train_loss)
@@ -250,142 +190,40 @@ class Trainer:
             self.val_loss_history.append(val_loss)
             smoothed_val_loss = self._get_smoothed_val_loss()
             
-            # Update EMA validation loss
-            ema_val_loss = self._update_ema_val_loss(val_loss)
-            ema_val_losses.append(ema_val_loss)
-            
             # Log basic epoch results
-            logger.info(f"Train loss: {train_loss:.6f}, Val loss: {val_loss:.6f}, EMA Val loss: {ema_val_loss:.6f}")
+            logger.info(f"Train loss: {train_loss:.6f}, Val loss: {val_loss:.6f}")
             
-            # Check if we should activate SWA
-            if epoch >= self.swa_start:
-                # Update SWA model
-                self.swa_model.update_parameters(self.model)
-                self.swa_scheduler.step()
-                self.swa_model_updated = True
-                
-                # Evaluate SWA model periodically (every 3 epochs to save computation)
-                if (epoch - self.swa_start) % 3 == 0 or epoch == self.num_epochs - 1:
-                    # Update batch norm statistics for the SWA model
-                    update_bn(self.train_loader, self.swa_model, device=self.device)
-                    
-                    # Evaluate SWA model
-                    swa_val_metrics = self.validate_model(self.swa_model, epoch, prefix="swa_val")
-                    swa_val_loss = swa_val_metrics['total_loss']
-                    swa_val_losses.append(swa_val_loss)
-                    
-                    logger.info(f"SWA Model - Loss: {swa_val_loss:.4f}, Precision: {swa_val_metrics['precision']:.4f}, Recall: {swa_val_metrics['recall']:.4f}")
-                    
-                    # Only log detailed metrics in debug mode
-                    if logger.isEnabledFor(logging.DEBUG):
-                        logger.debug(f"SWA Model - F1: {swa_val_metrics['f1_score']:.4f}, Mean IoU: {swa_val_metrics['mean_iou']:.4f}")
-                        logger.debug(f"SWA Model - Count Match: {swa_val_metrics['count_match_percentage']:.1f}%, Avg Count Diff: {swa_val_metrics['avg_count_diff']:.2f}")
-                        
-                        # Print multi-dog specific metrics if available
-                        if 'multi_dog_precision' in swa_val_metrics:
-                            logger.debug(f"SWA Model - Multi-dog Precision: {swa_val_metrics['multi_dog_precision']:.4f}, Recall: {swa_val_metrics['multi_dog_recall']:.4f}")
-                    
-                    # Check if SWA model is the best one so far
-                    if swa_val_loss < best_swa_val_loss:
-                        best_swa_val_loss = swa_val_loss
-                        # Save SWA model separately
-                        torch.save({
-                            'epoch': epoch,
-                            'model_state_dict': self.swa_model.state_dict(),
-                            'val_loss': swa_val_loss
-                        }, os.path.join(self.checkpoints_dir, 'best_swa_model.pth'))
-                        logger.info(f"Saved new best SWA model with val_loss: {swa_val_loss:.4f}")
-            
-            # Log validation metrics in more detail including IoU and over/under detections
+            # Log validation metrics in more detail
             logger.info(f"Val metrics - Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
             logger.info(f"Val metrics - Mean IoU: {val_metrics['mean_iou']:.4f}, Median IoU: {val_metrics['median_iou']:.4f}")
             logger.info(f"Val metrics - Over/Under detections: {val_metrics['over_detections']}/{val_metrics['under_detections']}, Count Match: {val_metrics['count_match_percentage']:.1f}%")
             
-            # Log additional metrics only in debug mode
-            if logger.isEnabledFor(logging.DEBUG):
-                # Log multi-dog specific metrics if available
-                if 'multi_dog_precision' in val_metrics:
-                    logger.debug(f"Multi-dog - Precision: {val_metrics['multi_dog_precision']:.4f}, Recall: {val_metrics['multi_dog_recall']:.4f}")
-                    logger.debug(f"Single-dog - Precision: {val_metrics['single_dog_precision']:.4f}, Recall: {val_metrics['single_dog_recall']:.4f}")
-                
-                # Log loss changes from previous epoch
-                if epoch > 0:
-                    train_loss_change = train_losses[-1] - train_losses[-2]
-                    val_loss_change = val_losses[-1] - val_losses[-2]
-                    ema_val_loss_change = ema_val_losses[-1] - ema_val_losses[-2]
-                    
-                    logger.debug(f"Loss Changes - Train: {train_loss_change:.6f} ({'↓' if train_loss_change < 0 else '↑'}), "
-                          f"Val: {val_loss_change:.6f} ({'↓' if val_loss_change < 0 else '↑'}), "
-                          f"EMA Val: {ema_val_loss_change:.6f} ({'↓' if ema_val_loss_change < 0 else '↑'})")
-            
-            # Update learning rate based on smoothed validation loss to avoid zigzag pattern triggering LR changes
+            # Update learning rate based on smoothed validation loss
             self.scheduler.step(smoothed_val_loss)
+            current_lr = self.optimizer.param_groups[0]['lr']
+            learning_rates.append(current_lr)
             
-            # Save best model logic
-            improved = False
-            
-            if ema_val_loss < best_ema_val_loss:
-                epochs_without_improvement = 0
-                best_ema_val_loss = ema_val_loss
-                improved = True
-                
+            # Save best model logic - only based on validation loss
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
-                improved = True
+                epochs_without_improvement = 0
                 
-            if improved:
-                # Save both regular model, EMA model and SWA model if available
+                # Save model state
                 save_dict = {
                     'epoch': epoch,
                     'model_state_dict': self.model.state_dict(),
-                    'ema_model_state_dict': self.model_ema.state_dict(),
                     'optimizer_state_dict': self.optimizer.state_dict(),
                     'scheduler_state_dict': self.scheduler.state_dict(),
-                    'train_loss': train_loss,
                     'val_loss': val_loss,
-                    'ema_val_loss': ema_val_loss
                 }
                 
-                if self.swa_model_updated:
-                    save_dict['swa_model_state_dict'] = self.swa_model.state_dict()
-                
                 torch.save(save_dict, os.path.join(self.checkpoints_dir, 'best_model.pth'))
-                logger.info(f"Saved new best model with val_loss: {val_loss:.4f} (EMA: {ema_val_loss:.4f})")
+                logger.info(f"Saved new best model with val_loss: {val_loss:.4f}")
             else:
                 epochs_without_improvement += 1
                 if epochs_without_improvement >= self.early_stopping_patience:
                     logger.info(f"Early stopping triggered after {epochs_without_improvement} epochs without improvement")
                     break
-        
-        # Final update of SWA model if needed
-        if self.swa_model_updated:
-            update_bn(self.train_loader, self.swa_model, device=self.device)
-            
-            # Final evaluation of SWA model
-            swa_val_metrics = self.validate_model(self.swa_model, self.num_epochs - 1, prefix="final_swa")
-            swa_val_loss = swa_val_metrics['total_loss']
-            
-            # Save final SWA model
-            torch.save({
-                'epoch': self.num_epochs - 1,
-                'model_state_dict': self.swa_model.state_dict(),
-                'val_loss': swa_val_loss
-            }, os.path.join(self.checkpoints_dir, 'final_swa_model.pth'))
-            logger.info(f"Saved final SWA model with val_loss: {swa_val_loss:.4f}")
-            
-            # Report which model is best
-            best_model_type = "Regular"
-            best_loss = best_val_loss
-            
-            if best_ema_val_loss < best_loss:
-                best_model_type = "EMA"
-                best_loss = best_ema_val_loss
-                
-            if best_swa_val_loss < best_loss:
-                best_model_type = "SWA"
-                best_loss = best_swa_val_loss
-                
-            logger.info(f"Training complete. Best model: {best_model_type} with val_loss: {best_loss:.4f}")
         
         self.visualization_logger.close()
 
@@ -406,20 +244,6 @@ class Trainer:
             if isinstance(module, torch.nn.Dropout):
                 module.p = current_dropout
     
-    def _create_ema_model(self):
-        """Create a copy of the model for EMA tracking"""
-        ema_model = get_model(self.device)
-        for param_ema, param_model in zip(ema_model.parameters(), self.model.parameters()):
-            param_ema.data.copy_(param_model.data)
-            param_ema.requires_grad = False
-        return ema_model
-    
-    def _update_ema_model(self):
-        """Update EMA model parameters"""
-        with torch.no_grad():
-            for param_ema, param_model in zip(self.model_ema.parameters(), self.model.parameters()):
-                param_ema.data = self.ema_update_ratio * param_ema.data + (1 - self.ema_update_ratio) * param_model.data
-    
     def _get_smoothed_val_loss(self):
         """Calculate smoothed validation loss for more stable early stopping"""
         if len(self.val_loss_history) < self.smoothing_window:
@@ -428,14 +252,6 @@ class Trainer:
         # Use median instead of mean for better robustness against outliers
         recent_losses = self.val_loss_history[-self.smoothing_window:]
         return np.median(recent_losses)
-    
-    def _update_ema_val_loss(self, val_loss):
-        """Update and return exponential moving average of validation loss"""
-        if self.ema_val_loss is None:
-            self.ema_val_loss = val_loss
-        else:
-            self.ema_val_loss = self.ema_alpha * self.ema_val_loss + (1 - self.ema_alpha) * val_loss
-        return self.ema_val_loss
         
     def train_epoch(self, epoch, conf_weight, bbox_weight):
         """Train for one epoch and return metrics"""
@@ -512,9 +328,6 @@ class Trainer:
                     self.optimizer.step()
                     self.optimizer.zero_grad()
                     accumulated_steps = 0
-                    
-                    # Update EMA model after optimizer step
-                    self._update_ema_model()
                 
                 # Update progress
                 total_loss += loss.item() * self.gradient_accumulation_steps  # Scale back for tracking
@@ -625,77 +438,46 @@ class Trainer:
         return avg_metrics
     
     def validate(self, epoch, conf_weight, bbox_weight):
-        """Validate the regular model and EMA model"""
+        """Validate the regular model"""
         # Validate regular model
         val_metrics = self.validate_model(self.model, epoch, prefix="val", conf_weight=conf_weight, bbox_weight=bbox_weight)
-        
-        # Validate EMA model
-        ema_val_metrics = self.validate_model(self.model_ema, epoch, prefix="val_ema", conf_weight=conf_weight, bbox_weight=bbox_weight)
-        
-        # Log EMA model metrics (less verbose)
-        logger.info(f"EMA Model - Precision: {ema_val_metrics['precision']:.4f}, Recall: {ema_val_metrics['recall']:.4f}, F1: {ema_val_metrics['f1_score']:.4f}")
         
         return val_metrics
         
     def validate_model(self, model, epoch, prefix="val", conf_weight=1.0, bbox_weight=1.0):
-        """Run validation on a specific model instance using consistent batches"""
+        """Run validation on a specific model instance"""
         model.eval()
         total_loss = 0
         all_predictions = []
         all_targets = []
+        num_samples = 0
         
         # Initialize component loss tracking
         total_conf_loss = 0
         total_bbox_loss = 0
         
-        # Create shuffle-consistent mini-batches for validation
-        all_images = []
-        all_boxes = []
-        
-        # First collect all validation data
-        for images, _, boxes in self.val_loader:
-            all_images.extend(images)
-            all_boxes.extend(boxes)
-        
-        # Create a reproducible shuffling for this validation run
-        indices = list(range(len(all_images)))
-        # Shuffling with a fixed seed to ensure consistency while still getting variety
-        random.Random(epoch).shuffle(indices)
-        
-        # Apply shuffling
-        all_images = [all_images[i] for i in indices]
-        all_boxes = [all_boxes[i] for i in indices]
-        
-        # Process in mini-batches
-        num_samples = len(all_images)
-        num_batches = (num_samples + self.val_batch_size - 1) // self.val_batch_size
-        
         with torch.no_grad():
-            for i in range(num_batches):
-                # Create mini-batch
-                start_idx = i * self.val_batch_size
-                end_idx = min((i + 1) * self.val_batch_size, num_samples)
-                
-                batch_images = all_images[start_idx:end_idx]
-                batch_boxes = all_boxes[start_idx:end_idx]
-                
-                images = torch.stack([image.to(self.device) for image in batch_images])
+            # Process in batches directly
+            for images, _, boxes in self.val_loader:
+                # Move to device and create targets
+                images = torch.stack([image.to(self.device) for image in images])
                 targets = []
-                for boxes_per_image in batch_boxes:
+                for boxes_per_image in boxes:
                     target = {
                         'boxes': boxes_per_image.to(self.device),
                         'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
                     }
                     targets.append(target)
                 
-                # Force model to return predictions in training format for loss calculation
-                # This is a hack but necessary for consistent loss calculation
-                if model == self.model or model == self.model_ema:
+                num_samples += len(images)
+                
+                # Get predictions in training format for loss calculation
+                if model == self.model:
                     model.train()  # Temporarily set to train mode
                     predictions = model(images, targets)
                     model.eval()  # Set back to eval mode
                     
-                    # Calculate loss using training format with the same weights as training
+                    # Calculate loss
                     loss_dict = self.criterion(predictions, targets, conf_weight=conf_weight, bbox_weight=bbox_weight)
                     total_loss += loss_dict['total_loss'].item() * len(targets)
                     total_conf_loss += loss_dict['conf_loss'] * len(targets)
@@ -705,6 +487,13 @@ class Trainer:
                 inference_preds = model(images, None)
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
+                
+                # Free memory explicitly
+                del images
+                del targets
+                if 'predictions' in locals():
+                    del predictions
+                torch.cuda.empty_cache()
         
         # Calculate metrics
         avg_loss = total_loss / num_samples
@@ -719,14 +508,29 @@ class Trainer:
         })
         
         # Log validation metrics
-        if prefix != "swa_val" and prefix != "final_swa":
-            self.visualization_logger.log_epoch_metrics(prefix, metrics, epoch)
+        self.visualization_logger.log_epoch_metrics(prefix, metrics, epoch)
             
-            # Log sample validation images (only for regular validation, and less of them)
-            if prefix == "val":
-                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
-            elif prefix == "val_ema":
-                self.visualization_logger.log_images(prefix, all_images[:8], all_predictions[:8], all_targets[:8], epoch)
+        # Log sample validation images (only for regular validation)
+        if prefix == "val":
+            # Get a small batch for visualization
+            vis_images = []
+            vis_preds = []
+            vis_targets = []
+            with torch.no_grad():
+                for images, _, boxes in self.val_loader:
+                    if len(vis_images) >= 8:
+                        break
+                    vis_images.extend(images[:8-len(vis_images)])
+                    batch_images = torch.stack([img.to(self.device) for img in images[:8-len(vis_preds)]])
+                    batch_preds = model(batch_images, None)
+                    vis_preds.extend(batch_preds)
+                    for boxes_per_image in boxes[:8-len(vis_targets)]:
+                        vis_targets.append({
+                            'boxes': boxes_per_image.to(self.device),
+                            'labels': torch.ones((len(boxes_per_image),), dtype=torch.int64, device=self.device)
+                        })
+            
+            self.visualization_logger.log_images(prefix, vis_images, vis_preds, vis_targets, epoch)
         
         return metrics
         
@@ -880,25 +684,6 @@ class Trainer:
         metrics['multi_dog_metrics'] = multi_dog_metrics
         
         return metrics
-        
-    def _calculate_single_iou(self, box1, box2):
-        """Calculate IoU between two boxes"""
-        # Calculate intersection area
-        x1 = torch.max(box1[0], box2[0])
-        y1 = torch.max(box1[1], box2[1])
-        x2 = torch.min(box1[2], box2[2])
-        y2 = torch.min(box1[3], box2[3])
-        
-        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-        
-        # Calculate union area
-        box1_area = (box1[2] - box1[0]) * (box1[3] - box1[1])
-        box2_area = (box2[2] - box2[0]) * (box2[3] - box2[1])
-        union = box1_area + box2_area - intersection
-        
-        # Calculate IoU
-        iou = intersection / (union + 1e-6)
-        return iou
         
     def _calculate_box_iou(self, boxes1, boxes2):
         """Calculate IoU between two sets of boxes"""

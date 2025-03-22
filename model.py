@@ -110,12 +110,9 @@ class DogDetector(nn.Module):
         # Generate and register anchor boxes
         self.register_buffer('default_anchors', self._generate_anchors())
         
-        # Improved confidence calibration parameters for multi-object detection
-        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 1.3))  # Slightly reduced from 1.5
-        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.3))    # Reduced negative bias
-        
-        # Add separate calibration for multi-object scenarios
-        self.register_parameter('multi_obj_conf_boost', nn.Parameter(torch.ones(1) * 0.2))  # Boost for multiple objects
+        # Confidence calibration parameter
+        self.register_parameter('conf_scaling', nn.Parameter(torch.ones(1) * 1.3))
+        self.register_parameter('conf_bias', nn.Parameter(torch.zeros(1) - 0.3))
 
     def _initialize_weights(self):
         for m in [self.fpn_convs, self.smooth_convs, self.det_conv1, self.det_conv2, self.bbox_head]:
@@ -257,17 +254,8 @@ class DogDetector(nn.Module):
                     nms_threshold
                 )
                 
-                # If we have multiple detections after NMS, boost their confidence
-                if len(keep_idx) > 1:
-                    # Apply a small boost to all scores when multiple objects are detected
-                    # This helps with the multi-dog detection confidence problem
-                    adjusted_scores = scores[keep_idx] * (1 + self.multi_obj_conf_boost)
-                    # Clamp to ensure we don't exceed 1.0
-                    scores = torch.clamp(adjusted_scores, max=1.0)
-                else:
-                    scores = scores[keep_idx]
-                    
                 boxes = boxes[keep_idx]
+                scores = scores[keep_idx]
                 
                 # Limit detections
                 if len(keep_idx) > MAX_DETECTIONS:

@@ -5,6 +5,7 @@ import numpy as np
 from PIL import Image as PILImage
 import fiftyone as fo
 import fiftyone.zoo as foz
+import cv2  # Add missing import
 
 # Import Albumentations and the PyTorch conversion
 import albumentations as A
@@ -29,19 +30,13 @@ logger = logging.getLogger('dog_detector')
 
 class DogDetectionDataset(Dataset):
     def __init__(self, root=DATA_ROOT, split='train', transform=None, download=False):
-        """
-        Dog Detection Dataset using Open Images
-        Args:
-            root (str): Root directory for the dataset
-            split (str): 'train' or 'validation'
-            transform (callable, optional): Albumentations transform to be applied on a sample
-            download (bool): If True, downloads the dataset from the internet
-        """
+        """Initialize the dataset"""
         self.transform = transform
         self.root = os.path.abspath(root)
         self.split = "validation" if split == "val" else split
         self.samples = []
         self.dogs_per_image = []
+        self.coord_cache = {}  # Initialize coord_cache once here
         
         # We'll use a single cache file for all data
         self.cache_file = os.path.join(self.root, 'dog_detection_combined_cache.pt')
@@ -224,6 +219,9 @@ class DogDetectionDataset(Dataset):
         
         if len(self.samples) == 0:
             raise RuntimeError("No valid dog images found in the dataset")
+        
+        # Add coordinate cache
+        self.coord_cache = {}
 
     def get_sample_weights(self):
         """
@@ -257,75 +255,72 @@ class DogDetectionDataset(Dataset):
         dog_count = self.dogs_per_image[index]
         
         try:
-            # Open image and convert to RGB (as NumPy array)
-            img = np.array(PILImage.open(img_path).convert('RGB'))
+            # Load image first using cv2 for better performance
+            img = cv2.imread(img_path)
+            if img is None:
+                raise ValueError(f"Failed to load image: {img_path}")
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             h, w = img.shape[:2]
             
-            # First, convert boxes to normalized format [0,1]
-            normalized_boxes = []
-            for box in boxes:
-                x_min, y_min, x_max, y_max = box
-                # Normalize if needed (assuming original boxes might be in pixel coords)
-                if x_max > 1 or y_max > 1:
-                    x_min, x_max = x_min / w, x_max / w
-                    y_min, y_max = y_min / h, y_max / h
-                x_min = max(0.0, min(0.99, float(x_min)))
-                y_min = max(0.0, min(0.99, float(y_min)))
-                x_max = max(min(1.0, float(x_max)), x_min + 0.01)
-                y_max = max(min(1.0, float(y_max)), y_min + 0.01)
-                normalized_boxes.append([x_min, y_min, x_max, y_max])
+            # Process and cache coordinates
+            if img_path not in self.coord_cache:
+                # Convert boxes to normalized format [0,1] and cache
+                normalized_boxes = []
+                boxes_abs = []
+                for box in boxes:
+                    x_min, y_min, x_max, y_max = box
+                    if x_max > 1 or y_max > 1:
+                        x_min, x_max = x_min / w, x_max / w
+                        y_min, y_max = y_min / h, y_max / h
+                    x_min = max(0.0, min(0.99, float(x_min)))
+                    y_min = max(0.0, min(0.99, float(y_min)))
+                    x_max = max(min(1.0, float(x_max)), x_min + 0.01)
+                    y_max = max(min(1.0, float(y_max)), y_min + 0.01)
+                    normalized_boxes.append([x_min, y_min, x_max, y_max])
+                    boxes_abs.append([x_min * w, y_min * h, x_max * w, y_max * h])
+                
+                self.coord_cache[img_path] = {
+                    'normalized': normalized_boxes,
+                    'absolute': boxes_abs,
+                    'size': (h, w)
+                }
             
-            # Convert normalized boxes to absolute (Pascal VOC) coordinates for Albumentations
-            boxes_abs = []
-            for box in normalized_boxes:
-                x_min, y_min, x_max, y_max = box
-                boxes_abs.append([x_min * w, y_min * h, x_max * w, y_max * h])
-            labels = [1] * len(boxes_abs)  # All dogs get label "1"
+            cache_entry = self.coord_cache[img_path]
+            normalized_boxes = cache_entry['normalized']
+            boxes_abs = cache_entry['absolute']
             
-            # Apply Albumentations transform if provided, with special handling for multi-dog cases
+            labels = [1] * len(boxes_abs)
+            
             if self.transform:
-                # For multi-dog images, we might need to adjust the transform to preserve all dogs
                 if dog_count > 1 and self.split == 'train':
-                    # Get special multi-dog transform or use default one
                     transform = get_multi_dog_transform() if random.random() < 0.7 else self.transform
                 else:
                     transform = self.transform
-                    
+                
+                # Apply transform
                 transformed = transform(image=img, bboxes=boxes_abs, labels=labels)
-                img = transformed['image']
+                img = transformed['image']  # Now a tensor
                 boxes_abs = transformed['bboxes']
                 labels = transformed['labels']
                 
-                # After transformation, convert absolute coordinates back to normalized values
-                # (img from ToTensorV2() is a torch.Tensor of shape [C, H, W])
                 _, new_h, new_w = img.shape
-                normalized_boxes = []
-                for box in boxes_abs:
-                    x_min, y_min, x_max, y_max = box
-                    normalized_boxes.append([x_min / new_w, y_min / new_h, x_max / new_w, y_max / new_h])
+                normalized_boxes = [[x/new_w, y/new_h, x2/new_w, y2/new_h] for x,y,x2,y2 in boxes_abs]
                 boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
-                target = {
-                    'boxes': boxes_tensor,
-                    'labels': torch.tensor(labels, dtype=torch.long),
-                    'scores': torch.ones(len(labels)),
-                    'dog_count': dog_count  # Include the dog count in the target
-                }
             else:
-                # If no transform, manually convert image to tensor and boxes to normalized values
                 img = ToTensorV2()(image=img)['image']
                 boxes_tensor = torch.tensor(normalized_boxes, dtype=torch.float32)
-                target = {
-                    'boxes': boxes_tensor,
-                    'labels': torch.ones(len(normalized_boxes), dtype=torch.long),
-                    'scores': torch.ones(len(normalized_boxes)),
-                    'dog_count': dog_count  # Include the dog count in the target
-                }
+            
+            target = {
+                'boxes': boxes_tensor,
+                'labels': torch.ones(len(normalized_boxes), dtype=torch.long),
+                'scores': torch.ones(len(normalized_boxes)),
+                'dog_count': dog_count
+            }
             
             return img, target
             
         except Exception as e:
             logger.warning(f"Error loading image {img_path}: {e}")
-            # Instead of raising, return a dummy sample
             img = torch.zeros((3, 224, 224), dtype=torch.float32)
             target = {
                 'boxes': torch.zeros((0, 4), dtype=torch.float32),
@@ -596,36 +591,3 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
     )
     
     return train_loader, val_loader
-
-
-def get_total_samples():
-    """Get the total number of samples in the dataset"""
-    cache_file = os.path.join(DATA_ROOT, 'dog_detection_combined_cache.pt')
-    if os.path.exists(cache_file):
-        cache_data = torch.load(cache_file)
-        return len(cache_data['samples'])
-    return 0
-
-
-# TransformedSubset class is updated for consistency with Albumentations.
-class TransformedSubset(torch.utils.data.Dataset):
-    def __init__(self, subset, transform):
-        self.subset = subset
-        self.transform = transform
-    
-    def __getitem__(self, idx):
-        img, target = self.subset[idx]
-        # If img is a PIL image, convert to numpy array before transforming.
-        if isinstance(img, PILImage.Image):
-            img = np.array(img)
-        # Convert target boxes from tensor to list of lists.
-        bboxes = target['boxes'].tolist()
-        labels = target['labels'].tolist()
-        transformed = self.transform(image=img, bboxes=bboxes, labels=labels)
-        img = transformed['image']
-        target['boxes'] = torch.tensor(transformed['bboxes'], dtype=torch.float32)
-        target['labels'] = torch.tensor(transformed['labels'], dtype=torch.long)
-        return img, target
-    
-    def __len__(self):
-        return len(self.subset)

@@ -177,51 +177,118 @@ class DetectionLoss(nn.Module):
         }
     
     def _calculate_box_iou(self, boxes1, boxes2):
-        """Calculate IoU between two sets of boxes"""
+        """Calculate IoU between two sets of boxes with chunking for memory efficiency"""
         # Convert to x1y1x2y2 format if normalized
         boxes1 = boxes1.clone()
         boxes2 = boxes2.clone()
         
-        # Calculate intersection areas
-        x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
-        y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
-        x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
-        y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+        # Use chunking for large numbers of boxes
+        chunk_size = 512  # Reduced chunk size to prevent OOM
+        num_boxes1 = boxes1.size(0)
+        num_boxes2 = boxes2.size(0)
         
-        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-        
-        # Calculate union areas
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-        union = area1[:, None] + area2 - intersection
-        
-        return intersection / (union + 1e-6)
-    
+        if num_boxes1 * num_boxes2 > chunk_size * chunk_size:
+            # Initialize output matrix
+            ious = torch.zeros(num_boxes1, num_boxes2, device=boxes1.device)
+            
+            # Process in chunks
+            for i in range(0, num_boxes1, chunk_size):
+                end_i = min(i + chunk_size, num_boxes1)
+                boxes1_chunk = boxes1[i:end_i]
+                
+                for j in range(0, num_boxes2, chunk_size):
+                    end_j = min(j + chunk_size, num_boxes2)
+                    boxes2_chunk = boxes2[j:end_j]
+                    
+                    # Calculate intersection areas for chunk
+                    x1 = torch.max(boxes1_chunk[:, None, 0], boxes2_chunk[:, 0])
+                    y1 = torch.max(boxes1_chunk[:, None, 1], boxes2_chunk[:, 1])
+                    x2 = torch.min(boxes1_chunk[:, None, 2], boxes2_chunk[:, 2])
+                    y2 = torch.min(boxes1_chunk[:, None, 3], boxes2_chunk[:, 3])
+                    
+                    intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+                    
+                    # Calculate areas for chunk
+                    area1 = (boxes1_chunk[:, 2] - boxes1_chunk[:, 0]) * (boxes1_chunk[:, 3] - boxes1_chunk[:, 1])
+                    area2 = (boxes2_chunk[:, 2] - boxes2_chunk[:, 0]) * (boxes2_chunk[:, 3] - boxes2_chunk[:, 1])
+                    union = area1[:, None] + area2 - intersection
+                    
+                    # Store results
+                    ious[i:end_i, j:end_j] = intersection / (union + 1e-6)
+            
+            return ious
+        else:
+            # For small number of boxes, calculate directly
+            x1 = torch.max(boxes1[:, None, 0], boxes2[:, 0])
+            y1 = torch.max(boxes1[:, None, 1], boxes2[:, 1])
+            x2 = torch.min(boxes1[:, None, 2], boxes2[:, 2])
+            y2 = torch.min(boxes1[:, None, 3], boxes2[:, 3])
+            
+            intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+            area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+            area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+            union = area1[:, None] + area2 - intersection
+            
+            return intersection / (union + 1e-6)
+            
     def _giou_loss(self, boxes1, boxes2):
-        """Calculate GIoU loss between boxes"""
-        # Calculate IoU
-        x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
-        y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
-        x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
-        y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+        """Calculate GIoU loss between boxes with chunking for memory efficiency"""
+        # Use chunking for large numbers of boxes
+        chunk_size = 512
+        num_boxes = boxes1.size(0)
         
-        intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
-        
-        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
-        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
-        union = area1 + area2 - intersection
-        
-        iou = intersection / (union + 1e-6)
-        
-        # Calculate the smallest enclosing box
-        enc_x1 = torch.min(boxes1[:, 0], boxes2[:, 0])
-        enc_y1 = torch.min(boxes1[:, 1], boxes2[:, 1])
-        enc_x2 = torch.max(boxes1[:, 2], boxes2[:, 2])
-        enc_y2 = torch.max(boxes1[:, 3], boxes2[:, 3])
-        
-        enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
-        
-        # Calculate GIoU
-        giou = iou - (enc_area - union) / (enc_area + 1e-6)
-        
-        return 1 - giou
+        if num_boxes > chunk_size:
+            giou_losses = []
+            # Process in chunks
+            for i in range(0, num_boxes, chunk_size):
+                end_i = min(i + chunk_size, num_boxes)
+                boxes1_chunk = boxes1[i:end_i]
+                boxes2_chunk = boxes2[i:end_i]
+                
+                # Calculate IoU components for chunk
+                x1 = torch.max(boxes1_chunk[:, 0], boxes2_chunk[:, 0])
+                y1 = torch.max(boxes1_chunk[:, 1], boxes2_chunk[:, 1])
+                x2 = torch.min(boxes1_chunk[:, 2], boxes2_chunk[:, 2])
+                y2 = torch.min(boxes1_chunk[:, 3], boxes2_chunk[:, 3])
+                
+                intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+                area1 = (boxes1_chunk[:, 2] - boxes1_chunk[:, 0]) * (boxes1_chunk[:, 3] - boxes1_chunk[:, 1])
+                area2 = (boxes2_chunk[:, 2] - boxes2_chunk[:, 0]) * (boxes2_chunk[:, 3] - boxes2_chunk[:, 1])
+                union = area1 + area2 - intersection
+                iou = intersection / (union + 1e-6)
+                
+                # Calculate enclosing box for chunk
+                enc_x1 = torch.min(boxes1_chunk[:, 0], boxes2_chunk[:, 0])
+                enc_y1 = torch.min(boxes1_chunk[:, 1], boxes2_chunk[:, 1])
+                enc_x2 = torch.max(boxes1_chunk[:, 2], boxes2_chunk[:, 2])
+                enc_y2 = torch.max(boxes1_chunk[:, 3], boxes2_chunk[:, 3])
+                enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
+                
+                # Calculate GIoU for chunk
+                giou = iou - (enc_area - union) / (enc_area + 1e-6)
+                giou_losses.append(1 - giou)
+            
+            return torch.cat(giou_losses)
+        else:
+            # For small number of boxes, calculate directly
+            x1 = torch.max(boxes1[:, 0], boxes2[:, 0])
+            y1 = torch.max(boxes1[:, 1], boxes2[:, 1])
+            x2 = torch.min(boxes1[:, 2], boxes2[:, 2])
+            y2 = torch.min(boxes1[:, 3], boxes2[:, 3])
+            
+            intersection = torch.clamp(x2 - x1, min=0) * torch.clamp(y2 - y1, min=0)
+            area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+            area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+            union = area1 + area2 - intersection
+            iou = intersection / (union + 1e-6)
+            
+            # Calculate enclosing box
+            enc_x1 = torch.min(boxes1[:, 0], boxes2[:, 0])
+            enc_y1 = torch.min(boxes1[:, 1], boxes2[:, 1])
+            enc_x2 = torch.max(boxes1[:, 2], boxes2[:, 2])
+            enc_y2 = torch.max(boxes1[:, 3], boxes2[:, 3])
+            enc_area = (enc_x2 - enc_x1) * (enc_y2 - enc_y1)
+            
+            # Calculate GIoU
+            giou = iou - (enc_area - union) / (enc_area + 1e-6)
+            return 1 - giou
