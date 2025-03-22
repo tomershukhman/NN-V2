@@ -6,7 +6,7 @@ from config import (
     DEVICE, LEARNING_RATE, NUM_EPOCHS,
     OUTPUT_ROOT, CLASS_NAMES
 )
-from dataset import get_data_loaders
+from dataset_package import get_data_loaders
 from model import get_model
 from losses import DetectionLoss
 from visualization import VisualizationLogger
