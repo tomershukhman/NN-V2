@@ -121,12 +121,82 @@ def create_balanced_samples(foset):
         logger.warning("Empty dataset provided to create_balanced_samples")
         return [], []
     
+    # Analyze dataset composition before processing
+    logger.info("=== Dataset Statistics ===")
+    logger.info(f"Total samples in dataset: {len(foset)}")
+    
+    # Sample count per class
+    class_counts = {"Person": 0, "Dog": 0}
+    # Images with both classes
+    both_classes = 0
+    # Counts for images with multiple instances of each class
+    multi_person = 0
+    multi_dog = 0
+    # Collect bounding box sizes
+    person_bbox_sizes = []
+    dog_bbox_sizes = []
+    
+    # First analyze dataset composition
+    for sample in foset:
+        has_person = False
+        has_dog = False
+        person_count = 0
+        dog_count = 0
+        
+        if hasattr(sample, 'ground_truth') and hasattr(sample.ground_truth, 'detections'):
+            for det in sample.ground_truth.detections:
+                if hasattr(det, 'label'):
+                    if det.label == "Person":
+                        has_person = True
+                        person_count += 1
+                        # Collect bbox size info (area as percentage of image)
+                        if hasattr(det, 'bounding_box'):
+                            x, y, w, h = det.bounding_box
+                            area = w * h  # Normalized area (0-1)
+                            person_bbox_sizes.append(area)
+                    elif det.label == "Dog":
+                        has_dog = True
+                        dog_count += 1
+                        # Collect bbox size info
+                        if hasattr(det, 'bounding_box'):
+                            x, y, w, h = det.bounding_box
+                            area = w * h  # Normalized area (0-1)
+                            dog_bbox_sizes.append(area)
+            
+            if has_person:
+                class_counts["Person"] += 1
+            if has_dog:
+                class_counts["Dog"] += 1
+            if has_person and has_dog:
+                both_classes += 1
+            if person_count > 1:
+                multi_person += 1
+            if dog_count > 1:
+                multi_dog += 1
+    
+    # Display statistics
+    logger.info(f"Images with Person: {class_counts['Person']} ({class_counts['Person']/len(foset)*100:.1f}%)")
+    logger.info(f"Images with Dog: {class_counts['Dog']} ({class_counts['Dog']/len(foset)*100:.1f}%)")
+    logger.info(f"Images with both Person and Dog: {both_classes} ({both_classes/len(foset)*100:.1f}%)")
+    logger.info(f"Images with multiple People: {multi_person} ({multi_person/len(foset)*100:.1f}%)")
+    logger.info(f"Images with multiple Dogs: {multi_dog} ({multi_dog/len(foset)*100:.1f}%)")
+    
+    # Calculate average bbox sizes
+    if person_bbox_sizes:
+        avg_person_size = sum(person_bbox_sizes) / len(person_bbox_sizes)
+        logger.info(f"Average Person bbox size: {avg_person_size*100:.2f}% of image area")
+    if dog_bbox_sizes:
+        avg_dog_size = sum(dog_bbox_sizes) / len(dog_bbox_sizes)
+        logger.info(f"Average Dog bbox size: {avg_dog_size*100:.2f}% of image area")
+    
+    logger.info("========================")
+    
     valid_samples_data = []  # Will store dictionaries instead of FiftyOne sample objects
     valid_sample_flags = []  # Each element is a tuple (has_person, has_dog)
     n_person = 0
     n_dog = 0
     
-    # First pass: identify valid samples and count classes
+    # Now continue with the regular sample processing
     for sample in foset:
         has_person = False
         has_dog = False

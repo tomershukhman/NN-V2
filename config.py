@@ -11,15 +11,15 @@ TRAIN_VAL_SPLIT = 0.85  # Slightly increased training data proportion
 DEVICE = get_device()
 
 # Training configuration
-BATCH_SIZE = 16
+BATCH_SIZE = 32     # Increased to see more examples per batch
 NUM_WORKERS = 4
-LEARNING_RATE = 1e-4  # Slightly reduced
+LEARNING_RATE = 5e-5  # Slightly reduced for stability with larger batch
 NUM_EPOCHS = 100
-WEIGHT_DECAY = 0.01  # Added L2 regularization
+WEIGHT_DECAY = 0.02  # Increased slightly for better regularization
 
 # Early stopping
-PATIENCE = 15  # Increased from 10
-MIN_DELTA = 1e-4  # Reduced sensitivity
+PATIENCE = 20       # Increased to account for class imbalance learning
+MIN_DELTA = 1e-4    # Threshold for improvement
 
 # Data augmentation parameters
 MIN_SCALE = 0.8  # Increased minimum scale
@@ -28,19 +28,20 @@ ROTATION_MAX = 15  # Reduced rotation range
 TRANSLATION_FRAC = 0.1  # Reduced translation
 
 # Model configuration
-NUM_CLASSES = 3  # Background (0), Dog (1), and Person (2)
-CLASS_NAMES = ["background", "dog", "person"]
+NUM_CLASSES = 3  # Background (0), Person (1), Dog (2)
+CLASS_NAMES = ["background", "person", "dog"]
 FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
 
-# Anchor box configuration - expanded to better handle multi-dog cases
-ANCHOR_SCALES = [0.1, 0.2, 0.4]  # Small to medium objects
-ANCHOR_RATIOS = [0.5, 1.0, 2.0]  # Handle different aspect ratios
+# Anchor box configuration - optimized based on size statistics
+ANCHOR_SCALES = [0.07, 0.14, 0.28, 0.42]  # Covers both person (9.3%) and dog (17.67%) sizes
+ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5, 2.0]  # Extended range for varied poses
+
 NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
 
 # Detection parameters
-IOU_THRESHOLD = 0.45  # Increased from 0.4 for better box matching
-NEG_POS_RATIO = 3  # Keep existing ratio
+IOU_THRESHOLD = 0.4  # Slightly reduced to catch more valid detections
+NEG_POS_RATIO = 5  # Increased from 3 to handle class imbalance better
 
 # Training thresholds - adjusted for better confidence calibration
 TRAIN_CONFIDENCE_THRESHOLD = 0.25  # Lowered further to allow more predictions during training
@@ -53,19 +54,19 @@ MAX_DETECTIONS = 8  # Increased from 5 to allow more detections per image
 
 # Detection parameters for each class
 CLASS_CONFIDENCE_THRESHOLDS = {
-    "dog": 0.3,      # Lower threshold for dogs to catch more instances
-    "person": 0.4    # Higher threshold for persons to reduce false positives
+    "person": 0.4,   # Higher threshold for common class (94.1%)
+    "dog": 0.25      # Lower threshold for rare class (19.1%)
 }
 
 CLASS_NMS_THRESHOLDS = {
-    "dog": 0.45,     # More permissive NMS for dogs
-    "person": 0.5    # Stricter NMS for persons
+    "person": 0.5,   # Standard NMS for common class
+    "dog": 0.4       # More permissive NMS for rare class
 }
 
-# Per-class maximum detections
+# Adjusted max detections based on statistics
 CLASS_MAX_DETECTIONS = {
-    "dog": 10,       # Allow more dog detections per image
-    "person": 20     # Allow many person detections for crowd scenes
+    "person": 12,    # ~52.3% have multiple people
+    "dog": 3         # ~5% have multiple dogs
 }
 
 # Loss function parameters

@@ -6,6 +6,11 @@ from config import NUM_CLASSES, CLASS_NAMES
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
+        # Class weights based on inverse frequency: background=1.0, person=1.0, dog=4.93 (~94.1%/19.1%)
+        self.class_weights = torch.tensor([1.0, 1.0, 4.93])
+        # Size-based weights to handle the significant size difference between classes
+        self.person_size_mean = 0.093  # 9.30% average area
+        self.dog_size_mean = 0.1767    # 17.67% average area
         
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
         bbox_pred = predictions['bbox_pred']
@@ -17,37 +22,55 @@ class DetectionLoss(nn.Module):
         total_conf_loss = 0
         total_bbox_loss = 0
         
+        # Move class weights to prediction device
+        class_weights = self.class_weights.to(conf_pred.device)
+        
         for i in range(batch_size):
             target_boxes = targets[i]['boxes']
             target_labels = targets[i]['labels']
             
-            # Skip empty targets
             if len(target_boxes) == 0:
-                # Handle background-only case
-                conf_loss = -torch.log(1 - torch.softmax(conf_pred[i], dim=1)[:, 1:].max(dim=1)[0] + 1e-6).mean()
+                # Handle background-only case with class weighting
+                conf_loss = -class_weights[0] * torch.log(1 - torch.softmax(conf_pred[i], dim=1)[:, 1:].max(dim=1)[0] + 1e-6).mean()
                 total_conf_loss += conf_loss
                 continue
             
             # Calculate IoU between anchors and target boxes
             ious = self._calculate_iou(anchors, target_boxes)
             
-            # Assign targets to anchors
+            # Dynamic thresholds based on object size
+            target_sizes = (target_boxes[:, 2] - target_boxes[:, 0]) * (target_boxes[:, 3] - target_boxes[:, 1])
+            is_large = target_sizes > 0.15  # Threshold between person and dog mean sizes
+            
+            # Assign targets to anchors with dynamic IoU thresholds
             max_ious, matched_targets = ious.max(dim=1)
-            pos_mask = max_ious >= 0.5
-            neg_mask = max_ious < 0.4
+            pos_mask = torch.zeros_like(max_ious, dtype=torch.bool)
+            
+            # Apply different IoU thresholds based on object size
+            for idx, (size, label) in enumerate(zip(target_sizes, target_labels)):
+                if label == 1:  # person
+                    threshold = 0.4
+                else:  # dog
+                    threshold = 0.35  # More permissive for rare class
+                    
+                if size > 0.15:  # Large object
+                    threshold += 0.05  # Stricter for larger objects
+                
+                mask = ious[:, idx] >= threshold
+                pos_mask |= mask
+            
+            neg_mask = max_ious < 0.3  # More aggressive negative mining
             
             # Ensure at least one anchor per ground truth box
             for t_idx in range(len(target_boxes)):
                 if not pos_mask.any():
-                    # If no positive matches, take the best match
                     best_anchor = ious[:, t_idx].argmax()
                     pos_mask[best_anchor] = True
                     neg_mask[best_anchor] = False
-                    matched_targets[best_anchor] = t_idx
             
             num_pos = pos_mask.sum()
             
-            # Calculate classification loss
+            # Calculate classification loss with class weights
             target_conf = torch.zeros_like(conf_pred[i])
             if num_pos > 0:
                 target_conf[pos_mask, target_labels[matched_targets[pos_mask]]] = 1
@@ -55,32 +78,50 @@ class DetectionLoss(nn.Module):
             conf_loss = F.cross_entropy(
                 conf_pred[i],
                 target_conf.argmax(dim=1),
+                weight=class_weights,
                 reduction='none'
             )
             
-            # Hard negative mining
+            # Hard negative mining with dynamic ratio
             if num_pos > 0:
-                num_neg = min(3 * num_pos, neg_mask.sum())
+                # Use more negative samples for the rare class (dogs)
+                has_dog = (target_labels == 2).any()
+                neg_ratio = 6 if has_dog else 4
+                num_neg = min(neg_ratio * num_pos, neg_mask.sum())
+                
                 conf_loss_neg = conf_loss[neg_mask]
                 _, neg_idx = conf_loss_neg.sort(descending=True)
                 neg_idx = neg_idx[:num_neg]
                 
                 conf_loss = (conf_loss[pos_mask].sum() + conf_loss_neg[neg_idx].sum()) / (num_pos + num_neg)
             else:
-                # If no positive samples, use all negative samples
                 conf_loss = conf_loss[neg_mask].mean()
             
-            # Calculate box regression loss only for positive anchors
+            # Calculate box regression loss with size-aware weighting
             if num_pos > 0:
+                # Calculate size-based weights
+                target_sizes = target_sizes[matched_targets[pos_mask]]
+                size_weights = torch.ones_like(target_sizes)
+                
+                # Apply different weights based on class and size
+                target_labels_pos = target_labels[matched_targets[pos_mask]]
+                for idx, label in enumerate(target_labels_pos):
+                    if label == 1:  # person
+                        # Increase weight for smaller people
+                        size_weights[idx] = torch.sqrt(self.person_size_mean / (target_sizes[idx] + 1e-6))
+                    else:  # dog
+                        # Increase weight for smaller dogs and apply class rarity factor
+                        size_weights[idx] = 4.93 * torch.sqrt(self.dog_size_mean / (target_sizes[idx] + 1e-6))
+                
                 bbox_loss = F.smooth_l1_loss(
                     bbox_pred[i, pos_mask],
                     target_boxes[matched_targets[pos_mask]],
-                    reduction='sum'
-                ) / num_pos
+                    reduction='none'
+                )
+                bbox_loss = (bbox_loss.mean(dim=1) * size_weights).sum() / num_pos
             else:
                 bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             
-            # Combine losses with weights
             total_conf_loss += conf_loss
             total_bbox_loss += bbox_loss
         
@@ -88,7 +129,7 @@ class DetectionLoss(nn.Module):
         conf_loss = total_conf_loss / batch_size
         bbox_loss = total_bbox_loss / batch_size
         
-        # Apply weights and combine
+        # Combine losses with adaptive weighting
         total_loss = conf_weight * conf_loss + bbox_weight * bbox_loss
         
         return {

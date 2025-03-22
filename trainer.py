@@ -67,11 +67,10 @@ def train():
     os.makedirs(checkpoints_dir, exist_ok=True)
     os.makedirs(tensorboard_dir, exist_ok=True)
     
-    # Initialize visualization
-    vis_logger = VisualizationLogger(tensorboard_dir)
-    
-    # Get data loaders
+    # Get data loaders and calculate steps
     train_loader, val_loader = create_dataloaders()
+    total_steps = len(train_loader)
+    total_samples = len(train_loader.dataset)
     
     # Initialize model, criterion, optimizer
     model = get_model(DEVICE)
@@ -87,17 +86,17 @@ def train():
         optimizer,
         max_lr=LEARNING_RATE,
         epochs=NUM_EPOCHS,
-        steps_per_epoch=len(train_loader),
-        pct_start=0.1,  # 10% warmup
-        div_factor=25,  # LR starts at LR/25
-        final_div_factor=1000  # Final LR is LR/1000
+        steps_per_epoch=total_steps,
+        pct_start=0.1,
+        div_factor=25,
+        final_div_factor=1000
     )
     
     # Training loop
     best_val_loss = float('inf')
     epochs_without_improvement = 0
     
-    logger.info(f"Starting training for {NUM_EPOCHS} epochs")
+    logger.info(f"Starting training for {NUM_EPOCHS} epochs ({total_samples} samples)")
     
     for epoch in range(NUM_EPOCHS):
         # Training phase
@@ -131,12 +130,17 @@ def train():
             train_conf_loss += loss_dict['conf_loss']
             train_bbox_loss += loss_dict['bbox_loss']
             
-            # Log progress
+            # Calculate progress percentage
+            progress = (batch_idx + 1) / total_steps * 100
+            
+            # Update progress with percentage
             if batch_idx % 20 == 0:
-                logger.info(f"Epoch {epoch+1}/{NUM_EPOCHS} [{batch_idx}/{len(train_loader)}] "
-                          f"Loss: {loss.item():.4f}")
+                avg_loss = train_loss / (batch_idx + 1)
+                print(f"\rEpoch [{epoch+1}/{NUM_EPOCHS}] Progress: {progress:.1f}% ({batch_idx+1}/{total_steps}) Loss: {avg_loss:.4f}", end="", flush=True)
         
-        # Calculate average losses
+        print()  # New line after training
+        
+        # Calculate average training losses
         train_loss /= len(train_loader)
         train_conf_loss /= len(train_loader)
         train_bbox_loss /= len(train_loader)
@@ -149,8 +153,10 @@ def train():
         all_predictions = []
         all_targets = []
         
+        print("Validating...", end="", flush=True)
+        
         with torch.no_grad():
-            for images, boxes, labels in val_loader:
+            for val_idx, (images, boxes, labels) in enumerate(val_loader):
                 images = images.to(DEVICE)
                 targets = [{
                     'boxes': box.to(DEVICE),
@@ -168,36 +174,26 @@ def train():
                 inference_preds = model(images, None)
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
+                
+                # Show validation progress
+                val_progress = (val_idx + 1) / len(val_loader) * 100
+                print(f"\rValidating: {val_progress:.1f}%", end="", flush=True)
         
-        # Calculate average validation losses
+        # Calculate average validation losses and metrics
         val_loss /= len(val_loader)
         val_conf_loss /= len(val_loader)
         val_bbox_loss /= len(val_loader)
-        
-        # Calculate detection metrics
         metrics = calculate_metrics(all_predictions, all_targets)
         
-        # Log metrics
-        logger.info(f"\nEpoch {epoch+1} Summary:")
-        logger.info(f"Train Loss: {train_loss:.4f}")
-        logger.info(f"Val Loss: {val_loss:.4f}")
-        logger.info(f"Precision: {metrics['precision']:.4f}")
-        logger.info(f"Recall: {metrics['recall']:.4f}")
-        logger.info(f"F1 Score: {metrics['f1_score']:.4f}")
-        
-        # Log to tensorboard
-        vis_logger.log_epoch_metrics('train', {
-            'total_loss': train_loss,
-            'conf_loss': train_conf_loss,
-            'bbox_loss': train_bbox_loss
-        }, epoch)
-        
-        vis_logger.log_epoch_metrics('val', {
-            'total_loss': val_loss,
-            'conf_loss': val_conf_loss,
-            'bbox_loss': val_bbox_loss,
-            **metrics
-        }, epoch)
+        # Print epoch summary
+        print("\n" + "="*70)
+        print(f"Epoch {epoch+1}/{NUM_EPOCHS} Summary:")
+        print(f"Training Loss: {train_loss:.4f}")
+        print(f"Validation Loss: {val_loss:.4f}")
+        print(f"Precision: {metrics['precision']:.4f}")
+        print(f"Recall: {metrics['recall']:.4f}")
+        print(f"F1 Score: {metrics['f1_score']:.4f}")
+        print("="*70)
         
         # Save best model
         if val_loss < best_val_loss:
@@ -210,17 +206,16 @@ def train():
                 'val_loss': val_loss,
                 'metrics': metrics
             }, os.path.join(checkpoints_dir, 'best_model.pth'))
-            logger.info(f"Saved new best model with val_loss: {val_loss:.4f}")
+            print(f"New best model saved! (val_loss: {val_loss:.4f})")
         else:
             epochs_without_improvement += 1
             
         # Early stopping
         if epochs_without_improvement >= 15:
-            logger.info(f"Early stopping triggered after {epochs_without_improvement} epochs without improvement")
+            print(f"\nEarly stopping triggered after {epochs_without_improvement} epochs without improvement")
             break
     
-    vis_logger.close()
-    logger.info("Training completed")
+    print("\nTraining completed")
 
 def calculate_metrics(predictions, targets):
     """Calculate precision, recall, and F1 score for object detection"""
