@@ -1,5 +1,5 @@
 #!/bin/bash
-
+clear
 if env | grep -q '^LIGHTNING_TEAMSPACE='; then
     echo "Running in Lightning"
     echo "Git reset"

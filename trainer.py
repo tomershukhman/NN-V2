@@ -297,8 +297,15 @@ class Trainer:
             
             # Log validation metrics in more detail including IoU and over/under detections
             logger.info(f"Val metrics - Precision: {val_metrics['precision']:.4f}, Recall: {val_metrics['recall']:.4f}, F1: {val_metrics['f1_score']:.4f}")
-            logger.info(f"Val metrics - Mean IoU: {val_metrics['mean_iou']:.4f}, Median IoU: {val_metrics['median_iou']:.4f}")
-            logger.info(f"Val metrics - Over/Under detections: {val_metrics['over_detections']}/{val_metrics['under_detections']}, Count Match: {val_metrics['count_match_percentage']:.1f}%")
+            try:
+                mean_iou = val_metrics.get('mean_iou', 'N/A')
+                median_iou = val_metrics.get('median_iou', 'N/A')
+                if mean_iou != 'N/A' and median_iou != 'N/A':
+                    logger.info(f"Val metrics - Mean IoU: {mean_iou:.4f}, Median IoU: {median_iou:.4f}")
+                else:
+                    logger.warning("Val metrics - IoU metrics not available")
+            except Exception as e:
+                logger.error(f"Error while logging validation metrics: {str(e)}")
             
             # Log additional metrics only in debug mode
             if logger.isEnabledFor(logging.DEBUG):
@@ -731,139 +738,142 @@ class Trainer:
         
     def calculate_epoch_metrics(self, predictions, targets):
         """Calculate comprehensive epoch-level metrics with per-class tracking"""
+        metrics = {}
         total_images = len(predictions)
-        correct_count = 0
-        over_detections = 0
-        under_detections = 0
         all_ious = []
         all_confidences = []
         total_detections = 0
         total_ground_truth = 0
-        detections_per_image = []  # Initialize list
-        count_diff_sum = 0  # Initialize counter
-        count_match_percentage = 0  # Initialize counter
         
-        # Per-class metrics tracking
-        class_metrics = {
-            cls_name: {
-                'true_positives': 0,
-                'false_positives': 0,
-                'false_negatives': 0,
-                'total_gt': 0,
-                'total_pred': 0,
-                'ious': []
-            } for cls_name in CLASS_NAMES[1:]  # Skip background class
-        }
+        # Initialize per-class metrics
+        class_metrics = {cls_name: {
+            'true_positives': 0,
+            'false_positives': 0,
+            'false_negatives': 0,
+            'total_gt': 0,
+            'total_pred': 0,
+            'ious': []
+        } for cls_name in CLASS_NAMES[1:]}  # Skip background class
         
-        # Process batches to reduce memory usage
-        batch_size = 32
-        for batch_start in range(0, total_images, batch_size):
-            batch_end = min(batch_start + batch_size, total_images)
-            batch_preds = predictions[batch_start:batch_end]
-            batch_targets = targets[batch_start:batch_end]
+        # Process each image
+        correct_count = 0
+        over_detections = 0
+        under_detections = 0
+        detections_per_image = []
+        count_diff_sum = 0
+        
+        for pred, target in zip(predictions, targets):
+            pred_boxes = pred['boxes']
+            pred_scores = pred['scores']
+            pred_labels = pred['labels']
+            gt_boxes = target['boxes']
+            gt_labels = target['labels']
             
-            for pred, target in zip(batch_preds, batch_targets):
-                pred_boxes = pred['boxes']
-                pred_scores = pred['scores']
-                pred_labels = pred['labels']
-                gt_boxes = target['boxes']
-                gt_labels = target['labels']
+            num_pred = len(pred_boxes)
+            num_gt = len(gt_boxes)
+            
+            # Track per-image detection counts
+            detections_per_image.append(num_pred)
+            total_detections += num_pred
+            total_ground_truth += num_gt
+            
+            # Track count differences
+            count_diff = abs(num_pred - num_gt)
+            count_diff_sum += count_diff
+            if num_pred == num_gt:
+                correct_count += 1
+            elif num_pred > num_gt:
+                over_detections += 1
+            else:
+                under_detections += 1
+            
+            # Collect confidence scores
+            if len(pred_scores) > 0:
+                all_confidences.extend(pred_scores.cpu().tolist())
+            
+            if num_gt > 0 and num_pred > 0:
+                # Calculate IoUs between predictions and ground truth
+                ious = self._calculate_box_iou(pred_boxes, gt_boxes)
                 
-                num_pred = len(pred_boxes)
-                num_gt = len(gt_boxes)
+                # Match predictions to ground truth boxes
+                max_ious, matches = self._match_predictions_to_targets(
+                    ious, pred_labels, gt_labels)
                 
-                detections_per_image.append(num_pred)
-                total_detections += num_pred
-                total_ground_truth += num_gt
-                
-                # Track count differences
-                count_diff_sum += abs(num_pred - num_gt)
-                if num_pred == num_gt:
-                    correct_count += 1
-                    count_match_percentage += 1
-                elif num_pred > num_gt:
-                    over_detections += 1
-                else:
-                    under_detections += 1
-                
-                # Collect confidence scores
-                if len(pred_scores) > 0:
-                    all_confidences.extend(pred_scores.cpu().tolist())
-                
-                if num_gt > 0 and num_pred > 0:
-                    # Move tensors to the same device if needed
-                    if pred_boxes.device != gt_boxes.device:
-                        gt_boxes = gt_boxes.to(pred_boxes.device)
-                    
-                    # Calculate IoUs between predictions and ground truth
-                    ious = self._calculate_box_iou(pred_boxes, gt_boxes)
-                    
-                    # Match predictions to ground truth boxes
-                    max_ious, matches = self._match_predictions_to_targets(
-                        ious, pred_labels, gt_labels)
-                    
-                    # Update class-specific metrics
-                    for pred_idx, (gt_idx, iou) in enumerate(matches.items()):
-                        if iou > 0.5:  # Successful match
-                            pred_class = CLASS_NAMES[pred_labels[pred_idx].item()]
-                            gt_class = CLASS_NAMES[gt_labels[gt_idx].item()]
-                            
-                            if pred_class == gt_class:
-                                class_metrics[pred_class]['true_positives'] += 1
-                                class_metrics[pred_class]['ious'].append(iou)
-                            else:
-                                class_metrics[gt_class]['false_negatives'] += 1
-                                class_metrics[pred_class]['false_positives'] += 1
-                            
-                            all_ious.append(iou)
-                    
-                    # Handle unmatched predictions (false positives)
-                    matched_pred_indices = set(matches.keys())
-                    for pred_idx in range(num_pred):
-                        if pred_idx not in matched_pred_indices:
-                            pred_class = CLASS_NAMES[pred_labels[pred_idx].item()]
-                            class_metrics[pred_class]['false_positives'] += 1
-                    
-                    # Handle unmatched ground truth (false negatives)
-                    matched_gt_indices = set(matches.values())
-                    for gt_idx in range(num_gt):
-                        if gt_idx not in matched_gt_indices:
-                            gt_class = CLASS_NAMES[gt_labels[gt_idx].item()]
+                # Update class-specific metrics
+                for pred_idx, (gt_idx, iou) in enumerate(matches.items()):
+                    if iou > 0.5:  # Successful match
+                        pred_class = CLASS_NAMES[pred_labels[pred_idx].item()]
+                        gt_class = CLASS_NAMES[gt_labels[gt_idx].item()]
+                        
+                        if pred_class == gt_class:
+                            class_metrics[pred_class]['true_positives'] += 1
+                            class_metrics[pred_class]['ious'].append(iou)
+                        else:
                             class_metrics[gt_class]['false_negatives'] += 1
+                            class_metrics[pred_class]['false_positives'] += 1
+                        
+                        all_ious.append(iou)
                 
-                # Update per-class totals
-                for gt_label in gt_labels:
-                    class_name = CLASS_NAMES[gt_label.item()]
-                    class_metrics[class_name]['total_gt'] += 1
+                # Handle unmatched predictions (false positives)
+                matched_pred_indices = set(matches.keys())
+                for pred_idx in range(num_pred):
+                    if pred_idx not in matched_pred_indices:
+                        pred_class = CLASS_NAMES[pred_labels[pred_idx].item()]
+                        class_metrics[pred_class]['false_positives'] += 1
                 
-                for pred_label in pred_labels:
-                    class_name = CLASS_NAMES[pred_label.item()]
-                    class_metrics[class_name]['total_pred'] += 1
+                # Handle unmatched ground truth (false negatives)
+                matched_gt_indices = set([m[0] for m in matches.values()])
+                for gt_idx in range(num_gt):
+                    if gt_idx not in matched_gt_indices:
+                        gt_class = CLASS_NAMES[gt_labels[gt_idx].item()]
+                        class_metrics[gt_class]['false_negatives'] += 1
+            
+            # Update per-class totals
+            for gt_label in gt_labels:
+                class_name = CLASS_NAMES[gt_label.item()]
+                class_metrics[class_name]['total_gt'] += 1
+            
+            for pred_label in pred_labels:
+                class_name = CLASS_NAMES[pred_label.item()]
+                class_metrics[class_name]['total_pred'] += 1
         
         # Calculate final metrics
-        metrics = {
-            'correct_count_percent': (correct_count / total_images) * 100 if total_images > 0 else 0,
-            'count_match_percentage': (count_match_percentage / total_images) * 100 if total_images > 0 else 0,
-            'avg_count_diff': count_diff_sum / total_images if total_images > 0 else 0,
-            'over_detections': over_detections,
-            'under_detections': under_detections,
-            'mean_iou': float(np.mean(all_ious)) if len(all_ious) > 0 else 0,
-            'median_iou': float(np.median(all_ious)) if len(all_ious) > 0 else 0,
-            'mean_confidence': float(np.mean(all_confidences)) if len(all_confidences) > 0 else 0,
-            'median_confidence': float(np.median(all_confidences)) if len(all_confidences) > 0 else 0,
-            'avg_detections': total_detections / total_images if total_images > 0 else 0,
-            'avg_ground_truth': total_ground_truth / total_images if total_images > 0 else 0,
-            'detections_per_image': torch.tensor(detections_per_image),
-            'iou_distribution': torch.tensor(all_ious) if all_ious else torch.zeros(0),
-            'confidence_distribution': torch.tensor(all_confidences) if all_confidences else torch.zeros(0),
-        }
+        metrics['correct_count_percent'] = (correct_count / total_images) * 100 if total_images > 0 else 0
+        metrics['count_match_percentage'] = (correct_count / total_images) * 100 if total_images > 0 else 0
+        metrics['avg_count_diff'] = count_diff_sum / total_images if total_images > 0 else 0
+        metrics['over_detections'] = over_detections
+        metrics['under_detections'] = under_detections
+        
+        # IoU and confidence metrics
+        metrics['mean_iou'] = float(np.mean(all_ious)) if len(all_ious) > 0 else 0
+        metrics['median_iou'] = float(np.median(all_ious)) if len(all_ious) > 0 else 0
+        metrics['mean_confidence'] = float(np.mean(all_confidences)) if len(all_confidences) > 0 else 0
+        metrics['median_confidence'] = float(np.median(all_confidences)) if len(all_confidences) > 0 else 0
+        
+        # Per-image averages
+        metrics['avg_detections'] = total_detections / total_images if total_images > 0 else 0
+        metrics['avg_ground_truth'] = total_ground_truth / total_images if total_images > 0 else 0
+        
+        # Store distributions
+        metrics['detections_per_image'] = torch.tensor(detections_per_image)
+        metrics['iou_distribution'] = torch.tensor(all_ious) if all_ious else torch.zeros(0)
+        metrics['confidence_distribution'] = torch.tensor(all_confidences) if all_confidences else torch.zeros(0)
         
         # Calculate per-class metrics
+        overall_tp = 0
+        overall_fp = 0
+        overall_fn = 0
+        
         for cls_name, cls_data in class_metrics.items():
             tp = cls_data['true_positives']
             fp = cls_data['false_positives']
             fn = cls_data['false_negatives']
             
+            overall_tp += tp
+            overall_fp += fp
+            overall_fn += fn
+            
+            # Class-specific metrics
             precision = tp / (tp + fp) if (tp + fp) > 0 else 0
             recall = tp / (tp + fn) if (tp + fn) > 0 else 0
             f1 = 2 * (precision * recall) / (precision + recall) if (precision + recall) > 0 else 0
@@ -875,23 +885,15 @@ class Trainer:
             metrics[f'{cls_name}_total_gt'] = cls_data['total_gt']
             metrics[f'{cls_name}_total_pred'] = cls_data['total_pred']
         
-        # Calculate overall precision/recall/F1 as weighted average of per-class metrics
-        total_gt = sum(metrics[f'{cls}_total_gt'] for cls in CLASS_NAMES[1:])
-        if total_gt > 0:
-            metrics['precision'] = sum(metrics[f'{cls}_precision'] * metrics[f'{cls}_total_gt'] 
-                                    for cls in CLASS_NAMES[1:]) / total_gt
-            metrics['recall'] = sum(metrics[f'{cls}_recall'] * metrics[f'{cls}_total_gt'] 
-                                 for cls in CLASS_NAMES[1:]) / total_gt
-            metrics['f1_score'] = 2 * (metrics['precision'] * metrics['recall']) / \
-                                (metrics['precision'] + metrics['recall']) \
-                                if (metrics['precision'] + metrics['recall']) > 0 else 0
-        else:
-            metrics['precision'] = 0
-            metrics['recall'] = 0
-            metrics['f1_score'] = 0
+        # Calculate overall metrics
+        metrics['precision'] = overall_tp / (overall_tp + overall_fp) if (overall_tp + overall_fp) > 0 else 0
+        metrics['recall'] = overall_tp / (overall_tp + overall_fn) if (overall_tp + overall_fn) > 0 else 0
+        metrics['f1_score'] = 2 * (metrics['precision'] * metrics['recall']) / \
+                            (metrics['precision'] + metrics['recall']) \
+                            if (metrics['precision'] + metrics['recall']) > 0 else 0
         
         return metrics
-    
+
     def _match_predictions_to_targets(self, ious, pred_labels, gt_labels):
         """Match predictions to ground truth using Hungarian matching"""
         matches = {}

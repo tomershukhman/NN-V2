@@ -194,7 +194,7 @@ class DogDetector(nn.Module):
         p3 = self.smooth_bns['p3'](p3)
         p3 = p3 + p4_upsampled
 
-        # Use p3 as our final features since it has the highest resolution
+        # Use p3 as our final features
         features = p3
         
         # Apply attention mechanism
@@ -221,37 +221,17 @@ class DogDetector(nn.Module):
         features = self.det_conv1(features)
         features = self.det_conv2(features)
         
-        # Predict bounding boxes and confidence scores
+        # Predict bounding boxes and class scores
         bbox_pred = self.bbox_head(features)
         conf_pred = self.cls_head(features)
         
-        # Reshape and apply class-specific confidence calibration
-        conf_pred = conf_pred.view(batch_size, self.num_anchors_per_cell * NUM_CLASSES, 
-                                 self.feature_map_size, self.feature_map_size)
-        conf_pred = conf_pred.view(batch_size, NUM_CLASSES, self.num_anchors_per_cell,
-                                 self.feature_map_size, self.feature_map_size)
-        
-        # Apply class-specific scaling and bias
-        for i in range(NUM_CLASSES):
-            conf_pred[:, i] = conf_pred[:, i] * self.class_conf_scaling[i] + self.class_conf_bias[i]
-        
-        conf_pred = torch.sigmoid(conf_pred)
-        
-        # Get shapes
-        batch_size = features.shape[0]
-        total_anchors = self.feature_map_size * self.feature_map_size * self.num_anchors_per_cell
-        
         # Reshape predictions
-        bbox_pred = bbox_pred.permute(0, 2, 3, 1).contiguous()
-        bbox_pred = bbox_pred.view(batch_size, total_anchors, 4)
+        bbox_pred = bbox_pred.view(batch_size, -1, 4)
+        conf_pred = conf_pred.view(batch_size, -1, NUM_CLASSES)
         
         # Transform bbox predictions from offsets to actual coordinates
         default_anchors = self.default_anchors.to(bbox_pred.device)
         bbox_pred = self._decode_boxes(bbox_pred, default_anchors)
-        
-        # Reshape confidence predictions
-        conf_pred = conf_pred.permute(0, 2, 3, 4, 1).contiguous()
-        conf_pred = conf_pred.view(batch_size, total_anchors, NUM_CLASSES)
         
         # Return predictions based on training/inference mode
         if self.training and targets is not None:
@@ -264,67 +244,54 @@ class DogDetector(nn.Module):
         # Process each image in the batch for inference
         results = []
         for boxes, scores in zip(bbox_pred, conf_pred):
-            # Process each class separately
-            all_class_boxes = []
-            all_class_scores = []
-            all_class_labels = []
+            all_boxes = []
+            all_scores = []
+            all_labels = []
             
+            # Process each class separately
             for class_idx in range(1, NUM_CLASSES):  # Skip background class (0)
                 class_name = CLASS_NAMES[class_idx]
                 class_scores = scores[:, class_idx]
                 
-                # Filter by confidence
-                confidence_threshold = (TRAIN_CONFIDENCE_THRESHOLD if self.training 
-                                     else CLASS_CONFIDENCE_THRESHOLDS[class_name])
+                # Filter by confidence threshold
+                confidence_threshold = CLASS_CONFIDENCE_THRESHOLDS[class_name]
                 mask = class_scores > confidence_threshold
-                class_boxes = boxes[mask]
-                class_scores = class_scores[mask]
-                
-                if len(class_boxes) > 0:
+                if mask.any():
+                    class_boxes = boxes[mask]
+                    class_scores = class_scores[mask]
+                    
                     # Apply NMS per class
-                    nms_threshold = (TRAIN_NMS_THRESHOLD if self.training 
-                                  else CLASS_NMS_THRESHOLDS[class_name])
-                    keep_idx = nms(
-                        class_boxes,
-                        class_scores,
-                        nms_threshold
-                    )
+                    nms_threshold = CLASS_NMS_THRESHOLDS[class_name]
+                    keep_idx = nms(class_boxes, class_scores, nms_threshold)
                     
-                    # If we have multiple detections after NMS, boost their confidence
-                    if len(keep_idx) > 1:
-                        adjusted_scores = class_scores[keep_idx] * (1 + self.class_multi_obj_conf_boost[class_idx])
-                        class_scores = torch.clamp(adjusted_scores, max=1.0)
-                    else:
-                        class_scores = class_scores[keep_idx]
-                    
-                    class_boxes = class_boxes[keep_idx]
-                    
-                    # Limit detections per class
+                    # Keep only top-k detections for this class
                     max_dets = CLASS_MAX_DETECTIONS[class_name]
                     if len(keep_idx) > max_dets:
-                        scores_for_topk = class_scores
-                        _, topk_indices = torch.topk(scores_for_topk, k=max_dets)
-                        class_boxes = class_boxes[topk_indices]
-                        class_scores = class_scores[topk_indices]
+                        _, top_k = torch.topk(class_scores[keep_idx], k=max_dets)
+                        keep_idx = keep_idx[top_k]
                     
-                    # Add class labels
-                    class_labels = torch.full((len(class_boxes),), class_idx, 
-                                           device=boxes.device, dtype=torch.long)
-                    
-                    all_class_boxes.append(class_boxes)
-                    all_class_scores.append(class_scores)
-                    all_class_labels.append(class_labels)
+                    # Add kept detections to results
+                    all_boxes.append(class_boxes[keep_idx])
+                    all_scores.append(class_scores[keep_idx])
+                    all_labels.append(torch.full((len(keep_idx),), class_idx, 
+                                              device=boxes.device))
             
             # Combine all class predictions
-            if all_class_boxes:
-                final_boxes = torch.cat(all_class_boxes, dim=0)
-                final_scores = torch.cat(all_class_scores, dim=0)
-                final_labels = torch.cat(all_class_labels, dim=0)
+            if all_boxes:
+                final_boxes = torch.cat(all_boxes)
+                final_scores = torch.cat(all_scores)
+                final_labels = torch.cat(all_labels)
+                
+                # Sort all detections by confidence
+                sorted_idx = torch.argsort(final_scores, descending=True)
+                final_boxes = final_boxes[sorted_idx]
+                final_scores = final_scores[sorted_idx]
+                final_labels = final_labels[sorted_idx]
             else:
-                # Ensure at least one prediction with default values
-                final_boxes = torch.tensor([[0.3, 0.3, 0.7, 0.7]], device=bbox_pred.device)
-                final_scores = torch.tensor([CLASS_CONFIDENCE_THRESHOLDS['dog']], device=bbox_pred.device)
-                final_labels = torch.tensor([1], device=bbox_pred.device)  # Default to dog class
+                # Return empty tensors if no detections
+                final_boxes = torch.zeros((0, 4), device=boxes.device)
+                final_scores = torch.zeros((0,), device=boxes.device)
+                final_labels = torch.zeros((0,), device=boxes.device, dtype=torch.long)
             
             results.append({
                 'boxes': final_boxes,

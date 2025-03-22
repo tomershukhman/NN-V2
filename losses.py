@@ -32,13 +32,15 @@ class DetectionLoss(nn.Module):
             
             # Create tensors in training format
             bbox_pred = torch.zeros((batch_size, num_anchors, 4), device=device)
-            conf_pred = torch.zeros((batch_size, num_anchors), device=device)
+            conf_pred = torch.zeros((batch_size, num_anchors, NUM_CLASSES), device=device)
             
             for i, pred in enumerate(predictions):
                 valid_preds = pred['boxes'].shape[0]
                 if valid_preds > 0:
                     bbox_pred[i, :valid_preds] = pred['boxes']
-                    conf_pred[i, :valid_preds] = pred['scores']
+                    # One-hot encode the labels
+                    for j, label in enumerate(pred['labels']):
+                        conf_pred[i, j, label] = pred['scores'][j]
             
             predictions = {
                 'bbox_pred': bbox_pred,
@@ -60,10 +62,11 @@ class DetectionLoss(nn.Module):
         
         for i in range(batch_size):
             target_boxes = targets[i]['boxes']
+            target_labels = targets[i]['labels']
             
             if len(target_boxes) == 0:
-                # Handle empty targets
-                conf_loss = -torch.log(1 - conf_pred[i] + 1e-6).mean()
+                # Handle empty targets with background-only loss
+                conf_loss = -torch.log(1 - conf_pred[i, :, 1:].max(dim=1)[0] + 1e-6).mean()
                 bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             else:
                 # Calculate IoU between anchors and target boxes
@@ -72,98 +75,73 @@ class DetectionLoss(nn.Module):
                 # For each anchor, get IoU with best matching target
                 max_ious, best_target_idx = ious.max(dim=1)
                 
-                # For each target, ensure at least one anchor is assigned
-                best_anchor_per_target = []
-                for t_idx in range(len(target_boxes)):
-                    # Get candidate anchors for this target (IoU > 0.3)
-                    target_ious = ious[:, t_idx]
-                    candidate_mask = target_ious > 0.3
-                    
-                    if candidate_mask.sum() > 0:
-                        # Take top-k anchors for each target to ensure multiple good matches
-                        # This helps with multi-object scenarios by providing more positive anchors
-                        k = min(3, candidate_mask.sum().item())  # Get up to 3 anchors per target
-                        topk_ious, topk_indices = torch.topk(target_ious, k=k)
-                        best_anchor_per_target.extend(topk_indices.tolist())
-                    else:
-                        # If no good candidates, force assign the best one
-                        best_idx = target_ious.argmax().item()
-                        best_anchor_per_target.append(best_idx)
-                
                 # Create masks for positive and negative anchors
                 positive_mask = max_ious >= self.positive_threshold
-                for idx in best_anchor_per_target:
-                    positive_mask[idx] = True  # Force-assigned anchors are positive
-                
                 negative_mask = max_ious < self.negative_threshold
-                negative_mask[positive_mask] = False  # Ensure no overlap
                 
-                # Calculate confidence target for focal loss
+                # Ensure at least one anchor per ground truth box
+                for t_idx in range(len(target_boxes)):
+                    box_ious = ious[:, t_idx]
+                    best_anchor_idx = box_ious.argmax()
+                    positive_mask[best_anchor_idx] = True
+                    negative_mask[best_anchor_idx] = False
+                
+                # Create confidence targets
                 conf_target = torch.zeros_like(conf_pred[i])
-                conf_target[positive_mask] = 1.0
+                if positive_mask.any():
+                    matched_target_labels = target_labels[best_target_idx[positive_mask]]
+                    conf_target[positive_mask, matched_target_labels] = 1.0
                 
-                # Apply focal loss with improved weighting for multi-object detection
-                pt = torch.where(conf_target == 1.0, conf_pred[i], 1 - conf_pred[i])
+                # Calculate focal loss
+                probs = torch.softmax(conf_pred[i], dim=1)
+                pt = torch.where(conf_target == 1.0, probs, 1 - probs)
                 alpha_factor = torch.where(conf_target == 1.0, self.alpha, 1 - self.alpha)
                 focal_weight = (1 - pt).pow(self.gamma)
                 
-                focal_loss = -alpha_factor * focal_weight * torch.log(torch.clamp(
-                    torch.where(conf_target == 1.0, conf_pred[i], 1 - conf_pred[i]),
-                    min=1e-6, max=1-1e-6
-                ))
+                focal_loss = -alpha_factor * focal_weight * torch.log(torch.clamp(pt, min=1e-6))
                 
                 # Balance positive and negative samples
                 num_positive = positive_mask.sum().item()
                 if num_positive > 0:
-                    # Sample negative examples to maintain a reasonable pos:neg ratio
-                    # For multi-object cases, we want more negative samples
-                    neg_ratio = min(3, int(num_anchors / num_positive))
-                    max_neg = neg_ratio * num_positive
+                    pos_loss = focal_loss[positive_mask].sum()
                     
-                    if negative_mask.sum() > max_neg and negative_mask.sum() > 0:
-                        # Sort negative anchors by loss value
-                        neg_losses = focal_loss[negative_mask]
-                        k = min(max_neg, neg_losses.size(0))  # Ensure k is not larger than tensor size
-                        if k > 0:  # Only proceed if we have valid negatives
-                            neg_values, neg_indices = torch.topk(neg_losses, k=k)
-                            
-                            # Create a new mask with only the selected negatives
-                            selected_neg_mask = torch.zeros_like(negative_mask)
-                            selected_neg_indices = torch.where(negative_mask)[0][neg_indices]
-                            selected_neg_mask[selected_neg_indices] = True
-                            
-                            # Only compute loss on positives and selected negatives
-                            loss_mask = positive_mask | selected_neg_mask
-                            conf_loss = focal_loss[loss_mask].mean()
+                    # Sample negative examples
+                    neg_loss = focal_loss[negative_mask]
+                    
+                    if len(neg_loss) > 0:
+                        # Calculate number of negative samples to use
+                        num_neg = min(num_positive * 3, negative_mask.sum().item())
+                        
+                        if num_neg > 0:
+                            # Sort negative losses and take top k
+                            neg_loss_values, neg_loss_indices = torch.topk(neg_loss.view(-1), k=num_neg)
+                            neg_loss = neg_loss_values.sum()
                         else:
-                            # If no valid negatives, just use positives
-                            conf_loss = focal_loss[positive_mask].mean()
+                            neg_loss = torch.tensor(0.0, device=bbox_pred.device)
+                            
+                        conf_loss = (pos_loss + neg_loss) / (num_positive + num_neg)
                     else:
-                        # If we don't have too many negatives, use all of them
-                        loss_mask = positive_mask | negative_mask
-                        conf_loss = focal_loss[loss_mask].mean()
+                        conf_loss = pos_loss / num_positive
                 else:
                     # If no positives, just use the hardest negatives
-                    num_neg = min(num_anchors // 4, 100)  # Cap at a reasonable number
-                    if negative_mask.sum() > 0:  # Only if we have any negatives
-                        neg_values, neg_indices = torch.topk(focal_loss[negative_mask], 
-                                                           k=min(num_neg, negative_mask.sum().item()))
-                        conf_loss = neg_values.mean()
+                    neg_loss = focal_loss[negative_mask]
+                    if len(neg_loss) > 0:
+                        num_neg = min(100, len(neg_loss))  # Cap at reasonable number
+                        neg_loss_values, _ = torch.topk(neg_loss.view(-1), k=num_neg)
+                        conf_loss = neg_loss_values.mean()
                     else:
-                        # If no negatives either, use all anchors
-                        conf_loss = focal_loss.mean()
+                        conf_loss = focal_loss.mean()  # Fallback if no negatives
                 
-                # Calculate bbox loss only for positive samples with better scaling
+                # Calculate bbox loss only for positive samples
                 if positive_mask.sum() > 0:
-                    # Multi-target assignment: each anchor might be associated with different GT boxes
+                    # Get matched target boxes
                     matched_target_boxes = target_boxes[best_target_idx[positive_mask]]
                     pred_boxes = bbox_pred[i][positive_mask]
                     
-                    # Use combined IoU and L1 loss for better localization
+                    # Combine IoU loss and L1 loss
                     iou_loss = self._giou_loss(pred_boxes, matched_target_boxes)
-                    l1_loss = F.l1_loss(pred_boxes, matched_target_boxes, reduction='none').mean(dim=1)
+                    l1_loss = F.smooth_l1_loss(pred_boxes, matched_target_boxes, reduction='none').mean(dim=1)
                     
-                    # Combine losses with adaptive weighting
                     bbox_loss = (iou_loss + 0.5 * l1_loss).mean()
                 else:
                     bbox_loss = torch.tensor(0.0, device=bbox_pred.device)

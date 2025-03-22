@@ -40,49 +40,69 @@ class VisualizationLogger:
         """Log comprehensive epoch-level metrics"""
         prefix = 'Train' if phase == 'train' else 'Val'
         
+        # Safely log metrics with error handling
+        def safe_log(name, value):
+            try:
+                if isinstance(value, (int, float)):
+                    self.writer.add_scalar(f'{prefix}/{name}', value, epoch)
+            except Exception as e:
+                print(f"Warning: Could not log metric {name}: {e}")
+
         # Loss metrics
-        self.writer.add_scalar(f'{prefix}/Loss/Total', metrics['total_loss'], epoch)
-        self.writer.add_scalar(f'{prefix}/Loss/Confidence', metrics['conf_loss'], epoch)
-        self.writer.add_scalar(f'{prefix}/Loss/BBox', metrics['bbox_loss'], epoch)
+        for loss_type in ['total_loss', 'conf_loss', 'bbox_loss']:
+            if loss_type in metrics:
+                safe_log(f'Loss/{loss_type.replace("_loss", "")}', metrics[loss_type])
 
         # Detection quality metrics per class
-        for class_idx in range(1, len(CLASS_NAMES)):  # Skip background class
+        for class_idx in range(1, len(CLASS_NAMES)):
             class_name = CLASS_NAMES[class_idx]
-            if f'{class_name}_precision' in metrics:
-                self.writer.add_scalar(f'{prefix}/{class_name}/Precision', 
-                                    metrics[f'{class_name}_precision'], epoch)
-                self.writer.add_scalar(f'{prefix}/{class_name}/Recall', 
-                                    metrics[f'{class_name}_recall'], epoch)
-                self.writer.add_scalar(f'{prefix}/{class_name}/F1', 
-                                    metrics[f'{class_name}_f1'], epoch)
+            for metric in ['precision', 'recall', 'f1', 'mean_iou']:
+                key = f'{class_name}_{metric}'
+                if key in metrics:
+                    safe_log(f'{class_name}/{metric}', metrics[key])
 
         # Overall detection metrics
-        self.writer.add_scalar(f'{prefix}/Detection/MeanIoU', metrics['mean_iou'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/MedianIoU', metrics['median_iou'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/MeanConfidence', metrics['mean_confidence'], epoch)
-        self.writer.add_scalar(f'{prefix}/Detection/MedianConfidence', metrics['median_confidence'], epoch)
+        detection_metrics = {
+            'MeanIoU': 'mean_iou',
+            'MedianIoU': 'median_iou',
+            'MeanConfidence': 'mean_confidence',
+            'MedianConfidence': 'median_confidence'
+        }
+        for display_name, metric_key in detection_metrics.items():
+            if metric_key in metrics:
+                safe_log(f'Detection/{display_name}', metrics[metric_key])
         
         # Per-image statistics
-        self.writer.add_scalar(f'{prefix}/Statistics/AvgDetectionsPerImage', metrics['avg_detections'], epoch)
-        self.writer.add_scalar(f'{prefix}/Statistics/AvgGroundTruthPerImage', metrics['avg_ground_truth'], epoch)
+        image_stats = {
+            'AvgDetectionsPerImage': 'avg_detections',
+            'AvgGroundTruthPerImage': 'avg_ground_truth',
+            'CountMatchPercentage': 'count_match_percentage',
+            'AvgCountDiff': 'avg_count_diff'
+        }
+        for display_name, metric_key in image_stats.items():
+            if metric_key in metrics:
+                safe_log(f'Statistics/{display_name}', metrics[metric_key])
         
         # Overall performance metrics
-        self.writer.add_scalar(f'{prefix}/Performance/Precision', metrics['precision'], epoch)
-        self.writer.add_scalar(f'{prefix}/Performance/Recall', metrics['recall'], epoch)
-        self.writer.add_scalar(f'{prefix}/Performance/F1Score', metrics['f1_score'], epoch)
+        performance_metrics = ['precision', 'recall', 'f1_score']
+        for metric in performance_metrics:
+            if metric in metrics:
+                safe_log(f'Performance/{metric}', metrics[metric])
 
-        # Log distributions
-        if metrics['detections_per_image'].nelement() > 0:
-            self.writer.add_histogram(f'{prefix}/Distributions/DetectionsPerImage', 
-                                    metrics['detections_per_image'], epoch)
-        
-        if metrics['iou_distribution'].nelement() > 0:
-            self.writer.add_histogram(f'{prefix}/Distributions/IoUScores',
-                                    metrics['iou_distribution'], epoch)
-        
-        if metrics['confidence_distribution'].nelement() > 0:
-            self.writer.add_histogram(f'{prefix}/Distributions/ConfidenceScores',
-                                    metrics['confidence_distribution'], epoch)
+        # Log distributions as histograms
+        distribution_metrics = {
+            'DetectionsPerImage': 'detections_per_image',
+            'IoUScores': 'iou_distribution',
+            'ConfidenceScores': 'confidence_distribution'
+        }
+        for display_name, metric_key in distribution_metrics.items():
+            if metric_key in metrics and isinstance(metrics[metric_key], torch.Tensor):
+                if metrics[metric_key].nelement() > 0:
+                    try:
+                        self.writer.add_histogram(f'{prefix}/Distributions/{display_name}', 
+                                               metrics[metric_key], epoch)
+                    except Exception as e:
+                        print(f"Warning: Could not log distribution {display_name}: {e}")
 
     def draw_boxes(self, image, boxes, scores=None, gt_boxes=None, gt_labels=None, pred_labels=None):
         # Denormalize the image first
