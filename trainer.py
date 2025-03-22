@@ -105,16 +105,26 @@ def train():
         train_conf_loss = 0
         train_bbox_loss = 0
         
+        # Clear caches at the start of each epoch
+        if hasattr(train_loader.dataset, 'clear_cache'):
+            train_loader.dataset.clear_cache()
+        if hasattr(val_loader.dataset, 'clear_cache'):
+            val_loader.dataset.clear_cache()
+        
+        # Clear CUDA cache if using GPU
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        
         for batch_idx, (images, boxes, labels) in enumerate(train_loader):
             # Prepare batch
             images = images.to(DEVICE)
             targets = [{
-                'boxes': box.to(DEVICE),
-                'labels': label.to(DEVICE)
-            } for box, label in zip(boxes, labels)]
+                'boxes': boxes[i].to(DEVICE),
+                'labels': labels[i].to(DEVICE)
+            } for i in range(len(boxes))]
             
             # Forward pass
-            predictions = model(images, targets)
+            predictions = model(images, targets)  # This returns a dict with bbox_pred, conf_pred, and anchors
             loss_dict = criterion(predictions, targets)
             loss = loss_dict['total_loss']
             
@@ -137,6 +147,10 @@ def train():
             if batch_idx % 20 == 0:
                 avg_loss = train_loss / (batch_idx + 1)
                 print(f"\rEpoch [{epoch+1}/{NUM_EPOCHS}] Progress: {progress:.1f}% ({batch_idx+1}/{total_steps}) Loss: {avg_loss:.4f}", end="", flush=True)
+            
+            # Clear memory every few batches
+            if batch_idx % 50 == 0:
+                torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         print()  # New line after training
         
@@ -144,6 +158,12 @@ def train():
         train_loss /= len(train_loader)
         train_conf_loss /= len(train_loader)
         train_bbox_loss /= len(train_loader)
+        
+        # Clear cache before validation
+        if hasattr(train_loader.dataset, 'clear_cache'):
+            train_loader.dataset.clear_cache()
+        if hasattr(val_loader.dataset, 'clear_cache'):
+            val_loader.dataset.clear_cache()
         
         # Validation phase
         model.eval()
@@ -163,6 +183,7 @@ def train():
                     'labels': label.to(DEVICE)
                 } for box, label in zip(boxes, labels)]
                 
+                # Get predictions for loss calculation
                 predictions = model(images, targets)
                 loss_dict = criterion(predictions, targets)
                 
@@ -171,13 +192,17 @@ def train():
                 val_bbox_loss += loss_dict['bbox_loss']
                 
                 # Get inference predictions for metrics
-                inference_preds = model(images, None)
+                inference_preds = model(images, None)  # This returns a list of dicts with boxes, scores, and labels
                 all_predictions.extend(inference_preds)
                 all_targets.extend(targets)
                 
                 # Show validation progress
                 val_progress = (val_idx + 1) / len(val_loader) * 100
                 print(f"\rValidating: {val_progress:.1f}%", end="", flush=True)
+                
+                # Clear memory every few batches
+                if val_idx % 20 == 0:
+                    torch.cuda.empty_cache() if torch.cuda.is_available() else None
         
         # Calculate average validation losses and metrics
         val_loss /= len(val_loader)
@@ -214,6 +239,14 @@ def train():
         if epochs_without_improvement >= 15:
             print(f"\nEarly stopping triggered after {epochs_without_improvement} epochs without improvement")
             break
+        
+        # Final cache clear at end of epoch
+        if hasattr(train_loader.dataset, 'clear_cache'):
+            train_loader.dataset.clear_cache()
+        if hasattr(val_loader.dataset, 'clear_cache'):
+            val_loader.dataset.clear_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
     
     print("\nTraining completed")
 

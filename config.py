@@ -30,11 +30,20 @@ TRANSLATION_FRAC = 0.1  # Reduced translation
 # Model configuration
 NUM_CLASSES = 3  # Background (0), Person (1), Dog (2)
 CLASS_NAMES = ["background", "person", "dog"]
-FEATURE_MAP_SIZE = 7  # Size of the feature map for detection
+FEATURE_MAP_SIZE = 20  # Adjusted for better detection of smaller objects
 
-# Anchor box configuration - optimized based on size statistics
-ANCHOR_SCALES = [0.07, 0.14, 0.28, 0.42]  # Covers both person (9.3%) and dog (17.67%) sizes
-ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5, 2.0]  # Extended range for varied poses
+# Anchor box configuration - optimized for class statistics
+# Person: avg 9.30% of image area -> sqrt(0.093) ≈ 0.305 relative size
+# Dog: avg 17.67% of image area -> sqrt(0.1767) ≈ 0.42 relative size
+ANCHOR_SCALES = [
+    0.2,   # For small people
+    0.305, # For average people
+    0.42,  # For average dogs
+    0.6    # For large dogs/groups
+]
+
+# Wider range of aspect ratios to handle varying poses
+ANCHOR_RATIOS = [0.5, 0.75, 1.0, 1.5, 2.0]
 
 NUM_ANCHORS_PER_CELL = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
 TOTAL_ANCHORS = FEATURE_MAP_SIZE * FEATURE_MAP_SIZE * NUM_ANCHORS_PER_CELL
@@ -44,8 +53,8 @@ IOU_THRESHOLD = 0.4  # Slightly reduced to catch more valid detections
 NEG_POS_RATIO = 5  # Increased from 3 to handle class imbalance better
 
 # Training thresholds - adjusted for better confidence calibration
-TRAIN_CONFIDENCE_THRESHOLD = 0.25  # Lowered further to allow more predictions during training
-TRAIN_NMS_THRESHOLD = 0.6  # Increased for better multi-dog detection during training
+TRAIN_CONFIDENCE_THRESHOLD = 0.2  # Lower to catch more rare class instances
+TRAIN_NMS_THRESHOLD = 0.5  # Balance between multi-instance detection and false positives
 
 # Inference thresholds - fine-tuned for production
 CONFIDENCE_THRESHOLD = 0.2  # Lowered to catch more valid detections in multi-dog scenarios
@@ -54,24 +63,24 @@ MAX_DETECTIONS = 8  # Increased from 5 to allow more detections per image
 
 # Detection parameters for each class
 CLASS_CONFIDENCE_THRESHOLDS = {
-    "person": 0.4,   # Higher threshold for common class (94.1%)
-    "dog": 0.25      # Lower threshold for rare class (19.1%)
+    "person": 0.3,    # More permissive for common class
+    "dog": 0.2        # More permissive for rare class
 }
 
 CLASS_NMS_THRESHOLDS = {
-    "person": 0.5,   # Standard NMS for common class
-    "dog": 0.4       # More permissive NMS for rare class
+    "person": 0.45,   # Stricter for crowded scenes (52.3% have multiple)
+    "dog": 0.35       # More permissive for rare multiple dogs (5.0%)
 }
 
 # Adjusted max detections based on statistics
 CLASS_MAX_DETECTIONS = {
-    "person": 12,    # ~52.3% have multiple people
-    "dog": 3         # ~5% have multiple dogs
+    "person": 12,     # Higher limit for crowded scenes
+    "dog": 3          # Lower limit based on statistics
 }
 
 # Loss function parameters
 BBOX_LOSS_WEIGHT = 1.0
-CONF_LOSS_WEIGHT = 1.2  # Slightly increased to emphasize confidence accuracy
+CONF_LOSS_WEIGHT = 1.2  # Slightly higher to focus on classification accuracy
 
 # Visualization parameters
 TENSORBOARD_TRAIN_IMAGES = 8

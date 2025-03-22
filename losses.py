@@ -6,13 +6,22 @@ from config import NUM_CLASSES, CLASS_NAMES
 class DetectionLoss(nn.Module):
     def __init__(self):
         super().__init__()
-        # Class weights based on inverse frequency: background=1.0, person=1.0, dog=4.93 (~94.1%/19.1%)
+        # Dynamic class weights based on dataset statistics
+        # background=1.0, person=1.0, dog=4.93 (inverse frequency weights)
         self.class_weights = torch.tensor([1.0, 1.0, 4.93])
-        # Size-based weights to handle the significant size difference between classes
+        
+        # Size-based weights based on average areas
         self.person_size_mean = 0.093  # 9.30% average area
         self.dog_size_mean = 0.1767    # 17.67% average area
         
+        # Multiple instance weights - higher weight for rare multiple dog cases
+        self.multi_instance_weights = {
+            1: 1.0,    # Person (common: 52.3% have multiple)
+            2: 2.0     # Dog (rare: only 5.0% have multiple)
+        }
+    
     def forward(self, predictions, targets, conf_weight=1.0, bbox_weight=1.0):
+        # Predictions is already a dictionary containing 'bbox_pred', 'conf_pred', and 'anchors'
         bbox_pred = predictions['bbox_pred']
         conf_pred = predictions['conf_pred']
         anchors = predictions['anchors']
@@ -38,20 +47,27 @@ class DetectionLoss(nn.Module):
             # Calculate IoU between anchors and target boxes
             ious = self._calculate_iou(anchors, target_boxes)
             
-            # Dynamic thresholds based on object size
+            # Count instances per class for multiple instance handling
+            class_counts = torch.bincount(target_labels, minlength=3)  # 3 classes including background
+            
+            # Dynamic thresholds based on object size and class
             target_sizes = (target_boxes[:, 2] - target_boxes[:, 0]) * (target_boxes[:, 3] - target_boxes[:, 1])
-            is_large = target_sizes > 0.15  # Threshold between person and dog mean sizes
             
             # Assign targets to anchors with dynamic IoU thresholds
             max_ious, matched_targets = ious.max(dim=1)
             pos_mask = torch.zeros_like(max_ious, dtype=torch.bool)
             
-            # Apply different IoU thresholds based on object size
             for idx, (size, label) in enumerate(zip(target_sizes, target_labels)):
                 if label == 1:  # person
                     threshold = 0.4
+                    # More strict matching for crowded scenes with multiple people
+                    if class_counts[1] > 1:
+                        threshold += 0.05
                 else:  # dog
                     threshold = 0.35  # More permissive for rare class
+                    # Even more permissive for multiple dogs
+                    if class_counts[2] > 1:
+                        threshold -= 0.05
                     
                 if size > 0.15:  # Large object
                     threshold += 0.05  # Stricter for larger objects
@@ -70,10 +86,19 @@ class DetectionLoss(nn.Module):
             
             num_pos = pos_mask.sum()
             
-            # Calculate classification loss with class weights
+            # Calculate classification loss with dynamic weighting
             target_conf = torch.zeros_like(conf_pred[i])
             if num_pos > 0:
                 target_conf[pos_mask, target_labels[matched_targets[pos_mask]]] = 1
+                
+                # Apply multiple instance weighting
+                for label in target_labels.unique():
+                    label_mask = target_labels[matched_targets[pos_mask]] == label
+                    if label_mask.any():
+                        count = class_counts[label]
+                        if count > 1:
+                            # Apply multiple instance weight
+                            target_conf[pos_mask][label_mask] *= self.multi_instance_weights.get(label.item(), 1.0)
             
             conf_loss = F.cross_entropy(
                 conf_pred[i],
@@ -113,23 +138,23 @@ class DetectionLoss(nn.Module):
                         # Increase weight for smaller dogs and apply class rarity factor
                         size_weights[idx] = 4.93 * torch.sqrt(self.dog_size_mean / (target_sizes[idx] + 1e-6))
                 
-                bbox_loss = F.smooth_l1_loss(
+                # Use GIoU loss for better handling of different sized objects
+                bbox_loss = self._giou_loss(
                     bbox_pred[i, pos_mask],
-                    target_boxes[matched_targets[pos_mask]],
-                    reduction='none'
+                    target_boxes[matched_targets[pos_mask]]
                 )
-                bbox_loss = (bbox_loss.mean(dim=1) * size_weights).sum() / num_pos
+                bbox_loss = (bbox_loss * size_weights).sum() / num_pos
             else:
                 bbox_loss = torch.tensor(0.0, device=bbox_pred.device)
             
             total_conf_loss += conf_loss
             total_bbox_loss += bbox_loss
         
-        # Average over batch
+        # Average over batch and combine losses with dynamic weighting
         conf_loss = total_conf_loss / batch_size
         bbox_loss = total_bbox_loss / batch_size
         
-        # Combine losses with adaptive weighting
+        # Dynamic loss weighting based on performance
         total_loss = conf_weight * conf_loss + bbox_weight * bbox_loss
         
         return {

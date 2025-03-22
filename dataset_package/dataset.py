@@ -6,6 +6,9 @@ import torch
 import fiftyone as fo
 import fiftyone.zoo as foz
 import logging
+import pickle
+import hashlib
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -14,36 +17,62 @@ logger = logging.getLogger('dog_detector')
 # Mapping from class name to numerical label
 LABEL_MAP = {"Person": 0, "Dog": 1}
 
-class ObjectDetectionDataset(torch  .utils.data.Dataset):
+class ObjectDetectionDataset(torch.utils.data.Dataset):
     """
-    Custom Dataset for object detection.
-    Expects a list of FiftyOne samples.
-    Loads images, converts normalized bounding boxes to absolute Pascal VOC format,
-    and applies provided augmentations.
+    Custom Dataset for object detection with caching support.
     """
-    def __init__(self, samples_data, transforms, label_map):
+    def __init__(self, samples_data, transforms, label_map, cache_size=1000):
         """
         Args:
-            samples_data: List of dictionaries containing sample data (filepath and annotations)
-            transforms: Albumentations transform.
-            label_map: Dictionary mapping class names to numeric labels.
+            samples_data: List of dictionaries containing sample data
+            transforms: Albumentations transform
+            label_map: Dictionary mapping class names to numeric labels
+            cache_size: Maximum number of images to keep in memory
         """
         self.samples_data = samples_data
         self.transforms = transforms
         self.label_map = label_map
-
+        self.cache_size = cache_size
+        self.image_cache = {}
+        self.cache_keys = []
+    
     def __len__(self):
         return len(self.samples_data)
+    
+    def _load_and_cache_image(self, image_path):
+        """Load image and add to cache if not present"""
+        if image_path in self.image_cache:
+            return self.image_cache[image_path]
+        
+        # Load image
+        image = cv2.imread(image_path)
+        if image is None:
+            raise FileNotFoundError(f"Could not load image at {image_path}")
+        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        
+        # Add to cache if we have space
+        if len(self.cache_keys) >= self.cache_size:
+            # Remove oldest cached image
+            oldest_key = self.cache_keys.pop(0)
+            del self.image_cache[oldest_key]
+        
+        self.image_cache[image_path] = image
+        self.cache_keys.append(image_path)
+        
+        return image
 
     def __getitem__(self, idx):
         sample_data = self.samples_data[idx]
         image_path = sample_data["filepath"]
         
-        # Load image using cv2 (BGR) and convert to RGB
-        image = cv2.imread(image_path)
-        if image is None:
-            raise FileNotFoundError(f"Could not load image at {image_path}")
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+        # Load image with caching
+        try:
+            image = self._load_and_cache_image(image_path)
+        except Exception as e:
+            logger.error(f"Error loading image {image_path}: {e}")
+            # Return a small black image as fallback
+            image = np.zeros((224, 224, 3), dtype=np.uint8)
+        
         h, w, _ = image.shape
         
         # Use pre-extracted annotations
@@ -81,20 +110,53 @@ class ObjectDetectionDataset(torch  .utils.data.Dataset):
             }
         
         return image, target
+    
+    def clear_cache(self):
+        """Clear the image cache to free memory"""
+        self.image_cache.clear()
+        self.cache_keys.clear()
+
+def get_cache_path(max_samples, dataset_name):
+    """Generate a unique cache path based on dataset parameters"""
+    cache_dir = Path("cache")
+    cache_dir.mkdir(exist_ok=True)
+    
+    # Create a unique identifier based on parameters
+    params = f"{dataset_name}-{max_samples}"
+    cache_id = hashlib.md5(params.encode()).hexdigest()[:10]
+    
+    return cache_dir / f"dataset_cache_{cache_id}.pkl"
 
 def download_and_prepare_dataset(max_samples=500):
     """
     Downloads a subset of the Open Images dataset (v6) using FiftyOne,
-    filtered to include only "Person" and "Dog" detections.
+    with caching support for faster subsequent loads.
     """
     dataset_name = "open-images-person-dog"
+    cache_path = get_cache_path(max_samples, dataset_name)
     
+    # Try to load from cache first
+    if cache_path.exists():
+        try:
+            logger.info(f"Loading dataset from cache: {cache_path}")
+            with open(cache_path, 'rb') as f:
+                cache_data = pickle.load(f)
+                
+            # Validate cache
+            if (cache_data.get('max_samples') == max_samples and 
+                cache_data.get('dataset_name') == dataset_name):
+                logger.info("Cache validation successful")
+                return cache_data['dataset']
+            else:
+                logger.info("Cache parameters mismatch, downloading fresh dataset")
+        except Exception as e:
+            logger.warning(f"Failed to load cache: {e}")
+    
+    # If cache doesn't exist or is invalid, download dataset
     try:
-        # Try to load existing dataset
         dataset = fo.load_dataset(dataset_name)
         logger.info(f"Loaded existing dataset '{dataset_name}' with {len(dataset)} samples")
     except ValueError:
-        # If dataset doesn't exist, download it
         logger.info(f"Downloading Open Images dataset with max_samples={max_samples}")
         dataset = foz.load_zoo_dataset(
             "open-images-v6",
@@ -107,14 +169,43 @@ def download_and_prepare_dataset(max_samples=500):
         )
         logger.info(f"Downloaded dataset with {len(dataset)} samples")
     
+    # Save to cache
+    try:
+        cache_data = {
+            'dataset': dataset,
+            'max_samples': max_samples,
+            'dataset_name': dataset_name,
+            'timestamp': np.datetime64('now')
+        }
+        logger.info(f"Saving dataset to cache: {cache_path}")
+        with open(cache_path, 'wb') as f:
+            pickle.dump(cache_data, f)
+    except Exception as e:
+        logger.warning(f"Failed to save cache: {e}")
+    
     return dataset
 
 def create_balanced_samples(foset):
     """
-    Create a balanced list of samples based on the presence of each class.
-    Computes per-sample weights inversely proportional to class frequency.
-    Returns a list of sample data dictionaries and a corresponding list of weights.
+    Create a balanced list of samples with caching support.
     """
+    cache_path = Path("cache/balanced_samples.pkl")
+    cache_path.parent.mkdir(exist_ok=True)
+    
+    # Try to load from cache
+    if cache_path.exists():
+        try:
+            logger.info("Loading balanced samples from cache")
+            with open(cache_path, 'rb') as f:
+                cache_data = pickle.load(f)
+                
+            # Basic validation of cache data
+            if isinstance(cache_data, dict) and 'samples' in cache_data and 'weights' in cache_data:
+                logger.info("Using cached balanced samples")
+                return cache_data['samples'], cache_data['weights']
+        except Exception as e:
+            logger.warning(f"Failed to load balanced samples cache: {e}")
+    
     logger.info(f"Creating balanced samples from {len(foset)} FiftyOne samples")
     
     if len(foset) == 0:
@@ -257,22 +348,48 @@ def create_balanced_samples(foset):
         logger.error("No valid samples found with the required detections!")
         return [], []
     
-    # Calculate weights based on class frequency
-    w_person = 1.0 / max(n_person, 1)
-    w_dog = 1.0 / max(n_dog, 1)
+    # Calculate weights with more sophisticated approach
+    total_samples = len(valid_samples_data)
+    class_weights = {
+        "Person": total_samples / max(n_person, 1),  # ~1.06x
+        "Dog": total_samples / max(n_dog, 1)         # ~5.23x
+    }
     
     sample_weights = []
     for has_person, has_dog in valid_sample_flags:
         weight = 0.0
-        if has_person:
-            weight = max(weight, w_person)
-        if has_dog:
-            weight = max(weight, w_dog)
+        # Higher weight for rare combinations
+        if has_person and has_dog:
+            # Both classes are present - give highest weight
+            weight = max(class_weights["Dog"] * 1.2, class_weights["Person"])
+        elif has_dog:
+            # Only dog - high weight
+            weight = class_weights["Dog"]
+        elif has_person:
+            # Only person - base weight
+            weight = class_weights["Person"]
+        
         sample_weights.append(weight)
     
-    # If all weights are zero (unlikely), use uniform weights
-    if all(w == 0 for w in sample_weights):
+    # Normalize weights
+    total_weight = sum(sample_weights)
+    if total_weight > 0:
+        sample_weights = [w / total_weight * len(sample_weights) for w in sample_weights]
+    else:
         logger.warning("All sample weights are zero. Using uniform weights.")
-        sample_weights = [1.0 / len(valid_samples_data)] * len(valid_samples_data)
+        sample_weights = [1.0] * len(valid_samples_data)
+    
+    # Save processed samples to cache
+    try:
+        cache_data = {
+            'samples': valid_samples_data,
+            'weights': sample_weights,
+            'timestamp': np.datetime64('now')
+        }
+        logger.info("Saving balanced samples to cache")
+        with open(cache_path, 'wb') as f:
+            pickle.dump(cache_data, f)
+    except Exception as e:
+        logger.warning(f"Failed to save balanced samples cache: {e}")
     
     return valid_samples_data, sample_weights
