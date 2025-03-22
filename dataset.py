@@ -29,7 +29,7 @@ logger = logging.getLogger('dog_detector')
 CLASS_NAMES = ["background", "dog", "person"]
 
 class DogDetectionDataset(Dataset):
-    def __init__(self, root=DATA_ROOT, split='train', transform=None, download=False):
+    def __init__(self, root=DATA_ROOT, split='train', transform=None, download=False, max_samples=25000):
         """
         Multi-class Object Detection Dataset using Open Images
         Args:
@@ -37,12 +37,14 @@ class DogDetectionDataset(Dataset):
             split (str): 'train' or 'validation'
             transform (callable, optional): Albumentations transform to be applied on a sample
             download (bool): If True, downloads the dataset from the internet
+            max_samples (int): Maximum number of samples to load (default: 25000)
         """
         self.transform = transform
         self.root = os.path.abspath(root)
         self.split = "validation" if split == "val" else split
         self.samples = []
         self.objects_per_image = []
+        self.max_samples = max_samples
         
         # We'll use a single cache file for all data
         self.cache_file = os.path.join(self.root, 'multiclass_detection_cache.pt')
@@ -57,7 +59,7 @@ class DogDetectionDataset(Dataset):
             all_samples = cache_data['samples']
             all_objects_per_image = cache_data['objects_per_image']
             
-            # First apply DATA_SET_TO_USE to reduce total dataset size
+            # First apply max_samples limit to reduce total dataset size
             total_samples = len(all_samples)
             
             # Sort samples by number of objects to analyze distribution
@@ -71,9 +73,9 @@ class DogDetectionDataset(Dataset):
                 object_count_distribution = Counter(all_objects_per_image)
                 logger.debug(f"Original object count distribution: {dict(object_count_distribution)}")
             
-            # Stratified sampling to ensure we keep multi-object images
-            if DATA_SET_TO_USE < 1.0:
-                logger.info(f"Performing stratified sampling (DATA_SET_TO_USE={DATA_SET_TO_USE:.2f})")
+            # Limit total samples while maintaining stratification
+            if self.max_samples and len(samples_with_count) > self.max_samples:
+                logger.info(f"Limiting dataset to {self.max_samples} samples")
                 # Group samples by object count
                 samples_by_count = {}
                 for sample, count in zip(all_samples, all_objects_per_image):
@@ -81,17 +83,27 @@ class DogDetectionDataset(Dataset):
                         samples_by_count[count] = []
                     samples_by_count[count].append((sample, count))
                 
-                # Select DATA_SET_TO_USE percentage from each group, but ensure we keep
-                # at least 80% of multi-object samples if available
+                # Calculate proportions to maintain for each group
+                total_count = len(samples_with_count)
                 selected_samples = []
+                remaining_samples = self.max_samples
+                
+                # First pass: ensure minimum representation
+                min_per_group = max(1, self.max_samples // (len(samples_by_count) * 10))  # At least 10% per group
                 for count, samples in samples_by_count.items():
-                    num_to_select = int(len(samples) * DATA_SET_TO_USE)
-                    # For multi-object images, ensure we keep more samples
-                    if count > 1:
-                        num_to_select = max(num_to_select, int(len(samples) * 0.8))
-                    # Don't select more than we have
-                    num_to_select = min(num_to_select, len(samples))
+                    num_to_select = min(min_per_group, len(samples))
                     selected_samples.extend(samples[:num_to_select])
+                    remaining_samples -= num_to_select
+                
+                # Second pass: distribute remaining samples proportionally
+                if remaining_samples > 0:
+                    for count, samples in samples_by_count.items():
+                        remaining_in_group = samples[min_per_group:]
+                        if not remaining_in_group:
+                            continue
+                        proportion = len(remaining_in_group) / (total_count - len(selected_samples))
+                        num_additional = int(remaining_samples * proportion)
+                        selected_samples.extend(remaining_in_group[:num_additional])
                 
                 # Re-shuffle the selected samples
                 random.shuffle(selected_samples)
@@ -99,6 +111,8 @@ class DogDetectionDataset(Dataset):
                 # Unpack the samples and counts
                 all_samples = [s[0] for s in selected_samples]
                 all_objects_per_image = [s[1] for s in selected_samples]
+                
+                logger.info(f"Selected {len(all_samples)} samples after limiting")
             
             # Report distribution after filtering (only in debug level)
             if logger.isEnabledFor(logging.DEBUG):
@@ -174,7 +188,8 @@ class DogDetectionDataset(Dataset):
                         splits=["train", "validation"],
                         label_types=["detections"],
                         classes=["Dog", "Person"],
-                        dataset_name=dataset_name
+                        dataset_name=dataset_name,
+                        max_samples=25000  # Add max_samples parameter to limit download
                     )
                     logger.info(f"Downloaded dataset to {fo.config.dataset_zoo_dir}")
                 else:
@@ -183,8 +198,10 @@ class DogDetectionDataset(Dataset):
             # Process all samples from the dataset
             if dataset is not None:
                 logger.info(f"Processing {dataset.name} with {len(dataset)} samples")
-                all_samples = []
-                all_objects_per_image = []
+                dog_samples = []
+                person_samples = []
+                dog_object_counts = []
+                person_object_counts = []
                 
                 for sample in dataset.iter_samples():
                     if hasattr(sample, 'ground_truth') and sample.ground_truth is not None:
@@ -194,8 +211,10 @@ class DogDetectionDataset(Dataset):
                             if os.path.exists(img_path):
                                 boxes = []
                                 labels = []
+                                has_dog = False
+                                has_person = False
+                                
                                 for det in detections:
-                                    # Convert class names to indices
                                     class_idx = CLASS_NAMES.index(det.label.lower())
                                     if class_idx > 0:  # Skip background class
                                         boxes.append([
@@ -205,10 +224,49 @@ class DogDetectionDataset(Dataset):
                                             det.bounding_box[1] + det.bounding_box[3]
                                         ])
                                         labels.append(class_idx)
+                                        if class_idx == 1:  # Dog
+                                            has_dog = True
+                                        elif class_idx == 2:  # Person
+                                            has_person = True
                                 
                                 if boxes:  # Only add if we have valid detections
-                                    all_samples.append((img_path, boxes, labels))
-                                    all_objects_per_image.append(len(boxes))
+                                    sample_data = (img_path, boxes, labels)
+                                    num_objects = len(boxes)
+                                    if has_dog and not has_person:
+                                        dog_samples.append(sample_data)
+                                        dog_object_counts.append(num_objects)
+                                    elif has_person and not has_dog:
+                                        person_samples.append(sample_data)
+                                        person_object_counts.append(num_objects)
+                
+                # Balance the dataset between dogs and people
+                min_class_size = min(len(dog_samples), len(person_samples))
+                max_samples_per_class = min(min_class_size, self.max_samples // 2)  # Ensure equal split
+                
+                logger.info(f"Found {len(dog_samples)} dog samples and {len(person_samples)} person samples")
+                logger.info(f"Balancing dataset to {max_samples_per_class} samples per class")
+                
+                # Randomly sample equal numbers from each class
+                random.seed(42)  # For reproducibility
+                dog_indices = random.sample(range(len(dog_samples)), max_samples_per_class)
+                person_indices = random.sample(range(len(person_samples)), max_samples_per_class)
+                
+                all_samples = []
+                all_objects_per_image = []
+                
+                # Add balanced samples
+                for idx in dog_indices:
+                    all_samples.append(dog_samples[idx])
+                    all_objects_per_image.append(dog_object_counts[idx])
+                
+                for idx in person_indices:
+                    all_samples.append(person_samples[idx])
+                    all_objects_per_image.append(person_object_counts[idx])
+                
+                # Shuffle the combined dataset
+                combined = list(zip(all_samples, all_objects_per_image))
+                random.shuffle(combined)
+                all_samples, all_objects_per_image = zip(*combined)
                 
                 total_samples = len(all_samples)
                 if total_samples == 0:
@@ -479,7 +537,7 @@ def collate_fn(batch):
     dummy_boxes = torch.zeros((0, 4), dtype=torch.float32)
     return torch.stack([dummy_img]), torch.tensor([0]), [dummy_boxes]
 
-def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
+def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True, max_samples=25000):
     """Create data loaders for Open Images multi-class detection dataset using Albumentations for augmentation"""
     os.makedirs(root, exist_ok=True)
     logger.info(f"Using data root directory: {os.path.abspath(root)}")
@@ -549,7 +607,8 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
             root=root,
             split='train',
             transform=train_transform,
-            download=download
+            download=download,
+            max_samples=int(max_samples * TRAIN_VAL_SPLIT)  # Adjust for train split
         )
     except Exception as e:
         logger.error(f"Error creating training dataset: {e}")
@@ -561,7 +620,8 @@ def get_data_loaders(root=DATA_ROOT, batch_size=BATCH_SIZE, download=True):
             root=root,
             split='validation',
             transform=val_transform,
-            download=download
+            download=download,
+            max_samples=int(max_samples * (1 - TRAIN_VAL_SPLIT))  # Adjust for validation split
         )
     except Exception as e:
         logger.error(f"Error creating validation dataset: {e}")
